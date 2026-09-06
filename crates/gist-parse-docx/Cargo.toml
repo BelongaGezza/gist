@@ -1,5 +1,5 @@
 [package]
-name = "readrrr-model"
+name = "gist-parse-docx"
 version = "0.1.0"
 edition = "2021"
 

@@ -1,4 +1,4 @@
-# Product Specification: Cross-Platform Text Reader ("Readrrr"-type Interface)
+# Product Specification: GIST — General Import & Speed-reading Tool
 
 **Version:** 1.3
 **Status:** Draft
@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-A general-purpose reading application, in the spirit of Readrrr, that lets a user import text from a wide range of sources (documents, scanned images, and web articles) into a unified library and read it in a clean, distraction-free, customisable interface. The application is free and open source under the MIT licence. All data is stored locally on-device; there is no account system, no backend, and no cross-device sync in v1.
+A general-purpose reading application, in the spirit of Reeder, that lets a user import text from a wide range of sources (documents, scanned images, and web articles) into a unified library and read it in a clean, distraction-free, customisable interface. The application is free and open source under the MIT licence. All data is stored locally on-device; there is no account system, no backend, and no cross-device sync in v1.
 
 ### 1.1 Objectives
 - Provide frictionless import from the most common text sources people actually encounter (files, scans, web pages).
