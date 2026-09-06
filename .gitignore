@@ -19,3 +19,6 @@ DerivedData/
 .vscode/
 .idea/
 *.swp
+
+# Build artifacts
+artifacts/

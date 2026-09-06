@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+gist-model = { path = "../gist-model" }
+encoding_rs = "0.8"
+chardetng = "0.1"
+thiserror = { workspace = true }

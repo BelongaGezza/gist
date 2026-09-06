@@ -3,4 +3,14 @@ name = "gist-ffi"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
 [dependencies]
+gist-core = { path = "../gist-core" }
+gist-rsvp  = { path = "../gist-rsvp" }
+gist-store = { path = "../gist-store" }
+uniffi     = "0.32"
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }

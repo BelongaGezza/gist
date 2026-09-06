@@ -1,0 +1,44 @@
+name: GIST
+options:
+  bundleIdPrefix: com.gist
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "15"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: 5.9
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  GISTmacOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: Shared
+        type: group
+      - path: macOS
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.gist.macos
+        PRODUCT_NAME: GIST
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        INFOPLIST_FILE: macOS/Info.plist
+    dependencies: []
+    preBuildScripts:
+      - name: Generate uniffi bindings
+        script: |
+          "$SRCROOT/../../tools/gen-bindings.sh" || true
+        inputFiles: []
+        outputFiles: []
+
+  GISTTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+    dependencies:
+      - target: GISTmacOS
