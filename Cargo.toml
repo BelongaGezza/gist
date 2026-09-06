@@ -1,17 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/readrrr-model",
-    "crates/readrrr-parse-txt",
-    "crates/readrrr-parse-epub",
-    "crates/readrrr-parse-docx",
-    "crates/readrrr-parse-pdf",
-    "crates/readrrr-imageprep",
-    "crates/readrrr-web",
-    "crates/readrrr-rsvp",
-    "crates/readrrr-store",
-    "crates/readrrr-core",
-    "crates/readrrr-ffi",
+    "crates/gist-model",
+    "crates/gist-parse-txt",
+    "crates/gist-parse-epub",
+    "crates/gist-parse-docx",
+    "crates/gist-parse-pdf",
+    "crates/gist-imageprep",
+    "crates/gist-web",
+    "crates/gist-rsvp",
+    "crates/gist-store",
+    "crates/gist-core",
+    "crates/gist-ffi",
 ]
 
 [workspace.dependencies]

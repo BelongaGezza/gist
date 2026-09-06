@@ -1,5 +1,5 @@
 [package]
-name = "readrrr-parse-docx"
+name = "gist-imageprep"
 version = "0.1.0"
 edition = "2021"
 

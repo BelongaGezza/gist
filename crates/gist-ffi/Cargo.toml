@@ -1,5 +1,5 @@
 [package]
-name = "readrrr-parse-pdf"
+name = "gist-ffi"
 version = "0.1.0"
 edition = "2021"
 

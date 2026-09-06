@@ -1,4 +1,4 @@
-# Readrrr — Development Plan
+# GIST — Development Plan
 
 **Scope:** empty repo → notarised public v1.0 on macOS, with the Rust core built so iOS is a shell-only follow-on and Windows is a C-ABI follow-on.
 
@@ -24,22 +24,22 @@ See: docs/product-spec-reader-app-v3.md
 
 ### Mono-repo layout
 
-    readrrr/
+    gist/
     ├── Cargo.toml                  # workspace root
     ├── rust-toolchain.toml         # pinned stable
     ├── deny.toml                   # cargo-deny: licence allowlist
     ├── crates/
-    │   ├── readrrr-model/          # document model, IR types, serde, errors
-    │   ├── readrrr-parse-txt/
-    │   ├── readrrr-parse-epub/
-    │   ├── readrrr-parse-docx/
-    │   ├── readrrr-parse-pdf/
-    │   ├── readrrr-imageprep/      # deskew/contrast, pre-OCR
-    │   ├── readrrr-web/            # fetch + readability extraction
-    │   ├── readrrr-rsvp/           # pacing engine, pure, no I/O
-    │   ├── readrrr-store/          # SQLite schema, migrations, FTS5
-    │   ├── readrrr-core/           # facade: orchestration, import pipeline
-    │   └── readrrr-ffi/            # uniffi scaffolding, staticlib + cdylib
+    │   ├── gist-model/          # document model, IR types, serde, errors
+    │   ├── gist-parse-txt/
+    │   ├── gist-parse-epub/
+    │   ├── gist-parse-docx/
+    │   ├── gist-parse-pdf/
+    │   ├── gist-imageprep/      # deskew/contrast, pre-OCR
+    │   ├── gist-web/            # fetch + readability extraction
+    │   ├── gist-rsvp/           # pacing engine, pure, no I/O
+    │   ├── gist-store/          # SQLite schema, migrations, FTS5
+    │   ├── gist-core/           # facade: orchestration, import pipeline
+    │   └── gist-ffi/            # uniffi scaffolding, staticlib + cdylib
     ├── apps/
     │   ├── apple/
     │   │   ├── project.yml         # XcodeGen — do NOT commit .pbxproj
@@ -55,7 +55,7 @@ See: docs/product-spec-reader-app-v3.md
     ├── docs/                       # ARCHITECTURE.md, BUILDING-macos.md, FFI.md, ADRs
     └── .github/workflows/
 
-Crate boundary rule: readrrr-model has zero I/O dependencies and must
+Crate boundary rule: gist-model has zero I/O dependencies and must
 compile to wasm32-unknown-unknown cleanly.
 
 ### CI Pipelines
@@ -90,7 +90,7 @@ Vertical slice (proves architecture): model + txt + rsvp + store + ffi
 
 Complexity: S ≤ 3 days · M 1–2 weeks · L 3–5 weeks · XL 6+ weeks
 
-### 2.1 readrrr-model — M
+### 2.1 gist-model — M
 Document, Section, Block (Paragraph/Image/List/Table), TextRun, Metadata,
 OcrConfidence. Stable block IDs. Flat token stream (compute once at import,
 persist — shared by RSVP/TTS/FTS/reading-time). Annotation anchors:
@@ -98,7 +98,7 @@ persist — shared by RSVP/TTS/FTS/reading-time). Annotation anchors:
 
 Crates: serde, serde_json, thiserror, uuid (v7), unicode-segmentation
 
-### 2.2 readrrr-store — L
+### 2.2 gist-store — L
 SQLite schema + migrations, library CRUD, collections/tags/smart views,
 progress, annotations, preferences, FTS5 index, source-file management.
 WAL mode; one writer behind Mutex; small read pool. Never expose a connection
@@ -107,25 +107,25 @@ Smart views are stored predicates evaluated as SQL.
 
 Crates: rusqlite (bundled, fts5, backup), refinery or hand-rolled PRAGMA user_version
 
-### 2.3 readrrr-parse-txt — S
+### 2.3 gist-parse-txt — S
 Encoding detection + decode, paragraph inference. Ship first.
 
 Crates: encoding_rs, chardetng, encoding_rs_io
 
-### 2.4 readrrr-parse-epub — M
+### 2.4 gist-parse-epub — M
 ZIP → OPF/spine → NCX/nav TOC → XHTML → blocks. DRM detection with clear error
 (do not false-positive on IDPF font obfuscation in encryption.xml).
 
 Crates: zip, quick-xml, roxmltree, url, percent-encoding
 
-### 2.5 readrrr-parse-docx — M–L
+### 2.5 gist-parse-docx — M–L
 Heading detection is style-resolution, not tag-matching (w:pStyle → styles.xml
 → w:basedOn chain). Lists via w:numPr → numbering.xml. Tables: parse+persist
 in v1.0, flatten at render. Tracked changes: accept ins, drop del, flag.
 
 Crates: zip, quick-xml (evaluate docx-rs, expect to go direct)
 
-### 2.6 readrrr-parse-pdf — XL ⚠ Highest risk
+### 2.6 gist-parse-pdf — XL ⚠ Highest risk
 Reading-order extraction: positioned text runs → line clusters by baseline →
 column detection via whitespace-gap projection → order L→R, T→B.
 Header/footer stripping via repeated-text detection across pages.
@@ -134,7 +134,7 @@ Backend: pdfium-render (BSD-3, battle-tested, ~8–10MB libpdfium per arch).
 Avoid mupdf-rs / Poppler — AGPL/GPL, incompatible with MIT.
 Keep parser behind a trait so a pure-Rust backend remains swappable.
 
-### 2.7 readrrr-imageprep — M
+### 2.7 gist-imageprep — M
 Pre: greyscale, contrast normalisation, deskew (Hough), denoise/crop.
 Post: assemble Vision OCR output into ordered blocks with ocrConfidence[].
 Recognition itself is native (Vision) — not in this crate.
@@ -144,26 +144,26 @@ Keeps multi-page orchestration in Rust; Windows is a second trait implementation
 
 Crates: image, imageproc, rayon, fast_image_resize
 
-### 2.8 readrrr-web — M
+### 2.8 gist-web — M
 ureq + rustls (not reqwest — avoids tokio for the app's only network call).
 Readability-style extraction via scraper/html5ever. Respect robots.txt.
 Hard-stop on paywall/auth. See Q5 re: whether to move URL fetch to Swift on iOS.
 
-### 2.9 readrrr-rsvp — M
+### 2.9 gist-rsvp — M
 Token stream → timed presentation schedule. Pure std, no timers.
 Expose (state, elapsed) -> current_token. SwiftUI shell drives from CVDisplayLink.
 Pacing factors: word length, sentence-end (~1.8×), comma (~1.3×), para (~2.2×).
 WPM changes apply mid-playback (lazy per-token schedule, not precomputed).
 
-### 2.10 readrrr-core — L
+### 2.10 gist-core — L
 Import pipeline: infer type → dispatch parser → normalise → thumbnail → persist → index.
 Error taxonomy: one exhaustive enum crossing FFI, stable variants, localisation keys.
 Long-running work: ImportObserver callback interface with progress + cancellation.
 
 Crates: infer, thiserror, tracing (feature-gated, no network sink), rayon
 
-### 2.11 readrrr-ffi — L
-uniffi proc-macro mode over readrrr-core for Swift.
+### 2.11 gist-ffi — L
+uniffi proc-macro mode over gist-core for Swift.
 Coarse API surface — avoid per-item accessors; prefer paginated bulk calls.
 All FFI objects must be Send + Sync (Mutex/RwLock for interior mutability).
 Windows C ABI: #[repr(C)] surface + versioned header. Designed-for now, built later.
@@ -223,8 +223,8 @@ Can start in parallel with M3 if a third engineer is available.
 ## 5. Milestone Plan
 
 M0  Foundations & vertical slice       3 weeks
-    Workspace + crate skeleton, readrrr-model v1,
-    readrrr-parse-txt, readrrr-rsvp, minimal readrrr-store,
+    Workspace + crate skeleton, gist-model v1,
+    gist-parse-txt, gist-rsvp, minimal gist-store,
     uniffi bindings + xcframework build script,
     macOS app: import .txt → library → RSVP.
     CI: core-test + apple-build green.
@@ -235,7 +235,7 @@ M0  Foundations & vertical slice       3 weeks
 M1  Import breadth                     5 weeks
     ePub (DRM detection), DOCX, PDF reading-order,
     URL fetch + readability, OCR round-trip via Vision.
-    Full readrrr-store schema incl. FTS5.
+    Full gist-store schema incl. FTS5.
     Import pipeline: progress/cancel/error taxonomy.
     Fixture corpus + parser-corpus CI + fuzz targets.
     Exit: 50-doc mixed corpus, zero panics, ≥90% acceptable extraction.
