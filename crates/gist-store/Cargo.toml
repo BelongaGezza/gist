@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+gist-model = { path = "../gist-model" }
+rusqlite = { version = "0.31", features = ["bundled", "backup", "serde_json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+directories = "5"
+tracing = { workspace = true }

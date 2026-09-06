@@ -1,13 +1,29 @@
-# ADR 000 — Title
+# ADR-001: FFI — uniffi proc-macro mode
 
-**Date:** YYYY-MM-DD
-**Status:** Proposed | Accepted | Superseded by ADR-NNN
-
-## Context
-What is the issue that we're seeing that is motivating this decision?
+**Status:** Accepted
+**Date:** 2026-09
 
 ## Decision
-What is the change that we're proposing and/or doing?
+
+Use [uniffi](https://github.com/mozilla/uniffi-rs) 0.32 in **proc-macro mode**
+(attribute macros on Rust types) rather than a UDL file or hand-rolled C ABI.
+
+## Reasoning
+
+- UDL is a separate file that duplicates every type signature and drifts from
+  Rust types
+- Hand-rolled C ABI + Swift wrappers is weeks of ceremony and a permanent
+  maintenance tax
+- Proc-macro mode annotates the source directly; the compiler enforces
+  correctness
+- uniffi generates Swift bindings as an Xcode build phase (gitignored);
+  contributors never edit them
 
 ## Consequences
-What becomes easier or harder as a result of this change?
+
+- `gist-ffi` builds `staticlib` (linked into `.xcframework`); avoids a second
+  signed dylib
+- Windows C ABI (`extern "C"` shim) is a thin layer over core types, designed
+  now, built at Windows kickoff
+- All FFI objects must be `Send + Sync`; interior mutability behind
+  `Mutex`/`RwLock`
