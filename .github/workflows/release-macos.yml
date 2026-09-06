@@ -1,0 +1,13 @@
+name: release-macos
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build universal xcframework, sign, notarise, produce DMG
+      # Requires: APPLE_DEVELOPER_ID_CERT, APP_STORE_CONNECT_API_KEY in repo secrets
+      # See tools/build-core-xcframework.sh and tools/notarize.sh
+      - run: echo "Release pipeline — implement in M4"
