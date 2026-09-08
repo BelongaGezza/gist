@@ -1,5 +1,56 @@
 use std::path::Path;
 
+// ── Parse error (shared across image/doc parsers) ──────────────────────────
+
+/// Errors returned by format-specific parsers and pre-processors.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+    #[error("resource limit exceeded")]
+    ResourceLimitExceeded,
+}
+
+// ── OCR types ──────────────────────────────────────────────────────────────
+
+/// Per-page OCR result produced by the platform OCR engine.
+#[derive(Debug, Clone)]
+pub struct OcrPageResult {
+    /// Zero-based page index.
+    pub page_index: u32,
+    /// Extracted plain text (empty string if the page is blank).
+    pub text: String,
+    /// Confidence score 0.0–1.0 as reported by the platform OCR engine.
+    pub confidence: f32,
+}
+
+/// Abstraction over a platform OCR engine (Vision on Apple, MLKit on Android).
+///
+/// Implemented on the host side (Swift/Kotlin) and passed into the import
+/// pipeline via the FFI callback-interface bridge.  The trait is defined here
+/// in `gist-core` so that `gist-imageprep` and other crates can depend on it
+/// without creating a circular dependency through `gist-ffi`.
+pub trait OcrEngine: Send + Sync {
+    /// Recognise text on one page.
+    ///
+    /// `image_bytes` is a PNG-encoded, pre-processed page image.
+    /// Return `None` to signal cancellation.
+    fn recognize_page(&self, page_index: u32, image_bytes: Vec<u8>) -> Option<OcrPageResult>;
+}
+
+// ── Import error ────────────────────────────────────────────────────────────
+
+/// Errors that can occur during the image-import pipeline.
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("image processing: {0}")]
+    ImagePrep(#[from] ParseError),
+    #[error("store: {0}")]
+    Store(#[from] gist_store::StoreError),
+}
+
 // ── Resource limits ────────────────────────────────────────────────────────
 
 /// Shared resource-limit policy enforced by all parsers before allocation.
@@ -136,5 +187,25 @@ impl Core {
     /// Persist the current token index for `item_id`.
     pub fn save_progress(&self, item_id: &str, token_index: usize) -> Result<(), CoreError> {
         Ok(self.store.save_progress(item_id, token_index)?)
+    }
+
+    /// Import a single image file and run OCR using the provided engine.
+    ///
+    /// Phase M3 stub — the full pipeline (multi-page PDF tiling, heuristic
+    /// de-skew, layout analysis) is deferred.  For now the method signature
+    /// is stable so the FFI layer and tests can be wired up.
+    ///
+    /// Planned pipeline:
+    /// 1. Read raw bytes from `path`.
+    /// 2. Pre-process with `gist_imageprep::prepare_image` (greyscale + resize).
+    /// 3. Call `engine.recognize_page` for each page image.
+    /// 4. Assemble a [`gist_model::Document`] from the OCR text.
+    /// 5. Insert into the store and return the document.
+    pub fn import_image_with_ocr(
+        &self,
+        _path: &str,
+        _engine: &dyn OcrEngine,
+    ) -> Result<gist_model::Document, ImportError> {
+        todo!("OCR import pipeline — Phase M3")
     }
 }
