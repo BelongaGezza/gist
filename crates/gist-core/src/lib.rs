@@ -53,6 +53,8 @@ pub enum ImportError {
     Txt(String),
     #[error("image processing: {0}")]
     ImagePrep(String),
+    #[error("web fetch: {0}")]
+    Web(String),
     #[error("store: {0}")]
     Store(#[from] gist_store::StoreError),
     #[error("unsupported file type: {0}")]

@@ -3,6 +3,7 @@
 //! Policy: ADR-005 (TLS-only, 5-redirect max, 50 MB cap, 30s connect / 60s read,
 //! no cookies, robots.txt pre-check).
 
+use gist_core::ParseLimits;
 use gist_model::{Block, Document, Metadata, Section, TextRun};
 use scraper::{Html, Selector};
 use url::Url;
@@ -18,31 +19,6 @@ const MAX_REDIRECTS: u32 = 5;
 const USER_AGENT_MAIN: &str = "GIST/1.0 (+https://github.com/your-org/gist)";
 const USER_AGENT_ROBOTS: &str = "GIST/1.0";
 
-/// Resource-limit policy. Mirrors gist-core::ParseLimits so callers that already
-/// have that struct can pass the same values. Defined locally because gist-core
-/// does not yet have a Cargo.toml in the workspace.
-#[derive(Debug, Clone)]
-pub struct ParseLimits {
-    /// Maximum input file size in bytes (default 256 MB).
-    pub max_bytes: usize,
-    /// Maximum page / spine-item count (default 2 000).
-    pub max_pages: usize,
-    /// Maximum XML element nesting depth for DOCX/ePub (default 200).
-    pub max_nesting_depth: usize,
-    /// Maximum decompressed bytes for zip-based formats (default 512 MB).
-    pub max_expanded_bytes: usize,
-}
-
-impl Default for ParseLimits {
-    fn default() -> Self {
-        ParseLimits {
-            max_bytes: 256 * 1024 * 1024,
-            max_pages: 2_000,
-            max_nesting_depth: 200,
-            max_expanded_bytes: 512 * 1024 * 1024,
-        }
-    }
-}
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
