@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+gist-model  = { path = "../gist-model" }
+gist-core   = { path = "../gist-core" }   # for ParseLimits
+zip         = "2"
+quick-xml   = "0.36"
+roxmltree   = "0.20"
+url         = "2"
+percent-encoding = "2"
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
