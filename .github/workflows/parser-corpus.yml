@@ -1,0 +1,52 @@
+name: parser-corpus
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # nightly at 02:00 UTC
+  push:
+    paths:
+      - 'crates/gist-parse-*/**'
+      - 'crates/gist-web/**'
+      - 'crates/gist-core/**'
+      - 'fixtures/**'
+      - '.github/workflows/parser-corpus.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  corpus:
+    name: parser corpus — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@4305c38b25d97ef35a8ad1f985ccf33d0b9d0787  # stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c6158d  # v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-corpus-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-corpus-
+
+      - name: Run parser corpus tests
+        run: cargo test --test corpus --package gist-core -- --nocapture
+
+      - name: Upload corpus results
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        with:
+          name: corpus-results-${{ matrix.os }}
+          path: target/corpus-results/
+          if-no-files-found: ignore

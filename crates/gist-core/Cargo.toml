@@ -16,4 +16,7 @@ thiserror      = { workspace = true }
 tracing        = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile        = "3"
+gist-parse-txt  = { path = "../gist-parse-txt"  }
+gist-parse-epub = { path = "../gist-parse-epub" }
+gist-parse-docx = { path = "../gist-parse-docx" }

@@ -1,0 +1,48 @@
+[package]
+name = "gist-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gist-parse-txt  = { path = "../crates/gist-parse-txt" }
+gist-parse-epub = { path = "../crates/gist-parse-epub" }
+gist-parse-docx = { path = "../crates/gist-parse-docx" }
+gist-web        = { path = "../crates/gist-web" }
+gist-core       = { path = "../crates/gist-core" }
+
+[[bin]]
+name = "fuzz_parse_txt"
+path = "fuzz_targets/fuzz_parse_txt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_parse_epub"
+path = "fuzz_targets/fuzz_parse_epub.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_parse_docx"
+path = "fuzz_targets/fuzz_parse_docx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_web_extract"
+path = "fuzz_targets/fuzz_web_extract.rs"
+test = false
+doc = false
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
