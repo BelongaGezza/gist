@@ -21,7 +21,7 @@ pub enum StoreError {
 
 // ── Schema version ────────────────────────────────────────────────────────
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 // ── LibraryItem (lightweight row, not the full Document) ──────────────────
 
@@ -33,7 +33,7 @@ pub struct LibraryItem {
     pub source_path: Option<String>,
     pub cover_path: Option<String>,
     pub created_at: i64,
-    /// M0: not stored separately; always None.
+    // TODO M2: populate from tokens table
     pub token_count: Option<usize>,
 }
 
@@ -65,7 +65,8 @@ impl Store {
             });
         }
 
-        if version < SCHEMA_VERSION {
+        // v0 → v1: base schema
+        if version < 1 {
             conn.execute_batch(
                 "BEGIN;
                  CREATE TABLE IF NOT EXISTS library_items (
@@ -88,7 +89,36 @@ impl Store {
                  PRAGMA user_version = 1;
                  COMMIT;",
             )?;
-            tracing::info!("gist-store: migrated schema to version {}", SCHEMA_VERSION);
+            tracing::info!("gist-store: migrated schema to version 1");
+        }
+
+        // v1 → v2: FTS5 token index
+        if version < 2 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS tokens (
+                     rowid      INTEGER PRIMARY KEY,
+                     item_id    TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+                     token_idx  INTEGER NOT NULL,
+                     token_text TEXT NOT NULL
+                 );
+                 CREATE VIRTUAL TABLE IF NOT EXISTS fts_index USING fts5(
+                     token_text,
+                     content='tokens',
+                     content_rowid='rowid',
+                     tokenize='porter unicode61'
+                 );
+                 CREATE TRIGGER IF NOT EXISTS tokens_ai AFTER INSERT ON tokens BEGIN
+                     INSERT INTO fts_index(rowid, token_text) VALUES (new.rowid, new.token_text);
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS tokens_ad AFTER DELETE ON tokens BEGIN
+                     INSERT INTO fts_index(fts_index, rowid, token_text)
+                         VALUES ('delete', old.rowid, old.token_text);
+                 END;
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+            tracing::info!("gist-store: migrated schema to version 2 (FTS5 token index)");
         }
 
         Ok(Self {
@@ -97,12 +127,18 @@ impl Store {
         })
     }
 
-    /// Persist a [`gist_model::Document`] to disk (JSON blob) and index its
-    /// metadata in SQLite.
+    /// Persist a [`gist_model::Document`] to disk (JSON blob + token file) and
+    /// index its metadata and Word tokens in SQLite.
     pub fn insert_item(&self, doc: &gist_model::Document) -> Result<(), StoreError> {
+        // Write the full document blob.
         let doc_path = self.storage_dir.join(format!("{}.json", doc.id));
         let doc_json = serde_json::to_string(doc)?;
         std::fs::write(&doc_path, &doc_json)?;
+
+        // Write the token stream as a separate file for RSVP / FTS fast path.
+        let token_path = self.storage_dir.join(format!("{}.tokens.json", doc.id));
+        let tokens_json = serde_json::to_string(&doc.token_stream)?;
+        std::fs::write(&token_path, &tokens_json)?;
 
         let meta = &doc.metadata;
         // gist_model::Metadata has `author: Option<String>` — normalise to a list.
@@ -115,7 +151,9 @@ impl Store {
         let now_ms = now_millis();
 
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute(
             "INSERT OR REPLACE INTO library_items
              (id, title, authors, source_path, source_url, doc_path, cover_path,
               created_at, updated_at, metadata_json)
@@ -133,8 +171,60 @@ impl Store {
                 meta_json,
             ],
         )?;
+
+        // Index Word tokens for FTS5.
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO tokens (item_id, token_idx, token_text) VALUES (?1, ?2, ?3)",
+            )?;
+            for (idx, token) in doc.token_stream.iter().enumerate() {
+                if token.kind == gist_model::TokenKind::Word {
+                    stmt.execute(params![doc.id, idx as i64, token.text])?;
+                }
+            }
+        }
+
+        tx.commit()?;
         tracing::debug!("gist-store: inserted item {}", doc.id);
         Ok(())
+    }
+
+    /// Remove an item and all its associated files and FTS index entries.
+    /// The `tokens` table has `ON DELETE CASCADE` so token rows and FTS5 entries
+    /// are cleaned up automatically when the library_items row is deleted.
+    pub fn delete_item(&self, id: &str) -> Result<(), StoreError> {
+        // Delete JSON and token files first (best-effort; don't fail if missing).
+        let doc_path = self.storage_dir.join(format!("{}.json", id));
+        let token_path = self.storage_dir.join(format!("{}.tokens.json", id));
+        let _ = std::fs::remove_file(&doc_path);
+        let _ = std::fs::remove_file(&token_path);
+
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute("DELETE FROM library_items WHERE id = ?1", params![id])?;
+        tracing::debug!("gist-store: deleted item {}", id);
+        Ok(())
+    }
+
+    /// Full-text search across all imported document tokens.
+    /// Returns item IDs (deduplicated) ranked by FTS5 relevance.
+    pub fn search_items(&self, query: &str, limit: usize) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT t.item_id
+             FROM tokens t
+             WHERE t.rowid IN (
+                 SELECT rowid FROM fts_index WHERE token_text MATCH ?1
+             )
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![query, limit as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
     }
 
     /// Return a paginated list of library items (newest first).
@@ -170,7 +260,7 @@ impl Store {
                 source_path,
                 cover_path,
                 created_at,
-                token_count: None,
+                token_count: None, // TODO M2: populate from tokens table
             });
         }
         Ok(items)
@@ -194,6 +284,41 @@ impl Store {
                 let bytes = std::fs::read(&path)?;
                 let doc: gist_model::Document = serde_json::from_slice(&bytes)?;
                 Ok(Some(doc))
+            }
+        }
+    }
+
+    /// Load only the token stream for an item (for RSVP / TTS).
+    /// Loads from `<id>.tokens.json`; falls back to loading the full document.
+    pub fn get_tokens(&self, id: &str) -> Result<Option<Vec<gist_model::Token>>, StoreError> {
+        let doc_path: Option<String> = {
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.query_row(
+                "SELECT doc_path FROM library_items WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+
+        match doc_path {
+            None => Ok(None),
+            Some(path) => {
+                let token_path = path
+                    .strip_suffix(".json")
+                    .map(|s| format!("{}.tokens.json", s))
+                    .unwrap_or_else(|| format!("{}.tokens.json", path));
+
+                if std::path::Path::new(&token_path).exists() {
+                    let bytes = std::fs::read(&token_path)?;
+                    let tokens: Vec<gist_model::Token> = serde_json::from_slice(&bytes)?;
+                    Ok(Some(tokens))
+                } else {
+                    // Fallback: load full document and extract token stream.
+                    let bytes = std::fs::read(&path)?;
+                    let doc: gist_model::Document = serde_json::from_slice(&bytes)?;
+                    Ok(Some(doc.token_stream))
+                }
             }
         }
     }
