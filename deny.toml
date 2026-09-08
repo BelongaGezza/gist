@@ -10,3 +10,28 @@ allow = [
     "Unicode-3.0",
 ]
 deny = ["GPL-2.0", "GPL-3.0", "AGPL-3.0", "LGPL-2.0", "LGPL-3.0"]
+
+[advisories]
+# Block crates with published RUSTSEC advisories.
+# Set to "deny" to treat any advisory as a hard failure.
+version = 2
+ignore = []
+
+[bans]
+# Prevent duplicate versions of the same crate (can loosen with `allow`).
+multiple-versions = "warn"
+wildcards = "deny"          # forbid wildcard dep specs
+deny = [
+    # Forbid OpenSSL — use rustls throughout.
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    # Forbid tokio — gist-web uses ureq (sync). If tokio appears, something
+    # pulled it transitively.
+    { name = "tokio" },
+]
+
+[sources]
+# Only allow crates from crates.io; no git or path deps in the published graph.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

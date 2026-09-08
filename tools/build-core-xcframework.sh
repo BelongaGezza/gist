@@ -8,6 +8,10 @@ XCFRAMEWORK_PATH="$ARTIFACTS_DIR/GistCore.xcframework"
 
 cd "$REPO_ROOT"
 
+echo "→ Ensuring Rust cross-compilation targets are installed..."
+rustup target add aarch64-apple-darwin 2>/dev/null || true
+rustup target add x86_64-apple-darwin 2>/dev/null || true
+
 echo "→ Building gist-ffi for aarch64-apple-darwin..."
 cargo build -p gist-ffi --release --target aarch64-apple-darwin
 

@@ -120,14 +120,7 @@ pub struct Document {
 
 impl Document {
     pub fn new(metadata: Metadata, sections: Vec<Section>) -> Self {
-        let id = {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let ns = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            format!("{ns:016x}")
-        };
+        let id = uuid::Uuid::now_v7().to_string();
         let mut doc = Document {
             id,
             metadata,

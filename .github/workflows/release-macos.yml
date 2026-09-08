@@ -6,8 +6,11 @@ jobs:
   release:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       # Build universal xcframework, sign, notarise, produce DMG
       # Requires: APPLE_DEVELOPER_ID_CERT, APP_STORE_CONNECT_API_KEY in repo secrets
       # See tools/build-core-xcframework.sh and tools/notarize.sh
-      - run: echo "Release pipeline — implement in M4"
+      - name: Guard — release pipeline not yet implemented
+        run: |
+          echo "ERROR: release-macos pipeline is a stub. Implement fully in M4 before tagging a release." >&2
+          exit 1

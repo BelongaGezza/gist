@@ -31,7 +31,14 @@ targets:
     preBuildScripts:
       - name: Generate uniffi bindings
         script: |
-          "$SRCROOT/../../tools/gen-bindings.sh" || true
+          if ! "$SRCROOT/../../tools/gen-bindings.sh"; then
+            if [ ! -d "$SRCROOT/Generated" ] || [ -z "$(ls -A "$SRCROOT/Generated" 2>/dev/null)" ]; then
+              echo "error: uniffi binding generation failed and no pre-generated bindings exist." >&2
+              exit 1
+            else
+              echo "warning: uniffi binding generation failed; using cached bindings." >&2
+            fi
+          fi
         inputFiles: []
         outputFiles: []
 

@@ -15,7 +15,13 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("item not found: {0}")]
     NotFound(String),
+    #[error("database schema version {found} is newer than this app's known version {expected}; upgrade the app")]
+    SchemaTooNew { found: i64, expected: i64 },
 }
+
+// ── Schema version ────────────────────────────────────────────────────────
+
+const SCHEMA_VERSION: i64 = 1;
 
 // ── LibraryItem (lightweight row, not the full Document) ──────────────────
 
@@ -52,28 +58,37 @@ impl Store {
 
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
-        if version == 0 {
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::SchemaTooNew {
+                found: version,
+                expected: SCHEMA_VERSION,
+            });
+        }
+
+        if version < SCHEMA_VERSION {
             conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS library_items (
-                    id            TEXT PRIMARY KEY,
-                    title         TEXT,
-                    authors       TEXT,
-                    source_path   TEXT,
-                    source_url    TEXT,
-                    doc_path      TEXT NOT NULL,
-                    cover_path    TEXT,
-                    created_at    INTEGER NOT NULL,
-                    updated_at    INTEGER NOT NULL,
-                    metadata_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS reading_progress (
-                    item_id     TEXT PRIMARY KEY REFERENCES library_items(id) ON DELETE CASCADE,
-                    token_index INTEGER NOT NULL DEFAULT 0,
-                    updated_at  INTEGER NOT NULL
-                );
-                PRAGMA user_version = 1;",
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS library_items (
+                     id            TEXT PRIMARY KEY,
+                     title         TEXT,
+                     authors       TEXT,
+                     source_path   TEXT,
+                     source_url    TEXT,
+                     doc_path      TEXT NOT NULL,
+                     cover_path    TEXT,
+                     created_at    INTEGER NOT NULL,
+                     updated_at    INTEGER NOT NULL,
+                     metadata_json TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS reading_progress (
+                     item_id     TEXT PRIMARY KEY REFERENCES library_items(id) ON DELETE CASCADE,
+                     token_index INTEGER NOT NULL DEFAULT 0,
+                     updated_at  INTEGER NOT NULL
+                 );
+                 PRAGMA user_version = 1;
+                 COMMIT;",
             )?;
-            tracing::info!("gist-store: migrated schema to version 1");
+            tracing::info!("gist-store: migrated schema to version {}", SCHEMA_VERSION);
         }
 
         Ok(Self {
@@ -99,7 +114,7 @@ impl Store {
         let source_path: Option<&str> = meta.source_ref.as_deref();
         let now_ms = now_millis();
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO library_items
              (id, title, authors, source_path, source_url, doc_path, cover_path,
@@ -124,7 +139,7 @@ impl Store {
 
     /// Return a paginated list of library items (newest first).
     pub fn list_items(&self, offset: usize, limit: usize) -> Result<Vec<LibraryItem>, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, title, authors, source_path, cover_path, created_at
              FROM library_items
@@ -164,7 +179,7 @@ impl Store {
     /// Load and deserialise the full [`gist_model::Document`] for `id`.
     pub fn get_item(&self, id: &str) -> Result<Option<gist_model::Document>, StoreError> {
         let doc_path: Option<String> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
             conn.query_row(
                 "SELECT doc_path FROM library_items WHERE id = ?1",
                 params![id],
@@ -186,7 +201,7 @@ impl Store {
     /// Upsert the reading position (token index) for an item.
     pub fn save_progress(&self, item_id: &str, token_index: usize) -> Result<(), StoreError> {
         let now_ms = now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         conn.execute(
             "INSERT INTO reading_progress (item_id, token_index, updated_at)
              VALUES (?1, ?2, ?3)
@@ -200,7 +215,7 @@ impl Store {
 
     /// Return the last saved token index, or 0 if none.
     pub fn get_progress(&self, item_id: &str) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let idx: Option<i64> = conn
             .query_row(
                 "SELECT token_index FROM reading_progress WHERE item_id = ?1",
