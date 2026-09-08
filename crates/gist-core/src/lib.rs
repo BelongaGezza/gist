@@ -40,15 +40,42 @@ pub trait OcrEngine: Send + Sync {
 
 // ── Import error ────────────────────────────────────────────────────────────
 
-/// Errors that can occur during the image-import pipeline.
+/// Errors that can occur during the import pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("parse: {0}")]
+    Epub(String),
+    #[error("parse: {0}")]
+    Docx(String),
+    #[error("parse: {0}")]
+    Txt(String),
     #[error("image processing: {0}")]
-    ImagePrep(#[from] ParseError),
+    ImagePrep(String),
     #[error("store: {0}")]
     Store(#[from] gist_store::StoreError),
+    #[error("unsupported file type: {0}")]
+    UnsupportedType(String),
+    #[error("import cancelled by observer")]
+    Cancelled,
+}
+
+// ── Import observer ─────────────────────────────────────────────────────────
+
+/// Progress/cancellation callback for the import pipeline.
+pub trait ImportObserver: Send + Sync {
+    /// Called as bytes are consumed; `total` is None if unknown.
+    fn on_progress(&self, bytes_read: u64, total: Option<u64>);
+    /// Return true to request cancellation. Checked between pipeline stages.
+    fn is_cancelled(&self) -> bool;
+}
+
+/// No-op observer for callers that don't need progress events.
+pub struct NullObserver;
+impl ImportObserver for NullObserver {
+    fn on_progress(&self, _: u64, _: Option<u64>) {}
+    fn is_cancelled(&self) -> bool { false }
 }
 
 // ── Resource limits ────────────────────────────────────────────────────────
@@ -189,6 +216,74 @@ impl Core {
         Ok(self.store.save_progress(item_id, token_index)?)
     }
 
+    /// Import any supported file (ePub, DOCX, TXT) into the library.
+    ///
+    /// Type detection: magic bytes via `infer`, with file extension as fallback.
+    /// All format parsers receive the same `ParseLimits`; limits are currently
+    /// the crate default — a per-call override can be added in a later milestone.
+    ///
+    /// The observer is polled for cancellation after reading bytes and after
+    /// parsing. A cancelled import returns `ImportError::Cancelled`; no partial
+    /// data is written to the store.
+    ///
+    /// Returns the new document's id string.
+    pub fn import_file(
+        &self,
+        path: &std::path::Path,
+        observer: &dyn ImportObserver,
+    ) -> Result<String, ImportError> {
+        let bytes = std::fs::read(path)?;
+        observer.on_progress(bytes.len() as u64, Some(bytes.len() as u64));
+        if observer.is_cancelled() {
+            return Err(ImportError::Cancelled);
+        }
+
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("untitled");
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        // Magic-byte detection first, extension as fallback.
+        let mime = infer::get(&bytes).map(|t| t.mime_type()).unwrap_or("");
+
+        let limits = ParseLimits::default();
+
+        let mut doc = if mime == "application/epub+zip" || ext == "epub" {
+            gist_parse_epub::parse(&bytes, stem, &limits)
+                .map_err(|e| ImportError::Epub(e.to_string()))?
+        } else if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            || ext == "docx"
+        {
+            gist_parse_docx::parse(&bytes, stem, &limits)
+                .map_err(|e| ImportError::Docx(e.to_string()))?
+        } else if mime.starts_with("text/") || ext == "txt" || ext == "md" || ext == "text" {
+            gist_parse_txt::parse(&bytes, stem)
+                .map_err(|e| ImportError::Txt(e.to_string()))?
+        } else {
+            return Err(ImportError::UnsupportedType(ext));
+        };
+
+        if observer.is_cancelled() {
+            return Err(ImportError::Cancelled);
+        }
+
+        // Stamp source path.
+        doc.metadata.source_ref = Some(path.to_string_lossy().into_owned());
+        doc.token_stream = doc.build_token_stream();
+
+        let id = doc.id.clone();
+        self.store.insert_item(&doc)?;
+
+        tracing::info!("gist-core: imported '{}' ({}) as {}", stem, ext, id);
+        Ok(id)
+    }
+
     /// Import a single image file and run OCR using the provided engine.
     ///
     /// Phase M3 stub — the full pipeline (multi-page PDF tiling, heuristic
@@ -207,5 +302,48 @@ impl Core {
         _engine: &dyn OcrEngine,
     ) -> Result<gist_model::Document, ImportError> {
         todo!("OCR import pipeline — Phase M3")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct AlwaysCancelObserver;
+    impl ImportObserver for AlwaysCancelObserver {
+        fn on_progress(&self, _: u64, _: Option<u64>) {}
+        fn is_cancelled(&self) -> bool { true }
+    }
+
+    #[test]
+    fn unsupported_extension_returns_error() {
+        // We need a Core — use a temp dir.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let fake = dir.path().join("file.xyz");
+        std::fs::write(&fake, b"not a real document").unwrap();
+
+        let err = core.import_file(&fake, &NullObserver).unwrap_err();
+        assert!(matches!(err, ImportError::UnsupportedType(_)));
+    }
+
+    #[test]
+    fn cancellation_before_parse_returns_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("hello.txt");
+        std::fs::write(&txt, b"Hello world").unwrap();
+
+        // AlwaysCancelObserver returns is_cancelled=true immediately.
+        let err = core.import_file(&txt, &AlwaysCancelObserver).unwrap_err();
+        assert!(matches!(err, ImportError::Cancelled));
     }
 }
