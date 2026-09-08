@@ -5,9 +5,15 @@ edition = "2021"
 
 [dependencies]
 gist-model     = { path = "../gist-model" }
-gist-parse-txt = { path = "../gist-parse-txt" }
+gist-parse-txt  = { path = "../gist-parse-txt" }
+gist-parse-epub = { path = "../gist-parse-epub" }
+gist-parse-docx = { path = "../gist-parse-docx" }
+infer            = "0.15"
 gist-rsvp      = { path = "../gist-rsvp" }
 gist-store     = { path = "../gist-store" }
 serde_json     = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
