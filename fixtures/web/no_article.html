@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>No Article Element</title>
+</head>
+<body>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/blog">Blog</a>
+  </nav>
+  <main>
+    <h1>Main Content Area</h1>
+    <p>This page has a main element but no article element. The content extractor
+    should fall back to using the main element's content.</p>
+    <p>Second paragraph inside main. This should be included in the extracted
+    content since there is no article element to prefer.</p>
+    <section>
+      <h2>A Section Within Main</h2>
+      <p>Section content that is part of the main element.</p>
+    </section>
+  </main>
+</body>
+</html>

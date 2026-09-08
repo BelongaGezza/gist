@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Script Heavy Page</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; }
+    .container { max-width: 800px; }
+    nav { background: #333; color: white; }
+    footer { border-top: 1px solid #ccc; }
+  </style>
+  <style>
+    /* More CSS that should be stripped */
+    .ad-banner { display: none !important; }
+    .popup { z-index: 9999; position: fixed; }
+  </style>
+  <script>
+    // Analytics tracking — should be stripped by content extractor
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'GA-XXXXXXXXXX');
+  </script>
+  <script src="https://example.com/analytics.js"></script>
+</head>
+<body>
+  <script>
+    // Inline script in body — strip this
+    document.addEventListener('DOMContentLoaded', function() {
+      console.log('Page loaded');
+    });
+  </script>
+  <header>
+    <script>var headerVar = 'strip me';</script>
+    <h1>Script Heavy Test Page</h1>
+  </header>
+  <article>
+    <h1>Actual Article Content</h1>
+    <script>/* inline script inside article — strip */</script>
+    <p>This paragraph should survive extraction despite the surrounding scripts.</p>
+    <style>.inline-style { color: red; }</style>
+    <p>Second paragraph. Content extractors must strip script and style elements
+    while preserving the readable prose content of the page.</p>
+    <script>document.getElementById('secret').remove();</script>
+    <p>Third paragraph with normal content.</p>
+  </article>
+  <script>
+    // Footer analytics
+    setTimeout(function() { trackPageDuration(); }, 30000);
+  </script>
+  <footer>
+    <script>footer();</script>
+    <p>Footer text (should not appear in article extraction)</p>
+  </footer>
+</body>
+</html>

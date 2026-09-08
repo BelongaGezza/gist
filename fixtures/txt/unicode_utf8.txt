@@ -1,0 +1,25 @@
+# Unicode Prose Fixture
+
+## CJK (Chinese)
+你好世界。这是一段中文文字，用于测试解析器对中文字符的处理能力。
+東京は日本の首都です。日本語のテキストも含まれています。
+
+## Arabic
+مرحبا بالعالم. هذا نص عربي لاختبار الموزع في معالجة الأحرف العربية.
+اللغة العربية جميلة ومعبّرة.
+
+## Greek
+Καλημέρα κόσμε. Αυτό είναι ελληνικό κείμενο για δοκιμή του αναλυτή.
+Η ελληνική γλώσσα έχει πλούσια ιστορία.
+
+## Accented Latin
+Héllo wörld! Ça va très bien, merci. Ñoño español también está aquí.
+Fußball ist ein großartiger Sport in Deutschland.
+
+## Emoji in prose
+Reading 📚 is a wonderful 🌟 habit. Every day spent with a good book 📖
+is a day well spent. Technology 💻 and literature 🖋️ complement each other.
+
+## Mixed script paragraph
+The word café (from French) means 咖啡 in Chinese and قهوة in Arabic.
+In Greek it is καφές. Costs about €2.50 or ¥350 or ₹180.

@@ -1,0 +1,74 @@
+name: fuzz
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # nightly at 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      fuzz_time:
+        description: 'Seconds to fuzz each target'
+        required: false
+        default: '120'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: cargo-fuzz
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@4305c38b25d97ef35a8ad1f985ccf33d0b9d0787  # stable
+        with:
+          toolchain: nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Cache cargo registry
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c6158d  # v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-fuzz-
+
+      - name: Fuzz gist-parse-txt
+        run: |
+          cargo fuzz run fuzz_parse_txt -- \
+            -max_total_time=${{ github.event.inputs.fuzz_time || '120' }} \
+            -max_len=1048576
+        continue-on-error: false
+
+      - name: Fuzz gist-parse-epub
+        run: |
+          cargo fuzz run fuzz_parse_epub -- \
+            -max_total_time=${{ github.event.inputs.fuzz_time || '120' }} \
+            -max_len=1048576
+        continue-on-error: false
+
+      - name: Fuzz gist-parse-docx
+        run: |
+          cargo fuzz run fuzz_parse_docx -- \
+            -max_total_time=${{ github.event.inputs.fuzz_time || '120' }} \
+            -max_len=1048576
+        continue-on-error: false
+
+      - name: Fuzz gist-web-extract
+        run: |
+          cargo fuzz run fuzz_web_extract -- \
+            -max_total_time=${{ github.event.inputs.fuzz_time || '120' }} \
+            -max_len=65536
+        continue-on-error: false
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
