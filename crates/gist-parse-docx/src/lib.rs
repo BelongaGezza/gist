@@ -1,1 +1,723 @@
+use std::collections::HashMap;
+use std::io::Read;
 
+use quick_xml::events::Event;
+use quick_xml::Reader;
+
+// ── Error ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("zip: {0}")]
+    Zip(#[from] zip::result::ZipError),
+    #[error("xml: {0}")]
+    Xml(String),
+    #[error("resource limit exceeded: {limit} ({attempted} bytes attempted)")]
+    ResourceLimitExceeded { limit: String, attempted: usize },
+    #[error("malformed DOCX: {0}")]
+    Malformed(String),
+}
+
+// ── Public entry point ─────────────────────────────────────────────────────
+
+/// Parse a DOCX byte slice into a [`gist_model::Document`].
+///
+/// Enforces `limits` before significant allocation.
+pub fn parse(
+    bytes: &[u8],
+    stem: &str,
+    limits: &gist_core::ParseLimits,
+) -> Result<gist_model::Document, ParseError> {
+    // 1. File size limit
+    if bytes.len() > limits.max_bytes {
+        return Err(ParseError::ResourceLimitExceeded {
+            limit: format!("max_bytes={}", limits.max_bytes),
+            attempted: bytes.len(),
+        });
+    }
+
+    // 2. Open zip archive
+    let cursor = std::io::Cursor::new(bytes.to_vec());
+    let mut archive = zip::ZipArchive::new(cursor)?;
+
+    // 3. Parse styles.xml (needed for heading detection)
+    let styles = parse_styles(&mut archive, limits)?;
+
+    // 4. Parse numbering.xml (needed for list detection)
+    let numbering = parse_numbering(&mut archive, limits)?;
+
+    // 5. Parse word/document.xml (main content)
+    let (blocks, has_tracked_changes) = parse_document(&mut archive, &styles, &numbering, limits)?;
+
+    let mut metadata = gist_model::Metadata {
+        title: stem.to_string(),
+        author: None,
+        source_type: "docx".to_string(),
+        source_ref: None,
+        import_date: None,
+        language: None,
+        word_count: 0,
+    };
+
+    // Package everything into one section
+    let section = gist_model::Section {
+        id: "s0".to_string(),
+        heading: None,
+        blocks,
+    };
+
+    if has_tracked_changes {
+        // Store as a flag in source_type for now (M1); proper metadata field in M2
+        metadata.source_type = "docx:tracked-changes".to_string();
+    }
+
+    let doc = gist_model::Document::new(metadata, vec![section]);
+
+    Ok(doc)
+}
+
+// ── Styles ─────────────────────────────────────────────────────────────────
+
+/// Resolved heading level for a paragraph style (1-based, or None if not a heading).
+type StyleMap = HashMap<String, StyleEntry>;
+
+struct StyleEntry {
+    /// e.g. "Heading1", "Normal", etc. after resolving basedOn chain
+    resolved_name: String,
+    /// heading level 1-6 if this resolves to a Heading style
+    heading_level: Option<u8>,
+}
+
+fn parse_styles(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    limits: &gist_core::ParseLimits,
+) -> Result<StyleMap, ParseError> {
+    let xml = read_zip_entry_limited(archive, "word/styles.xml", limits)?;
+
+    // Build a raw map: styleId -> (w:name val, basedOn styleId)
+    // Then walk basedOn chains to resolve heading levels.
+    let mut raw: HashMap<String, (String, Option<String>)> = HashMap::new();
+
+    let mut reader = Reader::from_str(&xml);
+    let mut buf = Vec::new();
+    let mut current_style_id: Option<String> = None;
+    let mut current_name: Option<String> = None;
+    let mut current_based_on: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let tag_bytes = e.name();
+                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag_local = tag.rsplit(':').next().unwrap_or(tag);
+
+                match tag_local {
+                    "style" => {
+                        // Flush previous style entry
+                        if let Some(id) = current_style_id.take() {
+                            raw.insert(
+                                id,
+                                (
+                                    current_name.take().unwrap_or_default(),
+                                    current_based_on.take(),
+                                ),
+                            );
+                        }
+                        // Extract styleId attribute
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k_local = k.rsplit(':').next().unwrap_or(k);
+                            if k_local == "styleId" {
+                                current_style_id = Some(
+                                    std::str::from_utf8(&attr.value)
+                                        .unwrap_or("")
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    "name" => {
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k_local = k.rsplit(':').next().unwrap_or(k);
+                            if k_local == "val" {
+                                current_name = Some(
+                                    std::str::from_utf8(&attr.value)
+                                        .unwrap_or("")
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    "basedOn" => {
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k_local = k.rsplit(':').next().unwrap_or(k);
+                            if k_local == "val" {
+                                current_based_on = Some(
+                                    std::str::from_utf8(&attr.value)
+                                        .unwrap_or("")
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let tag_bytes = e.name();
+                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag_local = tag.rsplit(':').next().unwrap_or(tag);
+                if tag_local == "style" {
+                    if let Some(id) = current_style_id.take() {
+                        raw.insert(
+                            id,
+                            (
+                                current_name.take().unwrap_or_default(),
+                                current_based_on.take(),
+                            ),
+                        );
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // Resolve chains: for each style, walk basedOn until we hit a Heading N style
+    let mut result = StyleMap::new();
+    for (id, (name, _)) in &raw {
+        let heading_level = resolve_heading_level(&raw, id, 0);
+        result.insert(
+            id.clone(),
+            StyleEntry {
+                resolved_name: name.clone(),
+                heading_level,
+            },
+        );
+    }
+
+    Ok(result)
+}
+
+/// Walk the basedOn chain to find if style_id ultimately inherits from a Heading N style.
+/// Returns the heading level (1-6) or None.
+fn resolve_heading_level(
+    raw: &HashMap<String, (String, Option<String>)>,
+    style_id: &str,
+    depth: usize,
+) -> Option<u8> {
+    if depth > 20 {
+        return None; // cycle guard
+    }
+
+    let (name, based_on) = raw.get(style_id)?;
+
+    // Check if this style's name is "heading N" or "Heading N"
+    let lower = name.to_lowercase();
+    if lower.starts_with("heading") {
+        let suffix = lower["heading".len()..].trim();
+        if let Ok(n) = suffix.parse::<u8>() {
+            if (1..=6).contains(&n) {
+                return Some(n);
+            }
+        }
+    }
+
+    // Also check by styleId directly (e.g. "Heading1", "Heading2")
+    let id_lower = style_id.to_lowercase();
+    if id_lower.starts_with("heading") {
+        let suffix = id_lower["heading".len()..].trim();
+        if let Ok(n) = suffix.parse::<u8>() {
+            if (1..=6).contains(&n) {
+                return Some(n);
+            }
+        }
+    }
+
+    // Walk basedOn chain
+    if let Some(parent_id) = based_on {
+        return resolve_heading_level(raw, parent_id, depth + 1);
+    }
+
+    None
+}
+
+// ── Numbering ──────────────────────────────────────────────────────────────
+
+struct NumberingEntry {
+    is_ordered: bool,
+    #[allow(dead_code)]
+    level: usize,
+}
+
+type NumberingMap = HashMap<(String, usize), NumberingEntry>;
+
+fn parse_numbering(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    limits: &gist_core::ParseLimits,
+) -> Result<NumberingMap, ParseError> {
+    // numbering.xml may not exist in simple DOCX files
+    let xml = match read_zip_entry_limited_opt(archive, "word/numbering.xml", limits)? {
+        Some(s) => s,
+        None => return Ok(NumberingMap::new()),
+    };
+
+    // For M1: simplified heuristic.
+    // A proper implementation would walk abstractNum -> numFmt chains.
+    // Here: if w:numFmt val="bullet" -> unordered; else -> ordered.
+
+    let mut result = NumberingMap::new();
+    let mut reader = Reader::from_str(&xml);
+    let mut buf = Vec::new();
+    let mut current_num_id: Option<String> = None;
+    let mut current_level: usize = 0;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let tag_bytes = e.name();
+                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag_local = tag.rsplit(':').next().unwrap_or(tag);
+
+                match tag_local {
+                    "num" => {
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            if k.ends_with("numId") {
+                                current_num_id = Some(
+                                    std::str::from_utf8(&attr.value)
+                                        .unwrap_or("")
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    "lvl" => {
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            if k.ends_with("ilvl") {
+                                current_level = std::str::from_utf8(&attr.value)
+                                    .unwrap_or("0")
+                                    .parse()
+                                    .unwrap_or(0);
+                            }
+                        }
+                    }
+                    "numFmt" => {
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            if k.ends_with("val") {
+                                let fmt_val =
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string();
+                                if let Some(id) = &current_num_id {
+                                    let is_ordered = fmt_val != "bullet";
+                                    result.insert(
+                                        (id.clone(), current_level),
+                                        NumberingEntry {
+                                            is_ordered,
+                                            level: current_level,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(result)
+}
+
+// ── Document body parsing ──────────────────────────────────────────────────
+
+fn parse_document(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    styles: &StyleMap,
+    numbering: &NumberingMap,
+    limits: &gist_core::ParseLimits,
+) -> Result<(Vec<gist_model::Block>, bool), ParseError> {
+    let xml = read_zip_entry_limited(archive, "word/document.xml", limits)?;
+
+    let mut reader = Reader::from_str(&xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+
+    let mut blocks = Vec::new();
+    let mut has_tracked_changes = false;
+
+    // State per paragraph
+    let mut in_para = false;
+    let mut current_style_id: Option<String> = None;
+    let mut current_num_id: Option<String> = None;
+    let mut current_num_level: usize = 0;
+    let mut current_runs: Vec<gist_model::TextRun> = Vec::new();
+
+    // Run-level formatting
+    let mut run_bold = false;
+    let mut run_italic = false;
+    let mut run_code = false;
+    let mut in_run = false;
+    let mut in_del = false; // inside w:del (skip deleted text)
+    let mut nesting_depth = 0usize;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                nesting_depth += 1;
+                if nesting_depth > limits.max_nesting_depth {
+                    return Err(ParseError::ResourceLimitExceeded {
+                        limit: format!("max_nesting_depth={}", limits.max_nesting_depth),
+                        attempted: nesting_depth,
+                    });
+                }
+
+                let tag_bytes = e.name();
+                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag_local = tag.rsplit(':').next().unwrap_or(tag);
+
+                match tag_local {
+                    "p" => {
+                        if in_para {
+                            flush_para(
+                                &mut blocks,
+                                &mut current_runs,
+                                &current_style_id,
+                                &current_num_id,
+                                current_num_level,
+                                styles,
+                                numbering,
+                            );
+                        }
+                        in_para = true;
+                        current_style_id = None;
+                        current_num_id = None;
+                        current_num_level = 0;
+                        current_runs.clear();
+                    }
+                    "r" => {
+                        in_run = true;
+                        run_bold = false;
+                        run_italic = false;
+                        run_code = false;
+                    }
+                    "ins" => {
+                        has_tracked_changes = true;
+                    }
+                    "del" => {
+                        in_del = true;
+                        has_tracked_changes = true;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                // Self-closing elements: do not affect nesting_depth
+                let tag_bytes = e.name();
+                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag_local = tag.rsplit(':').next().unwrap_or(tag);
+
+                match tag_local {
+                    "pStyle" => {
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k_local = k.rsplit(':').next().unwrap_or(k);
+                            if k_local == "val" {
+                                current_style_id = Some(
+                                    std::str::from_utf8(&attr.value)
+                                        .unwrap_or("")
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    "numId" => {
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k_local = k.rsplit(':').next().unwrap_or(k);
+                            if k_local == "val" {
+                                let val = std::str::from_utf8(&attr.value)
+                                    .unwrap_or("")
+                                    .to_string();
+                                if val != "0" {
+                                    current_num_id = Some(val);
+                                }
+                            }
+                        }
+                    }
+                    "ilvl" => {
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k_local = k.rsplit(':').next().unwrap_or(k);
+                            if k_local == "val" {
+                                current_num_level = std::str::from_utf8(&attr.value)
+                                    .unwrap_or("0")
+                                    .parse()
+                                    .unwrap_or(0);
+                            }
+                        }
+                    }
+                    "b" => {
+                        if in_run {
+                            run_bold = true;
+                        }
+                    }
+                    "i" => {
+                        if in_run {
+                            run_italic = true;
+                        }
+                    }
+                    "rStyle" => {
+                        for attr in e.attributes().flatten() {
+                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k_local = k.rsplit(':').next().unwrap_or(k);
+                            if k_local == "val" {
+                                let val = std::str::from_utf8(&attr.value)
+                                    .unwrap_or("")
+                                    .to_lowercase();
+                                if val.contains("code") {
+                                    run_code = true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                nesting_depth = nesting_depth.saturating_sub(1);
+
+                let tag_bytes = e.name();
+                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag_local = tag.rsplit(':').next().unwrap_or(tag);
+
+                match tag_local {
+                    "p" => {
+                        flush_para(
+                            &mut blocks,
+                            &mut current_runs,
+                            &current_style_id,
+                            &current_num_id,
+                            current_num_level,
+                            styles,
+                            numbering,
+                        );
+                        in_para = false;
+                        current_runs.clear();
+                    }
+                    "r" => {
+                        in_run = false;
+                    }
+                    "del" => {
+                        in_del = false;
+                    }
+                    // w:b and w:i also appear as non-empty Start+End in some serialisers
+                    "b" => {
+                        if in_run {
+                            run_bold = true;
+                        }
+                    }
+                    "i" => {
+                        if in_run {
+                            run_italic = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(ref e)) => {
+                if in_del {
+                    buf.clear();
+                    continue;
+                }
+                if !in_run || !in_para {
+                    buf.clear();
+                    continue;
+                }
+
+                let text = e.unescape().unwrap_or_default();
+                if !text.is_empty() {
+                    current_runs.push(gist_model::TextRun {
+                        text: text.into_owned(),
+                        bold: run_bold,
+                        italic: run_italic,
+                        code: run_code,
+                    });
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                tracing::warn!("gist-parse-docx: XML error: {}", e);
+                break;
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // Final flush
+    if in_para {
+        flush_para(
+            &mut blocks,
+            &mut current_runs,
+            &current_style_id,
+            &current_num_id,
+            current_num_level,
+            styles,
+            numbering,
+        );
+    }
+
+    Ok((blocks, has_tracked_changes))
+}
+
+fn flush_para(
+    blocks: &mut Vec<gist_model::Block>,
+    runs: &mut Vec<gist_model::TextRun>,
+    style_id: &Option<String>,
+    num_id: &Option<String>,
+    num_level: usize,
+    styles: &StyleMap,
+    numbering: &NumberingMap,
+) {
+    let text: String = runs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("");
+    if text.trim().is_empty() {
+        runs.clear();
+        return;
+    }
+
+    // Check for list paragraph
+    if let Some(nid) = num_id {
+        let is_ordered = numbering
+            .get(&(nid.clone(), num_level))
+            .map(|e| e.is_ordered)
+            .unwrap_or(false);
+        // M1: each list paragraph becomes a single-item List block.
+        // Proper grouping of consecutive items into one List block is a M2 improvement.
+        blocks.push(gist_model::Block::List {
+            ordered: is_ordered,
+            items: vec![text.trim().to_string()],
+        });
+        runs.clear();
+        return;
+    }
+
+    // Check for heading via style resolution
+    if let Some(sid) = style_id {
+        if let Some(entry) = styles.get(sid) {
+            if let Some(level) = entry.heading_level {
+                blocks.push(gist_model::Block::Heading {
+                    level,
+                    text: text.trim().to_string(),
+                });
+                runs.clear();
+                return;
+            }
+        }
+    }
+
+    // Normal paragraph
+    blocks.push(gist_model::Block::Paragraph {
+        runs: std::mem::take(runs),
+    });
+}
+
+// ── Zip helpers ────────────────────────────────────────────────────────────
+
+fn read_zip_entry_limited(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    path: &str,
+    limits: &gist_core::ParseLimits,
+) -> Result<String, ParseError> {
+    let mut entry = archive.by_name(path).map_err(|e| match e {
+        zip::result::ZipError::FileNotFound => {
+            ParseError::Malformed(format!("required entry not found: {}", path))
+        }
+        other => ParseError::Zip(other),
+    })?;
+
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut total = 0usize;
+
+    loop {
+        let n = entry.read(&mut chunk).map_err(ParseError::Io)?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+        if total > limits.max_expanded_bytes {
+            return Err(ParseError::ResourceLimitExceeded {
+                limit: format!("max_expanded_bytes={}", limits.max_expanded_bytes),
+                attempted: total,
+            });
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+
+    String::from_utf8(buf)
+        .map_err(|_| ParseError::Malformed(format!("non-UTF-8 content in {}", path)))
+}
+
+fn read_zip_entry_limited_opt(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    path: &str,
+    limits: &gist_core::ParseLimits,
+) -> Result<Option<String>, ParseError> {
+    match archive.by_name(path) {
+        Err(zip::result::ZipError::FileNotFound) => Ok(None),
+        Err(e) => Err(ParseError::Zip(e)),
+        Ok(_) => Ok(Some(read_zip_entry_limited(archive, path, limits)?)),
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gist_core::ParseLimits;
+
+    #[test]
+    fn test_reject_oversized_file() {
+        let limits = ParseLimits {
+            max_bytes: 10,
+            ..ParseLimits::default()
+        };
+        let result = parse(&[0u8; 100], "test", &limits);
+        assert!(matches!(result, Err(ParseError::ResourceLimitExceeded { .. })));
+    }
+
+    #[test]
+    fn test_invalid_zip_returns_error() {
+        let limits = ParseLimits::default();
+        let result = parse(b"not a zip file", "test", &limits);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_heading_level_direct() {
+        let mut raw: HashMap<String, (String, Option<String>)> = HashMap::new();
+        raw.insert("Heading1".to_string(), ("heading 1".to_string(), None));
+        raw.insert("Normal".to_string(), ("Normal".to_string(), None));
+        raw.insert(
+            "MyHeading".to_string(),
+            ("My Heading".to_string(), Some("Heading1".to_string())),
+        );
+
+        assert_eq!(resolve_heading_level(&raw, "Heading1", 0), Some(1));
+        assert_eq!(resolve_heading_level(&raw, "Normal", 0), None);
+        assert_eq!(resolve_heading_level(&raw, "MyHeading", 0), Some(1));
+    }
+}
