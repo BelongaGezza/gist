@@ -28,7 +28,7 @@ pub enum ParseError {
 pub fn parse(
     bytes: &[u8],
     stem: &str,
-    limits: &gist_core::ParseLimits,
+    limits: &gist_model::ParseLimits,
 ) -> Result<gist_model::Document, ParseError> {
     // 1. File size limit
     if bytes.len() > limits.max_bytes {
@@ -92,7 +92,7 @@ struct StyleEntry {
 
 fn parse_styles(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
-    limits: &gist_core::ParseLimits,
+    limits: &gist_model::ParseLimits,
 ) -> Result<StyleMap, ParseError> {
     let xml = read_zip_entry_limited(archive, "word/styles.xml", limits)?;
 
@@ -260,7 +260,7 @@ type NumberingMap = HashMap<(String, usize), NumberingEntry>;
 
 fn parse_numbering(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
-    limits: &gist_core::ParseLimits,
+    limits: &gist_model::ParseLimits,
 ) -> Result<NumberingMap, ParseError> {
     // numbering.xml may not exist in simple DOCX files
     let xml = match read_zip_entry_limited_opt(archive, "word/numbering.xml", limits)? {
@@ -346,7 +346,7 @@ fn parse_document(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     styles: &StyleMap,
     numbering: &NumberingMap,
-    limits: &gist_core::ParseLimits,
+    limits: &gist_model::ParseLimits,
 ) -> Result<(Vec<gist_model::Block>, bool), ParseError> {
     let xml = read_zip_entry_limited(archive, "word/document.xml", limits)?;
 
@@ -638,7 +638,7 @@ fn flush_para(
 fn read_zip_entry_limited(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     path: &str,
-    limits: &gist_core::ParseLimits,
+    limits: &gist_model::ParseLimits,
 ) -> Result<String, ParseError> {
     let mut entry = archive.by_name(path).map_err(|e| match e {
         zip::result::ZipError::FileNotFound => {
@@ -673,13 +673,17 @@ fn read_zip_entry_limited(
 fn read_zip_entry_limited_opt(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     path: &str,
-    limits: &gist_core::ParseLimits,
+    limits: &gist_model::ParseLimits,
 ) -> Result<Option<String>, ParseError> {
-    match archive.by_name(path) {
-        Err(zip::result::ZipError::FileNotFound) => Ok(None),
-        Err(e) => Err(ParseError::Zip(e)),
-        Ok(_) => Ok(Some(read_zip_entry_limited(archive, path, limits)?)),
+    let exists = match archive.by_name(path) {
+        Err(zip::result::ZipError::FileNotFound) => false,
+        Err(e) => return Err(ParseError::Zip(e)),
+        Ok(_) => true,
+    };
+    if !exists {
+        return Ok(None);
     }
+    Ok(Some(read_zip_entry_limited(archive, path, limits)?))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -687,7 +691,7 @@ fn read_zip_entry_limited_opt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gist_core::ParseLimits;
+    use gist_model::ParseLimits;
 
     #[test]
     fn test_reject_oversized_file() {

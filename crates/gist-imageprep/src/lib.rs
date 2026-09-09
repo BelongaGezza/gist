@@ -2,6 +2,7 @@ use gist_core::ParseError;
 
 /// A single image page that has been pre-processed and is ready to hand to an
 /// OCR engine.
+#[derive(Debug)]
 pub struct PreparedPage {
     pub page_index: u32,
     /// PNG-encoded pre-processed image bytes, ready to send to OCR engine.

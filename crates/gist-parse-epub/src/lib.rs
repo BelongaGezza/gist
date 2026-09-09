@@ -58,7 +58,7 @@ fn check_drm(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<
 pub fn parse(
     bytes: &[u8],
     stem: &str,
-    limits: &gist_core::ParseLimits,
+    limits: &gist_model::ParseLimits,
 ) -> Result<Document, ParseError> {
     // 1. Enforce file size limit
     if bytes.len() > limits.max_bytes {
@@ -179,7 +179,7 @@ struct SpineItem {
 fn parse_spine(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     spine_items: &[SpineItem],
-    limits: &gist_core::ParseLimits,
+    limits: &gist_model::ParseLimits,
 ) -> Result<Vec<Section>, ParseError> {
     let mut sections = Vec::new();
     let mut total_expanded: usize = 0;
@@ -445,7 +445,7 @@ fn flush_block(blocks: &mut Vec<Block>, runs: &mut Vec<TextRun>, in_block: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gist_core::ParseLimits;
+    use gist_model::ParseLimits;
 
     #[test]
     fn test_parse_error_on_empty_bytes() {
