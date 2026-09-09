@@ -1,5 +1,36 @@
 use serde::{Deserialize, Serialize};
 
+// ── Resource limits ────────────────────────────────────────────────────────
+
+/// Shared resource-limit policy enforced by all parsers before allocation.
+/// Parsers receive this struct at entry and must check each limit before the
+/// corresponding allocation. Exceeding any limit returns
+/// `ParseError::ResourceLimitExceeded` without reading further input.
+#[derive(Debug, Clone)]
+pub struct ParseLimits {
+    /// Maximum input file size in bytes (default 256 MB).
+    pub max_bytes: usize,
+    /// Maximum page / spine-item count (default 2 000).
+    pub max_pages: usize,
+    /// Maximum XML element nesting depth for DOCX/ePub (default 200).
+    pub max_nesting_depth: usize,
+    /// Maximum decompressed bytes for zip-based formats during streaming
+    /// decompression (default 512 MB). Enforced *before* allocating the
+    /// full buffer — provides zip-bomb protection.
+    pub max_expanded_bytes: usize,
+}
+
+impl Default for ParseLimits {
+    fn default() -> Self {
+        ParseLimits {
+            max_bytes: 256 * 1024 * 1024,
+            max_pages: 2_000,
+            max_nesting_depth: 200,
+            max_expanded_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
 // ── Metadata ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
