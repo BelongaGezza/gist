@@ -15,5 +15,16 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }
 
+[features]
+# Pulls in uniffi's clap-based CLI so `uniffi-bindgen` can be built and
+# installed as a standalone binary (uniffi 0.28+ no longer ships one on
+# crates.io). Not enabled for the library/xcframework build.
+uniffi-bindgen-bin = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["uniffi-bindgen-bin"]
+
 [profile.release]
 panic = "abort"

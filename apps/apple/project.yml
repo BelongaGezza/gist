@@ -21,13 +21,17 @@ targets:
         type: group
       - path: macOS
         type: group
+      - path: Generated
+        type: group
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gist.macos
         PRODUCT_NAME: GIST
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         INFOPLIST_FILE: macOS/Info.plist
-    dependencies: []
+    dependencies:
+      - framework: ../../artifacts/GistCore.xcframework
+        embed: false
     preBuildScripts:
       - name: Generate uniffi bindings
         script: |
