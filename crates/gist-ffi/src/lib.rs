@@ -10,6 +10,12 @@ uniffi::setup_scaffolding!();
 pub enum GistError {
     #[error("{0}")]
     Core(String),
+    /// Kept as its own variant (uniffi's `flat_error` still preserves variant
+    /// identity even though associated data is flattened to a display
+    /// string) so Swift can switch on `.DrmProtected` for a dedicated DRM
+    /// presentation instead of parsing `Core`'s message text.
+    #[error("this document is protected by DRM and cannot be imported")]
+    DrmProtected,
     #[error("internal error")]
     InternalPanic,
 }
@@ -17,6 +23,15 @@ pub enum GistError {
 impl From<gist_core::CoreError> for GistError {
     fn from(e: gist_core::CoreError) -> Self {
         GistError::Core(e.to_string())
+    }
+}
+
+impl From<gist_core::ImportError> for GistError {
+    fn from(e: gist_core::ImportError) -> Self {
+        match e {
+            gist_core::ImportError::DrmProtected => GistError::DrmProtected,
+            other => GistError::Core(other.to_string()),
+        }
     }
 }
 
@@ -115,6 +130,16 @@ impl GistCore {
         ffi_catch!({
             self.inner
                 .import_txt(&PathBuf::from(path))
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Import any supported file (ePub, DOCX, TXT), detected by magic bytes
+    /// with extension as fallback. Returns the new item's id string.
+    pub fn import_file(&self, path: String) -> Result<String, GistError> {
+        ffi_catch!({
+            self.inner
+                .import_file(&PathBuf::from(path), &gist_core::NullObserver)
                 .map_err(GistError::from)
         })
     }

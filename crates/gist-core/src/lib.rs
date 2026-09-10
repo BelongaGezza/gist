@@ -63,6 +63,11 @@ pub enum ImportError {
     Cancelled,
     #[error("resource limit exceeded: {limit} ({attempted} bytes attempted)")]
     ResourceLimitExceeded { limit: String, attempted: usize },
+    /// Kept as a distinct variant (not folded into `Epub(String)`) so callers
+    /// across the FFI boundary can present DRM as its own UX case instead of
+    /// a generic import-failure toast, without string-matching error text.
+    #[error("this document is protected by DRM and cannot be imported")]
+    DrmProtected,
 }
 
 // ── Import observer ─────────────────────────────────────────────────────────
@@ -259,8 +264,10 @@ impl Core {
         let mime = infer::get(&bytes).map(|t| t.mime_type()).unwrap_or("");
 
         let mut doc = if mime == "application/epub+zip" || ext == "epub" {
-            gist_parse_epub::parse(&bytes, stem, &limits)
-                .map_err(|e| ImportError::Epub(e.to_string()))?
+            gist_parse_epub::parse(&bytes, stem, &limits).map_err(|e| match e {
+                gist_parse_epub::ParseError::DrmProtected => ImportError::DrmProtected,
+                other => ImportError::Epub(other.to_string()),
+            })?
         } else if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             || ext == "docx"
         {
