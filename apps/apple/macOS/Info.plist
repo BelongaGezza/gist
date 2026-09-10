@@ -15,7 +15,7 @@
     <key>NSMainStoryboardFile</key>
     <string></string>
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>26.5</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 GIST Contributors. MIT Licence.</string>
 </dict>

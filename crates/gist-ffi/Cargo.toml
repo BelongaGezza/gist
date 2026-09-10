@@ -28,5 +28,3 @@ name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 required-features = ["uniffi-bindgen-bin"]
 
-[profile.release]
-panic = "abort"
