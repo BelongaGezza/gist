@@ -31,11 +31,12 @@ fn check_drm(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<
     let mut content = String::new();
     use std::io::Read;
     let mut enc_file = enc_file;
-    enc_file.read_to_string(&mut content).map_err(ParseError::Io)?;
+    enc_file
+        .read_to_string(&mut content)
+        .map_err(ParseError::Io)?;
 
     // Parse with roxmltree and check EncryptionMethod Algorithm attributes
-    let doc = roxmltree::Document::parse(&content)
-        .map_err(|e| ParseError::Xml(e.to_string()))?;
+    let doc = roxmltree::Document::parse(&content).map_err(|e| ParseError::Xml(e.to_string()))?;
 
     const IDPF_OBFUSCATION: &str = "http://www.idpf.org/2008/embedding";
 
@@ -97,8 +98,7 @@ fn find_opf_path(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
 ) -> Result<String, ParseError> {
     let container = read_zip_entry_string(archive, "META-INF/container.xml")?;
-    let doc = roxmltree::Document::parse(&container)
-        .map_err(|e| ParseError::Xml(e.to_string()))?;
+    let doc = roxmltree::Document::parse(&container).map_err(|e| ParseError::Xml(e.to_string()))?;
     doc.descendants()
         .find(|n| n.has_tag_name("rootfile"))
         .and_then(|n| n.attribute("full-path"))
@@ -112,16 +112,17 @@ fn parse_opf(
     stem: &str,
 ) -> Result<(Metadata, Vec<SpineItem>), ParseError> {
     let opf_str = read_zip_entry_string(archive, opf_path)?;
-    let doc = roxmltree::Document::parse(&opf_str)
-        .map_err(|e| ParseError::Xml(e.to_string()))?;
+    let doc = roxmltree::Document::parse(&opf_str).map_err(|e| ParseError::Xml(e.to_string()))?;
 
     // Extract metadata
-    let title = doc.descendants()
+    let title = doc
+        .descendants()
         .find(|n| n.has_tag_name("title"))
         .map(|n| n.text().unwrap_or(stem).to_string())
         .unwrap_or_else(|| stem.to_string());
 
-    let author = doc.descendants()
+    let author = doc
+        .descendants()
         .find(|n| n.has_tag_name("creator"))
         .and_then(|n| n.text())
         .map(|s| s.to_string());
@@ -213,9 +214,9 @@ fn read_zip_entry_limited(
     max_expanded_bytes: usize,
     accumulated: &mut usize,
 ) -> Result<String, ParseError> {
-    let mut entry = archive.by_name(path).map_err(|_| {
-        ParseError::Malformed(format!("spine item not found in archive: {}", path))
-    })?;
+    let mut entry = archive
+        .by_name(path)
+        .map_err(|_| ParseError::Malformed(format!("spine item not found in archive: {}", path)))?;
 
     use std::io::Read;
     let mut buf = Vec::new();
@@ -289,13 +290,8 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
                     "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                         // Flush any pending block
                         flush_block(&mut blocks, &mut current_runs, &mut in_block);
-                        current_heading_level = Some(
-                            name.chars()
-                                .last()
-                                .unwrap()
-                                .to_digit(10)
-                                .unwrap_or(1) as u8,
-                        );
+                        current_heading_level =
+                            Some(name.chars().last().unwrap().to_digit(10).unwrap_or(1) as u8);
                         current_heading_text.clear();
                         in_block = true;
                     }
@@ -463,7 +459,10 @@ mod tests {
         };
         let dummy = vec![0u8; 100];
         let result = parse(&dummy, "test", &limits);
-        assert!(matches!(result, Err(ParseError::ResourceLimitExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(ParseError::ResourceLimitExceeded { .. })
+        ));
     }
 
     #[test]

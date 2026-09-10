@@ -61,6 +61,8 @@ pub enum ImportError {
     UnsupportedType(String),
     #[error("import cancelled by observer")]
     Cancelled,
+    #[error("resource limit exceeded: {limit} ({attempted} bytes attempted)")]
+    ResourceLimitExceeded { limit: String, attempted: usize },
 }
 
 // ── Import observer ─────────────────────────────────────────────────────────
@@ -77,7 +79,9 @@ pub trait ImportObserver: Send + Sync {
 pub struct NullObserver;
 impl ImportObserver for NullObserver {
     fn on_progress(&self, _: u64, _: Option<u64>) {}
-    fn is_cancelled(&self) -> bool { false }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 // ── Resource limits ────────────────────────────────────────────────────────
@@ -133,6 +137,19 @@ impl Core {
     /// 4. Insert into the store.
     /// 5. Return the document id.
     pub fn import_txt(&self, path: &Path) -> Result<String, CoreError> {
+        let limits = ParseLimits::default();
+
+        // Check size before reading the file into memory.
+        let declared_len = std::fs::metadata(path)?.len() as usize;
+        if declared_len > limits.max_bytes {
+            return Err(CoreError::Parse(
+                gist_parse_txt::ParseError::ResourceLimitExceeded {
+                    limit: format!("max_bytes={}", limits.max_bytes),
+                    attempted: declared_len,
+                },
+            ));
+        }
+
         let bytes = std::fs::read(path)?;
 
         let stem = path
@@ -140,7 +157,7 @@ impl Core {
             .and_then(|s| s.to_str())
             .unwrap_or("untitled");
 
-        let mut doc = gist_parse_txt::parse(&bytes, stem)?;
+        let mut doc = gist_parse_txt::parse(&bytes, stem, &limits)?;
 
         // Stamp source path into metadata.
         doc.metadata.source_ref = Some(path.to_string_lossy().into_owned());
@@ -152,7 +169,7 @@ impl Core {
         let id = doc.id.clone();
         self.store.insert_item(&doc)?;
 
-        tracing::info!("gist-core: imported '{}' as {}", stem, id);
+        tracing::debug!("gist-core: imported as {}", id);
         Ok(id)
     }
 
@@ -210,6 +227,17 @@ impl Core {
         path: &std::path::Path,
         observer: &dyn ImportObserver,
     ) -> Result<String, ImportError> {
+        let limits = ParseLimits::default();
+
+        // Check size before reading the file into memory.
+        let declared_len = std::fs::metadata(path)?.len() as usize;
+        if declared_len > limits.max_bytes {
+            return Err(ImportError::ResourceLimitExceeded {
+                limit: format!("max_bytes={}", limits.max_bytes),
+                attempted: declared_len,
+            });
+        }
+
         let bytes = std::fs::read(path)?;
         observer.on_progress(bytes.len() as u64, Some(bytes.len() as u64));
         if observer.is_cancelled() {
@@ -230,8 +258,6 @@ impl Core {
         // Magic-byte detection first, extension as fallback.
         let mime = infer::get(&bytes).map(|t| t.mime_type()).unwrap_or("");
 
-        let limits = ParseLimits::default();
-
         let mut doc = if mime == "application/epub+zip" || ext == "epub" {
             gist_parse_epub::parse(&bytes, stem, &limits)
                 .map_err(|e| ImportError::Epub(e.to_string()))?
@@ -241,7 +267,7 @@ impl Core {
             gist_parse_docx::parse(&bytes, stem, &limits)
                 .map_err(|e| ImportError::Docx(e.to_string()))?
         } else if mime.starts_with("text/") || ext == "txt" || ext == "md" || ext == "text" {
-            gist_parse_txt::parse(&bytes, stem)
+            gist_parse_txt::parse(&bytes, stem, &limits)
                 .map_err(|e| ImportError::Txt(e.to_string()))?
         } else {
             return Err(ImportError::UnsupportedType(ext));
@@ -258,7 +284,7 @@ impl Core {
         let id = doc.id.clone();
         self.store.insert_item(&doc)?;
 
-        tracing::info!("gist-core: imported '{}' ({}) as {}", stem, ext, id);
+        tracing::debug!("gist-core: imported as {}", id);
         Ok(id)
     }
 
@@ -290,7 +316,9 @@ mod tests {
     struct AlwaysCancelObserver;
     impl ImportObserver for AlwaysCancelObserver {
         fn on_progress(&self, _: u64, _: Option<u64>) {}
-        fn is_cancelled(&self) -> bool { true }
+        fn is_cancelled(&self) -> bool {
+            true
+        }
     }
 
     #[test]

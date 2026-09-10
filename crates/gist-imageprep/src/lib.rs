@@ -28,8 +28,8 @@ pub fn prepare_image(
     raw_bytes: &[u8],
     limits: &gist_core::ParseLimits,
 ) -> Result<PreparedPage, ParseError> {
-    let img = image::load_from_memory(raw_bytes)
-        .map_err(|e| ParseError::InvalidInput(e.to_string()))?;
+    let img =
+        image::load_from_memory(raw_bytes).map_err(|e| ParseError::InvalidInput(e.to_string()))?;
 
     let max_pixels = limits.max_expanded_bytes / 4;
     let pixel_count = (img.width() as usize) * (img.height() as usize);

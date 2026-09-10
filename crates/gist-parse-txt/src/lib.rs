@@ -1,15 +1,25 @@
-use gist_model::{Block, Document, Metadata, Section, TextRun};
+use gist_model::{Block, Document, Metadata, ParseLimits, Section, TextRun};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("utf-8 decode error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
+    #[error("resource limit exceeded: {limit} ({attempted} bytes attempted)")]
+    ResourceLimitExceeded { limit: String, attempted: usize },
 }
 
 /// Parse a raw `.txt` byte slice into a [`Document`].
 ///
 /// `stem` is used as the document title.
-pub fn parse(bytes: &[u8], stem: &str) -> Result<Document, ParseError> {
+/// `limits` must be checked before significant allocation.
+pub fn parse(bytes: &[u8], stem: &str, limits: &ParseLimits) -> Result<Document, ParseError> {
+    if bytes.len() > limits.max_bytes {
+        return Err(ParseError::ResourceLimitExceeded {
+            limit: format!("max_bytes={}", limits.max_bytes),
+            attempted: bytes.len(),
+        });
+    }
+
     let text = std::str::from_utf8(bytes)?;
 
     // Split into paragraphs on blank lines.

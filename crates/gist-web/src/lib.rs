@@ -19,7 +19,6 @@ const MAX_REDIRECTS: u32 = 5;
 const USER_AGENT_MAIN: &str = "GIST/1.0 (+https://github.com/your-org/gist)";
 const USER_AGENT_ROBOTS: &str = "GIST/1.0";
 
-
 // ── Error ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -45,8 +44,8 @@ pub enum ParseError {
 /// 30 s connect / 60 s read timeouts, no cookies, robots.txt pre-check.
 pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseError> {
     // 1. Parse URL.
-    let parsed = Url::parse(raw_url)
-        .map_err(|e| ParseError::InvalidInput(format!("URL parse: {}", e)))?;
+    let parsed =
+        Url::parse(raw_url).map_err(|e| ParseError::InvalidInput(format!("URL parse: {}", e)))?;
 
     // 2. Enforce HTTPS.
     if parsed.scheme() != "https" {
@@ -62,20 +61,17 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
         parsed.host_str().unwrap_or("")
     );
     let robots_agent = build_agent();
-    match robots_agent
+    // 4xx/5xx or network error → treat as allowed (ADR-005).
+    if let Ok(resp) = robots_agent
         .get(&robots_url)
         .set("User-Agent", USER_AGENT_ROBOTS)
         .call()
     {
-        Ok(resp) => {
-            let body = read_limited(resp.into_reader(), 512 * 1024).unwrap_or_default();
-            let text = String::from_utf8_lossy(&body);
-            if is_path_disallowed(&text, parsed.path()) {
-                return Err(ParseError::RobotsDisallowed);
-            }
+        let body = read_limited(resp.into_reader(), 512 * 1024).unwrap_or_default();
+        let text = String::from_utf8_lossy(&body);
+        if is_path_disallowed(&text, parsed.path()) {
+            return Err(ParseError::RobotsDisallowed);
         }
-        // 4xx/5xx or network error → treat as allowed (ADR-005).
-        Err(_) => {}
     }
 
     // 4. Build agent for main request.
@@ -91,9 +87,7 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
                 // Redirect limit exceeded — ureq surfaces it as a 3xx status error.
                 ParseError::ResourceLimitExceeded
             }
-            ureq::Error::Status(code, _) => {
-                ParseError::InvalidInput(format!("HTTP {}", code))
-            }
+            ureq::Error::Status(code, _) => ParseError::InvalidInput(format!("HTTP {}", code)),
             _ => ParseError::InvalidInput(e.to_string()),
         })?;
 
@@ -218,9 +212,32 @@ const SKIP_TAGS: &[&str] = &[
 
 /// Tags that flush the current inline text run into a paragraph.
 const BLOCK_TAGS: &[&str] = &[
-    "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre",
-    "section", "article", "main", "figure", "figcaption", "table", "tr", "td", "th",
-    "ul", "ol", "dl", "dt", "dd", "br",
+    "p",
+    "div",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
+    "blockquote",
+    "pre",
+    "section",
+    "article",
+    "main",
+    "figure",
+    "figcaption",
+    "table",
+    "tr",
+    "td",
+    "th",
+    "ul",
+    "ol",
+    "dl",
+    "dt",
+    "dd",
+    "br",
 ];
 
 /// Build a `Document` from raw HTML, without any network access.
@@ -299,11 +316,7 @@ fn flush(current: &mut String, paragraphs: &mut Vec<String>) {
     current.clear();
 }
 
-fn collect_text(
-    el: scraper::ElementRef<'_>,
-    current: &mut String,
-    paragraphs: &mut Vec<String>,
-) {
+fn collect_text(el: scraper::ElementRef<'_>, current: &mut String, paragraphs: &mut Vec<String>) {
     use scraper::node::Node;
 
     for child in el.children() {
@@ -444,16 +457,24 @@ mod tests {
         let doc = build_document(html, "https://example.com/page");
 
         assert_eq!(doc.metadata.title, "My Test Page");
-        assert_eq!(doc.metadata.source_ref.as_deref(), Some("https://example.com/page"));
+        assert_eq!(
+            doc.metadata.source_ref.as_deref(),
+            Some("https://example.com/page")
+        );
 
         // At least one paragraph block.
         let blocks = &doc.sections[0].blocks;
         assert!(!blocks.is_empty(), "expected at least one block");
 
-        let all_text: String = blocks.iter().map(|b| b.plain_text()).collect::<Vec<_>>().join(" ");
+        let all_text: String = blocks
+            .iter()
+            .map(|b| b.plain_text())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
             all_text.contains("First paragraph"),
-            "expected article text in output, got: {:?}", all_text
+            "expected article text in output, got: {:?}",
+            all_text
         );
     }
 
@@ -474,7 +495,11 @@ mod tests {
 
         let doc = build_document(html, "https://example.com/strip");
         let blocks = &doc.sections[0].blocks;
-        let all_text: String = blocks.iter().map(|b| b.plain_text()).collect::<Vec<_>>().join(" ");
+        let all_text: String = blocks
+            .iter()
+            .map(|b| b.plain_text())
+            .collect::<Vec<_>>()
+            .join(" ");
 
         assert!(
             all_text.contains("Real content"),
@@ -482,15 +507,18 @@ mod tests {
         );
         assert!(
             !all_text.contains("Navigation link"),
-            "nav text must be stripped, got: {:?}", all_text
+            "nav text must be stripped, got: {:?}",
+            all_text
         );
         assert!(
             !all_text.contains("injected"),
-            "script text must be stripped, got: {:?}", all_text
+            "script text must be stripped, got: {:?}",
+            all_text
         );
         assert!(
             !all_text.contains("Footer text"),
-            "footer text must be stripped, got: {:?}", all_text
+            "footer text must be stripped, got: {:?}",
+            all_text
         );
     }
 

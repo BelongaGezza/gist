@@ -8,8 +8,14 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
+    # File-level copyleft only (not project-wide) — required transitively by
+    # uniffi (ADR-001's mandated FFI layer) and by scraper (ADR-005 web
+    # readability extraction). Accepted per architect decision 2026-09-10.
+    "MPL-2.0",
 ]
-deny = ["GPL-2.0", "GPL-3.0", "AGPL-3.0", "LGPL-2.0", "LGPL-3.0"]
+# Anything not in `allow` above is rejected by default — this is what keeps
+# GPL-2.0/GPL-3.0/AGPL-3.0/LGPL-2.0/LGPL-3.0 out (cargo-deny >=0.14 removed
+# the `licenses.deny` key; an allow-list alone enforces the same policy).
 
 [advisories]
 # Block crates with published RUSTSEC advisories.
@@ -21,6 +27,10 @@ ignore = []
 # Prevent duplicate versions of the same crate (can loosen with `allow`).
 multiple-versions = "warn"
 wildcards = "deny"          # forbid wildcard dep specs
+# In-workspace `path = "../x"` deps have no `version =`, which Cargo treats
+# as an implicit "*" requirement — this permits that for path/git deps only,
+# while still catching a genuine `foo = "*"` crates.io wildcard dependency.
+allow-wildcard-paths = true
 deny = [
     # Forbid OpenSSL — use rustls throughout.
     { name = "openssl" },
