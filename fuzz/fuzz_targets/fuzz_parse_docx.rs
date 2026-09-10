@@ -19,5 +19,5 @@ fuzz_target!(|data: &[u8]| {
     // The parser should NEVER panic on any input.
     // Errors are acceptable — panics are not.
     let limits = fuzz_limits();
-    let _ = gist_parse_docx::parse(data, &limits);
+    let _ = gist_parse_docx::parse(data, "fuzz", &limits);
 });

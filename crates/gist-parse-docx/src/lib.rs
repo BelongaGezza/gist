@@ -84,8 +84,6 @@ pub fn parse(
 type StyleMap = HashMap<String, StyleEntry>;
 
 struct StyleEntry {
-    /// e.g. "Heading1", "Normal", etc. after resolving basedOn chain
-    resolved_name: String,
     /// heading level 1-6 if this resolves to a Heading style
     heading_level: Option<u8>,
 }
@@ -131,9 +129,7 @@ fn parse_styles(
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "styleId" {
                                 current_style_id = Some(
-                                    std::str::from_utf8(&attr.value)
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
                                 );
                             }
                         }
@@ -144,9 +140,7 @@ fn parse_styles(
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
                                 current_name = Some(
-                                    std::str::from_utf8(&attr.value)
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
                                 );
                             }
                         }
@@ -157,9 +151,7 @@ fn parse_styles(
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
                                 current_based_on = Some(
-                                    std::str::from_utf8(&attr.value)
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
                                 );
                             }
                         }
@@ -191,15 +183,9 @@ fn parse_styles(
 
     // Resolve chains: for each style, walk basedOn until we hit a Heading N style
     let mut result = StyleMap::new();
-    for (id, (name, _)) in &raw {
+    for id in raw.keys() {
         let heading_level = resolve_heading_level(&raw, id, 0);
-        result.insert(
-            id.clone(),
-            StyleEntry {
-                resolved_name: name.clone(),
-                heading_level,
-            },
-        );
+        result.insert(id.clone(), StyleEntry { heading_level });
     }
 
     Ok(result)
@@ -220,8 +206,8 @@ fn resolve_heading_level(
 
     // Check if this style's name is "heading N" or "Heading N"
     let lower = name.to_lowercase();
-    if lower.starts_with("heading") {
-        let suffix = lower["heading".len()..].trim();
+    if let Some(suffix) = lower.strip_prefix("heading") {
+        let suffix = suffix.trim();
         if let Ok(n) = suffix.parse::<u8>() {
             if (1..=6).contains(&n) {
                 return Some(n);
@@ -231,8 +217,8 @@ fn resolve_heading_level(
 
     // Also check by styleId directly (e.g. "Heading1", "Heading2")
     let id_lower = style_id.to_lowercase();
-    if id_lower.starts_with("heading") {
-        let suffix = id_lower["heading".len()..].trim();
+    if let Some(suffix) = id_lower.strip_prefix("heading") {
+        let suffix = suffix.trim();
         if let Ok(n) = suffix.parse::<u8>() {
             if (1..=6).contains(&n) {
                 return Some(n);
@@ -291,9 +277,7 @@ fn parse_numbering(
                             let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
                             if k.ends_with("numId") {
                                 current_num_id = Some(
-                                    std::str::from_utf8(&attr.value)
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
                                 );
                             }
                         }
@@ -435,9 +419,7 @@ fn parse_document(
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
                                 current_style_id = Some(
-                                    std::str::from_utf8(&attr.value)
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
                                 );
                             }
                         }
@@ -447,9 +429,8 @@ fn parse_document(
                             let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
-                                let val = std::str::from_utf8(&attr.value)
-                                    .unwrap_or("")
-                                    .to_string();
+                                let val =
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string();
                                 if val != "0" {
                                     current_num_id = Some(val);
                                 }
@@ -591,7 +572,11 @@ fn flush_para(
     styles: &StyleMap,
     numbering: &NumberingMap,
 ) {
-    let text: String = runs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("");
+    let text: String = runs
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("");
     if text.trim().is_empty() {
         runs.clear();
         return;
@@ -700,7 +685,10 @@ mod tests {
             ..ParseLimits::default()
         };
         let result = parse(&[0u8; 100], "test", &limits);
-        assert!(matches!(result, Err(ParseError::ResourceLimitExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(ParseError::ResourceLimitExceeded { .. })
+        ));
     }
 
     #[test]

@@ -121,12 +121,12 @@ fn stem_of(path: &Path) -> String {
 // Err(()) = panic detected.
 // ---------------------------------------------------------------------------
 
-/// txt: `gist_parse_txt::parse(bytes, stem)` — no ParseLimits parameter.
-fn run_parse_txt(bytes: Vec<u8>, stem: String) -> Result<bool, ()> {
-    match panic::catch_unwind(move || gist_parse_txt::parse(&bytes, &stem)) {
+/// txt: `gist_parse_txt::parse(bytes, stem, limits)`.
+fn run_parse_txt(bytes: Vec<u8>, stem: String, limits: ParseLimits) -> Result<bool, ()> {
+    match panic::catch_unwind(move || gist_parse_txt::parse(&bytes, &stem, &limits)) {
         Ok(Ok(doc)) => Ok(!doc.sections.is_empty()),
-        Ok(Err(_e))  => Ok(false), // recognised error
-        Err(_)       => Err(()),   // panic
+        Ok(Err(_e)) => Ok(false), // recognised error
+        Err(_) => Err(()),        // panic
     }
 }
 
@@ -134,8 +134,8 @@ fn run_parse_txt(bytes: Vec<u8>, stem: String) -> Result<bool, ()> {
 fn run_parse_epub(bytes: Vec<u8>, stem: String, limits: ParseLimits) -> Result<bool, ()> {
     match panic::catch_unwind(move || gist_parse_epub::parse(&bytes, &stem, &limits)) {
         Ok(Ok(doc)) => Ok(!doc.sections.is_empty()),
-        Ok(Err(_e))  => Ok(false),
-        Err(_)       => Err(()),
+        Ok(Err(_e)) => Ok(false),
+        Err(_) => Err(()),
     }
 }
 
@@ -143,8 +143,8 @@ fn run_parse_epub(bytes: Vec<u8>, stem: String, limits: ParseLimits) -> Result<b
 fn run_parse_docx(bytes: Vec<u8>, stem: String, limits: ParseLimits) -> Result<bool, ()> {
     match panic::catch_unwind(move || gist_parse_docx::parse(&bytes, &stem, &limits)) {
         Ok(Ok(doc)) => Ok(!doc.sections.is_empty()),
-        Ok(Err(_e))  => Ok(false),
-        Err(_)       => Err(()),
+        Ok(Err(_e)) => Ok(false),
+        Err(_) => Err(()),
     }
 }
 
@@ -177,13 +177,20 @@ fn process_file(
         }
         Ok(non_empty) => {
             if !adversarial && !non_empty {
-                println!("  [warn  ] {} — Ok but no sections (check fixture)", rel.display());
+                println!(
+                    "  [warn  ] {} — Ok but no sections (check fixture)",
+                    rel.display()
+                );
                 counts.record_ok(false); // ok_empty
             } else {
                 println!(
                     "  [ok    ] {} — {}",
                     rel.display(),
-                    if non_empty { "non-empty" } else { "empty/err (adversarial)" }
+                    if non_empty {
+                        "non-empty"
+                    } else {
+                        "empty/err (adversarial)"
+                    }
                 );
                 if non_empty {
                     counts.record_ok(true);
@@ -216,7 +223,7 @@ fn corpus_no_panics() {
 
     let limits = ParseLimits::default();
 
-    let mut txt_counts  = Counts::default();
+    let mut txt_counts = Counts::default();
     let mut epub_counts = Counts::default();
     let mut docx_counts = Counts::default();
 
@@ -228,8 +235,9 @@ fn corpus_no_panics() {
     println!("--- txt ---");
     for path in collect_files(&fixtures.join("txt")) {
         let stem = stem_of(&path);
+        let lim = limits.clone();
         process_file(&path, &fixtures, &mut txt_counts, |bytes| {
-            run_parse_txt(bytes, stem)
+            run_parse_txt(bytes, stem, lim)
         });
     }
 
@@ -238,8 +246,8 @@ fn corpus_no_panics() {
     // -----------------------------------------------------------------------
     println!("\n--- epub ---");
     for path in collect_files(&fixtures.join("epub")) {
-        let stem  = stem_of(&path);
-        let lim   = limits.clone();
+        let stem = stem_of(&path);
+        let lim = limits.clone();
         process_file(&path, &fixtures, &mut epub_counts, |bytes| {
             run_parse_epub(bytes, stem, lim)
         });
@@ -250,8 +258,8 @@ fn corpus_no_panics() {
     // -----------------------------------------------------------------------
     println!("\n--- docx ---");
     for path in collect_files(&fixtures.join("docx")) {
-        let stem  = stem_of(&path);
-        let lim   = limits.clone();
+        let stem = stem_of(&path);
+        let lim = limits.clone();
         process_file(&path, &fixtures, &mut docx_counts, |bytes| {
             run_parse_docx(bytes, stem, lim)
         });
@@ -265,7 +273,9 @@ fn corpus_no_panics() {
     // tests that can reach the network.
     // -----------------------------------------------------------------------
     println!("\n--- web ---");
-    println!("  [skip  ] web corpus requires live network — see fuzz/fuzz_targets/fuzz_web_extract.rs");
+    println!(
+        "  [skip  ] web corpus requires live network — see fuzz/fuzz_targets/fuzz_web_extract.rs"
+    );
 
     // -----------------------------------------------------------------------
     // Summary
@@ -273,18 +283,27 @@ fn corpus_no_panics() {
     println!("\n=== Summary ===");
     println!(
         "txt:  total={} ok={} ok-but-empty={} err={} PANICS={}",
-        txt_counts.total, txt_counts.ok, txt_counts.ok_empty,
-        txt_counts.err_recognised, txt_counts.panicked
+        txt_counts.total,
+        txt_counts.ok,
+        txt_counts.ok_empty,
+        txt_counts.err_recognised,
+        txt_counts.panicked
     );
     println!(
         "epub: total={} ok={} ok-but-empty={} err={} PANICS={}",
-        epub_counts.total, epub_counts.ok, epub_counts.ok_empty,
-        epub_counts.err_recognised, epub_counts.panicked
+        epub_counts.total,
+        epub_counts.ok,
+        epub_counts.ok_empty,
+        epub_counts.err_recognised,
+        epub_counts.panicked
     );
     println!(
         "docx: total={} ok={} ok-but-empty={} err={} PANICS={}",
-        docx_counts.total, docx_counts.ok, docx_counts.ok_empty,
-        docx_counts.err_recognised, docx_counts.panicked
+        docx_counts.total,
+        docx_counts.ok,
+        docx_counts.ok_empty,
+        docx_counts.err_recognised,
+        docx_counts.panicked
     );
 
     // -----------------------------------------------------------------------
@@ -293,8 +312,7 @@ fn corpus_no_panics() {
     let total_panics = txt_counts.panicked + epub_counts.panicked + docx_counts.panicked;
 
     assert_eq!(
-        total_panics,
-        0,
+        total_panics, 0,
         "\n*** CORPUS FAILURE: {} parser panic(s) detected ***\n\
          Every parser must handle arbitrary bytes without panicking.\n\
          See the [PANIC] lines above for which fixtures triggered panics.\n",
@@ -321,7 +339,9 @@ fn write_corpus_results(txt: &Counts, epub: &Counts, docx: &Counts) {
         .map(|root| root.join("target").join("corpus-results"));
 
     let Some(out_dir) = target_dir else { return };
-    if std::fs::create_dir_all(&out_dir).is_err() { return; }
+    if std::fs::create_dir_all(&out_dir).is_err() {
+        return;
+    }
 
     let json = format!(
         r#"{{
@@ -330,9 +350,21 @@ fn write_corpus_results(txt: &Counts, epub: &Counts, docx: &Counts) {
   "docx": {{ "total": {}, "ok": {}, "ok_empty": {}, "err": {}, "panics": {} }}
 }}
 "#,
-        txt.total,  txt.ok,  txt.ok_empty,  txt.err_recognised,  txt.panicked,
-        epub.total, epub.ok, epub.ok_empty, epub.err_recognised, epub.panicked,
-        docx.total, docx.ok, docx.ok_empty, docx.err_recognised, docx.panicked,
+        txt.total,
+        txt.ok,
+        txt.ok_empty,
+        txt.err_recognised,
+        txt.panicked,
+        epub.total,
+        epub.ok,
+        epub.ok_empty,
+        epub.err_recognised,
+        epub.panicked,
+        docx.total,
+        docx.ok,
+        docx.ok_empty,
+        docx.err_recognised,
+        docx.panicked,
     );
 
     let _ = std::fs::write(out_dir.join("summary.json"), json);

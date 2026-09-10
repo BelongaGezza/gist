@@ -217,9 +217,7 @@ impl Store {
              )
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![query, limit as i64], |row| {
-            row.get::<_, String>(0)
-        })?;
+        let rows = stmt.query_map(params![query, limit as i64], |row| row.get::<_, String>(0))?;
         let mut ids = Vec::new();
         for row in rows {
             ids.push(row?);
