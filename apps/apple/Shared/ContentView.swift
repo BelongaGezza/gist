@@ -7,10 +7,12 @@ struct ContentView: View {
         NavigationSplitView {
             SidebarView()
         } detail: {
-            LibraryView()
-                .navigationDestination(for: String.self) { itemId in
-                    RsvpView(itemId: itemId)
-                }
+            NavigationStack {
+                LibraryView()
+                    .navigationDestination(for: String.self) { itemId in
+                        RsvpView(itemId: itemId)
+                    }
+            }
         }
         .task { await core.refresh() }
     }
