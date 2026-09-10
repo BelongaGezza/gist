@@ -9,6 +9,10 @@ final class CoreClient: ObservableObject {
     @Published var items: [LibraryItemVM] = []
     @Published var isLoading = false
     @Published var error: String?
+    /// Set (instead of `error`) when an import fails specifically because the
+    /// source file is DRM-protected, so the view layer can present a
+    /// dedicated DRM alert rather than a generic import-failure message.
+    @Published var drmProtectedFile: URL?
 
     private let core: GistCore?
 
@@ -51,10 +55,21 @@ final class CoreClient: ObservableObject {
         }
     }
 
-    func importTxt(url: URL) async {
+    /// Import any supported file (txt, epub, docx) via the generic FFI
+    /// import path, which sniffs the format from magic bytes / extension.
+    func importFile(url: URL) async {
         guard let core else { return }
+        drmProtectedFile = nil
         do {
-            _ = try core.importTxt(path: url.path)
+            _ = try core.importFile(path: url.path)
+            error = nil
+        } catch let gistError as GistError {
+            switch gistError {
+            case .DrmProtected:
+                drmProtectedFile = url
+            case .Core, .InternalPanic:
+                error = "\(gistError)"
+            }
         } catch {
             self.error = "\(error)"
         }
