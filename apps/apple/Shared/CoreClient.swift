@@ -75,6 +75,34 @@ final class CoreClient: ObservableObject {
         }
         await refresh()
     }
+
+    /// Fetches an RSVP session for `itemId` and decodes it. `startRsvp` is a
+    /// one-shot FFI call — the returned token stream and pacing config are
+    /// then driven entirely client-side by `RsvpPlayer` (see RsvpView.swift),
+    /// per the "SwiftUI shell drives it" model documented on
+    /// `gist_rsvp::RsvpSession`. Returns `nil` on failure and sets `error`.
+    func startRsvp(itemId: String, wpm: UInt32) async -> RsvpSessionVM? {
+        guard let core else { return nil }
+        do {
+            let json = try core.startRsvp(itemId: itemId, wpm: wpm)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(RsvpSessionVM.self, from: Data(json.utf8))
+        } catch {
+            self.error = "\(error)"
+            return nil
+        }
+    }
+
+    /// Persists the current token index so playback can resume later.
+    func saveProgress(itemId: String, tokenIndex: Int) async {
+        guard let core else { return }
+        do {
+            try core.saveProgress(itemId: itemId, tokenIndex: UInt64(tokenIndex))
+        } catch {
+            self.error = "\(error)"
+        }
+    }
 }
 
 struct LibraryItemVM: Identifiable {

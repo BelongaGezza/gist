@@ -8,6 +8,9 @@ struct ContentView: View {
             SidebarView()
         } detail: {
             LibraryView()
+                .navigationDestination(for: String.self) { itemId in
+                    RsvpView(itemId: itemId)
+                }
         }
         .task { await core.refresh() }
     }
