@@ -2,8 +2,8 @@ name: GIST
 options:
   bundleIdPrefix: com.gist
   deploymentTarget:
-    macOS: "14.0"
-  xcodeVersion: "15"
+    macOS: "26.5"
+  xcodeVersion: "16"
   generateEmptyDirectories: true
 
 settings:
@@ -27,14 +27,20 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gist.macos
         PRODUCT_NAME: GIST
-        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        MACOSX_DEPLOYMENT_TARGET: "26.5"
         INFOPLIST_FILE: macOS/Info.plist
+        # Disable Xcode 14+ script sandboxing so the pre-build script can
+        # read the Generated/ directory and check for cached bindings.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
     dependencies:
       - framework: ../../artifacts/GistCore.xcframework
         embed: false
     preBuildScripts:
       - name: Generate uniffi bindings
         script: |
+          # Ensure cargo is on PATH (Xcode's build environment omits ~/.cargo/bin)
+          export PATH="$HOME/.cargo/bin:$PATH"
+
           if ! "$SRCROOT/../../tools/gen-bindings.sh"; then
             if [ ! -d "$SRCROOT/Generated" ] || [ -z "$(ls -A "$SRCROOT/Generated" 2>/dev/null)" ]; then
               echo "error: uniffi binding generation failed and no pre-generated bindings exist." >&2
@@ -43,6 +49,7 @@ targets:
               echo "warning: uniffi binding generation failed; using cached bindings." >&2
             fi
           fi
+        basedOnDependencyAnalysis: false
         inputFiles: []
         outputFiles: []
 
