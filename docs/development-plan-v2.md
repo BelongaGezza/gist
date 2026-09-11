@@ -219,7 +219,8 @@ Phase C:          ├──> web
 - `SCHEMA_VERSION = 2`. Migration v1→v2: `tokens` shadow table + `fts_index` FTS5 virtual table (`porter unicode61`) + sync triggers. `[A1]` ✅
 - Version ceiling check: returns `StoreError::SchemaTooNew` if `user_version > SCHEMA_VERSION`. `[F11]` ✅
 - `insert_item`: writes `.tokens.json` + indexes Word tokens in same transaction.
-- `delete_item`: removes metadata record, annotations, bookmarks, reading progress, and FTS5 index entries for the item in a single transaction. Source file deletion is handled by the caller (`gist-core`) after the transaction commits. `search_items` (FTS5 MATCH), `get_tokens` (lazy-load from `.tokens.json`).
+- `delete_item(id)`: **implemented but narrower than the removal UX spec'd in §3.2/§4 below** — verified against the actual code 2026-09-12. It deletes the `.json`/`.tokens.json` files and the `library_items` row for one id. It does **not** run in an explicit transaction, does not touch `reading_progress` (no cascade or FK), and there are no `annotations`/`bookmarks` tables yet to clean up (M3 features, not built). It also does not remove the item's rows from `fts_index`/`tokens` — the `tokens_ad` trigger only fires on `DELETE FROM tokens`, which `delete_item` never issues, so a removed item's tokens stay searchable via `search_items` until this is fixed. `search_items` (FTS5 MATCH) and `get_tokens` (lazy-load from `.tokens.json`) exist as described.
+- **No `remove_items` (plural, multi-id, transactional) function exists anywhere in `gist-store` or `gist-core`.** The transactional bulk-removal behaviour described in product-spec v1.5 §4 and macOS UI §3.2 is design intent, not shipped code — see the M2 milestone status below.
 
 **Architecture decision `[A1]`:** ✅ Resolved — external-content FTS5 table with `tokens` shadow table updated on insert/delete via triggers. Documented in ADR-008.
 
@@ -322,7 +323,7 @@ Phase C:          ├──> web
 - `ImportObserver { on_progress(bytes_read, total); is_cancelled() -> bool }` + `NullObserver`.
 - `import_file(path, observer)`: magic-byte type sniff via `infer`, extension fallback; dispatches to correct parser; cancellation checked at two points; stamps `source_ref`; inserts into store.
 - `import_image_with_ocr`: stub (Phase M3 pipeline).
-- `remove_items(ids, delete_source_files)`: calls `store.delete_item` for each id in a single transaction; on transaction commit, deletes source files from sandboxed storage (only if flag set and transaction succeeded). Returns a typed error if the transaction fails; never partially removes.
+- **`remove_items` does not exist in this crate.** An earlier draft of this plan described it as already implemented; verified against the code 2026-09-12 and it isn't — `gist-core` has no removal function of any kind yet, plural or singular. This is M2 work, tracked in the M2 milestone section below, not M1 scope.
 
 **Logging discipline `[F12]`:** `source_ref` paths at `debug!` level only.
 
@@ -342,8 +343,8 @@ Phase C:          ├──> web
 - `GistError { Core(String), InternalPanic(String) }`.
 - `OcrPageResult` (uniffi Record) + `OcrEngine` (`#[uniffi::export(callback_interface)]`).
 - `CoreOcrAdapter`: bridges FFI `OcrEngine` → `gist_core::OcrEngine` without circular dep.
-- `GistCore::import_image_with_ocr` FFI method.
-- `GistCore::remove_items(ids: Vec<String>, delete_source_files: bool)` FFI method (wraps `gist_core::remove_items`).
+- `GistCore` uniffi object with constructor `new(db_path, storage_dir)` plus exported methods: `health`, `import_txt`, `import_file`, `list_items(offset, limit)`, `start_rsvp(item_id, wpm)`, `save_progress(item_id, token_index)`, `import_image_with_ocr(path, engine)`.
+- **No `remove_items` FFI method exists.** Verified against the code 2026-09-12 — this was previously (incorrectly) described here as wrapping a `gist_core::remove_items` that itself doesn't exist (see §2.10). Item removal has no FFI surface yet; it's M2 work.
 
 ---
 
