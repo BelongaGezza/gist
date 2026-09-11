@@ -264,6 +264,45 @@ impl Store {
         Ok(items)
     }
 
+    /// Return the lightweight [`LibraryItem`] row for a single `id`, or
+    /// `None` if no such item exists.
+    pub fn get_item_by_id(&self, id: &str) -> Result<Option<LibraryItem>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let row = conn
+            .query_row(
+                "SELECT id, title, authors, source_path, cover_path, created_at
+                 FROM library_items
+                 WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        Ok(row.map(
+            |(id, title, authors_json, source_path, cover_path, created_at)| {
+                let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
+                LibraryItem {
+                    id,
+                    title,
+                    authors,
+                    source_path,
+                    cover_path,
+                    created_at,
+                    token_count: None, // TODO M2: populate from tokens table
+                }
+            },
+        ))
+    }
+
     /// Load and deserialise the full [`gist_model::Document`] for `id`.
     pub fn get_item(&self, id: &str) -> Result<Option<gist_model::Document>, StoreError> {
         let doc_path: Option<String> = {
