@@ -163,6 +163,31 @@ impl GistCore {
         })
     }
 
+    /// Full-text search across the library. Returns items ranked by FTS5
+    /// relevance.
+    pub fn search_items(
+        &self,
+        query: String,
+        limit: u64,
+    ) -> Result<Vec<FfiLibraryItem>, GistError> {
+        ffi_catch!({
+            let items = self
+                .inner
+                .search_items(&query, limit as usize)
+                .map_err(GistError::from)?;
+            Ok(items
+                .into_iter()
+                .map(|i| FfiLibraryItem {
+                    id: i.id,
+                    title: i.title,
+                    authors: i.authors,
+                    source_path: i.source_path,
+                    cover_path: i.cover_path,
+                })
+                .collect())
+        })
+    }
+
     pub fn start_rsvp(&self, item_id: String, wpm: u32) -> Result<String, GistError> {
         ffi_catch!({
             let config = gist_rsvp::Config {

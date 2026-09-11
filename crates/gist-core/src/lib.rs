@@ -187,6 +187,28 @@ impl Core {
         Ok(self.store.list_items(offset, limit)?)
     }
 
+    /// Full-text search across all imported document tokens.
+    ///
+    /// Returns library items ranked by FTS5 relevance, resolved from the ids
+    /// `gist_store::Store::search_items` returns. An id that no longer
+    /// resolves to a row (e.g. the item was deleted between the FTS match
+    /// and this lookup) is silently omitted rather than failing the whole
+    /// search.
+    pub fn search_items(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<gist_store::LibraryItem>, CoreError> {
+        let ids = self.store.search_items(query, limit)?;
+        let mut items = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(item) = self.store.get_item_by_id(&id)? {
+                items.push(item);
+            }
+        }
+        Ok(items)
+    }
+
     /// Create an RSVP session for the given item.
     /// Returns the session serialised as JSON.
     pub fn start_rsvp(
@@ -342,6 +364,33 @@ mod tests {
 
         let err = core.import_file(&fake, &NullObserver).unwrap_err();
         assert!(matches!(err, ImportError::UnsupportedType(_)));
+    }
+
+    #[test]
+    fn search_items_finds_imported_document_by_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("aardvark.txt");
+        std::fs::write(
+            &txt,
+            b"The quokka is a marsupial found in Western Australia.",
+        )
+        .unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let results = core.search_items("quokka", 10).unwrap();
+        assert!(
+            results.iter().any(|item| item.id == id),
+            "expected search for 'quokka' to find the imported item, got {:?}",
+            results
+        );
+
+        let no_match = core.search_items("nonexistentxyzzy", 10).unwrap();
+        assert!(no_match.is_empty());
     }
 
     #[test]
