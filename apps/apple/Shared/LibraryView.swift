@@ -94,6 +94,16 @@ struct LibraryView: View {
                 }
                 .disabled(selection.isEmpty)
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    if let id = selection.first {
+                        navigationPath.append(id)
+                    }
+                } label: {
+                    Label("Open", systemImage: "book")
+                }
+                .disabled(selection.count != 1)
+            }
         }
         .fileImporter(
             isPresented: $showImporter,
@@ -203,10 +213,20 @@ struct LibraryView: View {
     /// SwiftUI trap: the link swallows the single click as a navigation
     /// push, so the click never lands as a selection and `selection` can
     /// never become non-empty -- the toolbar Remove button then looks
-    /// permanently (and inexplicably) disabled. Single click now just
-    /// selects (List's native behavior for plain row content); opening a
-    /// book is an explicit double-click or the context menu's "Open in
-    /// Reader", which appends to `navigationPath` instead.
+    /// permanently (and inexplicably) disabled.
+    ///
+    /// A first fix attempt added `.onTapGesture(count: 2)` per row to open
+    /// the book on double-click -- that turned out to be a second version of
+    /// the same trap: attaching any `onTapGesture` directly to `List` row
+    /// content competes with, and in practice suppresses, the List's native
+    /// single-click-to-select handling on macOS (user-reported: clicking a
+    /// row did nothing, selection never happened at all). Rows are now
+    /// *pure* content with no gesture recognizer of their own, so the List's
+    /// built-in click-to-select is untouched; opening a book is driven
+    /// entirely off the `selection` binding instead -- either the toolbar
+    /// "Open" button (enabled when exactly one item is selected) or the
+    /// context menu's "Open in Reader" (right-click uses a separate gesture
+    /// recognizer, so it never conflicted with selection).
     private var itemList: some View {
         List(displayedItems, selection: $selection) { item in
             VStack(alignment: .leading) {
@@ -217,10 +237,6 @@ struct LibraryView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) {
-                navigationPath.append(item.id)
             }
             .contextMenu {
                 Button("Open in Reader") {
