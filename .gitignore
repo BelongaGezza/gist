@@ -24,3 +24,6 @@ DerivedData/
 
 # Build artifacts
 artifacts/
+
+# Claude Code agent worktrees (transient, per-session)
+.claude/
