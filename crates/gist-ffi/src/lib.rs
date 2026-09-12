@@ -35,17 +35,44 @@ impl From<gist_core::ImportError> for GistError {
     }
 }
 
+/// Installs a panic hook that routes the panic message through
+/// `tracing::debug!` instead of the default hook's stderr write (F22).
+/// `catch_unwind` below already keeps the panic *payload* out of the
+/// `GistError` returned to Swift/Kotlin, but without this, the default hook
+/// still writes the raw panic message — which can incidentally include path
+/// fragments from a dependency's `.unwrap()` — to stderr before the catch
+/// runs. Harmless while nothing reads stderr, but a latent leak path the day
+/// it's captured into a shared crash log or telemetry pipeline. Installed
+/// lazily on first use of `ffi_catch!`, once per process.
+fn install_panic_hook_once() {
+    // No-op under `cfg(test)`: replacing the panic hook process-wide would
+    // silence the default hook's stderr output for every other test in this
+    // binary that panics after this one runs (Rust's test harness shares a
+    // process across tests by default) — a real regression in test
+    // diagnostics for a fix that only matters in the shipped library.
+    #[cfg(not(test))]
+    {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            std::panic::set_hook(Box::new(|info| {
+                tracing::debug!("gist-ffi: internal panic caught at FFI boundary: {info}");
+            }));
+        });
+    }
+}
+
 /// Wraps a `#[uniffi::export]` function body in `catch_unwind`. A Rust panic
 /// unwinding across the C ABI into Swift/Kotlin is undefined behavior, so
 /// every exported function must catch it here and return
 /// `GistError::InternalPanic` instead.
 macro_rules! ffi_catch {
-    ($body:block) => {
+    ($body:block) => {{
+        install_panic_hook_once();
         match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| $body)) {
             Ok(result) => result,
             Err(_) => Err(GistError::InternalPanic),
         }
-    };
+    }};
 }
 
 // ── OCR types ─────────────────────────────────────────────────────────────────
@@ -249,5 +276,40 @@ impl GistCore {
                 .map(|doc| doc.id)
                 .map_err(|e| GistError::Core(e.to_string()))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_panic_hook_once_is_idempotent() {
+        // Must be safe to call from every ffi_catch! invocation, not just
+        // the first — this should never panic or double-install.
+        install_panic_hook_once();
+        install_panic_hook_once();
+        install_panic_hook_once();
+    }
+
+    #[test]
+    fn ffi_catch_converts_panic_to_internal_panic_error() {
+        fn panics() -> Result<(), GistError> {
+            ffi_catch!({
+                panic!("deliberate test panic");
+            })
+        }
+
+        let result = panics();
+        assert!(matches!(result, Err(GistError::InternalPanic)));
+    }
+
+    #[test]
+    fn ffi_catch_passes_through_ok_result() {
+        fn succeeds() -> Result<i32, GistError> {
+            ffi_catch!({ Ok(42) })
+        }
+
+        assert_eq!(succeeds().unwrap(), 42);
     }
 }

@@ -29,6 +29,11 @@ pub enum ParseError {
 /// Returns Ok(()) if no DRM; Err(ParseError::DrmProtected) if found.
 /// IDPF font obfuscation (algorithm="http://www.idpf.org/2008/embedding")
 /// is NOT DRM and must not trigger rejection.
+///
+/// Rejects on ambiguity (F20): an `EncryptionMethod` element present but
+/// missing its `Algorithm` attribute — malformed-but-otherwise-valid XML —
+/// is treated as DRM rather than silently passed through as "no DRM",
+/// per ADR-004's intent that GIST never attempts to read encrypted content.
 fn check_drm(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<(), ParseError> {
     let enc_file = match archive.by_name("META-INF/encryption.xml") {
         Ok(f) => f,
@@ -51,10 +56,11 @@ fn check_drm(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<
 
     for node in doc.descendants() {
         if node.has_tag_name("EncryptionMethod") {
-            if let Some(algo) = node.attribute("Algorithm") {
-                if algo != IDPF_OBFUSCATION {
-                    return Err(ParseError::DrmProtected);
-                }
+            match node.attribute("Algorithm") {
+                Some(algo) if algo == IDPF_OBFUSCATION => {} // exempted, not DRM
+                // No Algorithm attribute at all, or any other algorithm —
+                // reject on ambiguity rather than assume "no DRM" (F20).
+                _ => return Err(ParseError::DrmProtected),
             }
         }
     }
@@ -500,6 +506,80 @@ mod tests {
             result,
             Err(ParseError::ResourceLimitExceeded { .. })
         ));
+    }
+
+    /// Builds a minimal zip whose only entry is `META-INF/encryption.xml`
+    /// with the given content — sufficient to exercise `check_drm`, since it
+    /// runs before container.xml/OPF are ever read.
+    fn build_zip_with_encryption_xml(content: &str) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let mut zip_bytes = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut zip_bytes);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default();
+            writer
+                .start_file("META-INF/encryption.xml", options)
+                .unwrap();
+            writer.write_all(content.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        zip_bytes
+    }
+
+    #[test]
+    fn test_ambiguous_encryption_method_is_rejected_as_drm() {
+        // EncryptionMethod present but missing its Algorithm attribute —
+        // malformed-but-valid XML that must reject on ambiguity (F20),
+        // not silently pass through as "no DRM".
+        let xml = r#"<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+            <EncryptedData>
+                <EncryptionMethod/>
+            </EncryptedData>
+        </encryption>"#;
+        let zip_bytes = build_zip_with_encryption_xml(xml);
+        let limits = ParseLimits::default();
+        let result = parse(&zip_bytes, "test", &limits);
+        assert!(
+            matches!(result, Err(ParseError::DrmProtected)),
+            "expected DrmProtected for an ambiguous EncryptionMethod, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_idpf_font_obfuscation_is_not_drm() {
+        // The one recognized exemption must still pass through cleanly.
+        let xml = r#"<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+            <EncryptedData>
+                <EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+            </EncryptedData>
+        </encryption>"#;
+        let zip_bytes = build_zip_with_encryption_xml(xml);
+        let limits = ParseLimits::default();
+        let result = parse(&zip_bytes, "test", &limits);
+        // Parsing continues past check_drm and fails later (no container.xml
+        // in this minimal fixture) — the point is it's NOT DrmProtected.
+        assert!(
+            !matches!(result, Err(ParseError::DrmProtected)),
+            "IDPF font obfuscation must not be treated as DRM, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_commercial_drm_algorithm_is_rejected() {
+        let xml = r#"<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+            <EncryptedData>
+                <EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes256-cbc"/>
+            </EncryptedData>
+        </encryption>"#;
+        let zip_bytes = build_zip_with_encryption_xml(xml);
+        let limits = ParseLimits::default();
+        let result = parse(&zip_bytes, "test", &limits);
+        assert!(matches!(result, Err(ParseError::DrmProtected)));
     }
 
     #[test]

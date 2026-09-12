@@ -16,6 +16,7 @@ uniffi     = "0.32"
 serde      = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }
+tracing    = { workspace = true }
 
 [features]
 # Pulls in uniffi's clap-based CLI so `uniffi-bindgen` can be built and
