@@ -6,8 +6,8 @@ import SwiftUI
 // `GistCore.getDocumentJson` (see `CoreClient.loadDocument`). This is the
 // block-structured IR — headings/paragraphs/images/lists — as opposed to
 // RSVP's flat token stream (`RsvpSessionVM` in RsvpView.swift). Built for the
-// M2 flow-view prototypes (see CLAUDE.md's Q8): both `FlowViewSwiftUINative`
-// and `FlowViewTextKit2` render this same model.
+// M2 flow view (see CLAUDE.md's Q8, decided 2026-09-12 in favor of
+// SwiftUI-native): `FlowViewSwiftUINative` renders this model.
 //
 // `Block` and `Section.heading` use serde's default externally-tagged/tuple
 // representations, which don't match Swift's synthesized `Decodable`, so
@@ -174,21 +174,80 @@ extension String {
 
 // ── Shared reading controls ─────────────────────────────────────────────────
 
-/// Adjustable typography shared by both `ReadingLayout` implementations.
-/// Deliberately just a font size for this prototype — the point is
-/// comparing the two rendering strategies, not building out the full
-/// typography panel the real flow view will eventually need.
+/// Adjustable typography for the flow view: size, font design, and line
+/// spacing -- the three controls a reading app's "Aa" panel conventionally
+/// exposes (see e.g. Safari Reader/Apple Books). Deliberately does not add
+/// letter-spacing, hyphenation, or a reading-width control; those can follow
+/// later without changing this type's shape.
 struct TypographySettings: Equatable {
     var fontSize: Double = 17
+    var fontDesign: ReadingFontDesign = .system
+    var lineSpacing: LineSpacingOption = .regular
 
     static let range: ClosedRange<Double> = 13...28
+}
+
+/// Font family choice for reading text. Wraps `Font.Design` (which isn't
+/// `CaseIterable`) so the typography menu can build a `Picker` off
+/// `allCases`. Code spans (`FlowTextRunVM.code`) always render monospaced
+/// regardless of this setting -- that's a content distinction, not a user
+/// preference.
+enum ReadingFontDesign: String, CaseIterable, Identifiable, Equatable {
+    case system
+    case serif
+    case rounded
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "Default"
+        case .serif: return "Serif"
+        case .rounded: return "Rounded"
+        }
+    }
+
+    var fontDesign: Font.Design {
+        switch self {
+        case .system: return .default
+        case .serif: return .serif
+        case .rounded: return .rounded
+        }
+    }
+}
+
+/// Extra spacing added between lines within a paragraph, on top of the
+/// font's own natural leading. Values are added points, not a multiplier,
+/// matching `Text.lineSpacing(_:)`'s own unit.
+enum LineSpacingOption: String, CaseIterable, Identifiable, Equatable {
+    case compact
+    case regular
+    case relaxed
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .compact: return "Compact"
+        case .regular: return "Regular"
+        case .relaxed: return "Relaxed"
+        }
+    }
+
+    var extraPoints: Double {
+        switch self {
+        case .compact: return 2
+        case .regular: return 6
+        case .relaxed: return 12
+        }
+    }
 }
 
 /// Shared in-document search state, driven by the hosting container's search
 /// field and find-next/previous buttons. Each `ReadingLayout` implementation
 /// computes its own matches against its own rendered text (see
-/// FlowViewSwiftUINative/FlowViewTextKit2) and publishes the count back here
-/// so the toolbar can show "3 of 27" regardless of which layout is active.
+/// `FlowViewSwiftUINative`) and publishes the count back here so the toolbar
+/// can show "3 of 27" regardless of which layout is active.
 @MainActor
 final class SearchState: ObservableObject {
     @Published var query: String = ""
@@ -219,28 +278,78 @@ final class SectionNavigator: ObservableObject {
     @Published var pendingSectionId: String?
 }
 
+/// Tracks how far through the document the reader has scrolled, as a
+/// `0...1` fraction rather than anything layout-specific (a block index, a
+/// pixel offset) -- that keeps it meaningful across whatever `ReadingLayout`
+/// is hosting it, including a future paginated view (Q3) where "fraction"
+/// would mean "page N of M" instead of "block N of M". `initialFraction` is
+/// where a `ReadingLayout` should scroll to once on first appear, seeded by
+/// `FlowReaderContainer` from `FlowScrollPositionStore`'s persisted value for
+/// this item; `fraction` is then kept live by the layout as the user scrolls,
+/// and the container persists it back out on change.
+@MainActor
+final class ReadingProgress: ObservableObject {
+    @Published var fraction: Double
+    let initialFraction: Double
+
+    init(initialFraction: Double) {
+        let clamped = initialFraction.isFinite ? min(max(initialFraction, 0), 1) : 0
+        self.initialFraction = clamped
+        self.fraction = clamped
+    }
+}
+
+/// Persists each item's flow-view scroll position (a `0...1` fraction, see
+/// `ReadingProgress`) locally via `UserDefaults`, keyed per item id. This is
+/// deliberately independent of `gist-store`'s `reading_progress` table/
+/// `CoreClient.saveProgress` -- that table's `token_index` column is RSVP-
+/// specific (a position in the flat token stream), and conflating it with a
+/// scroll fraction over the block-structured document would mean one number
+/// meaning two different things depending on which reading mode last wrote
+/// it. A client-side-only store is enough for this: it never needs to sync
+/// across devices to be useful, and revisiting it as a real backend field is
+/// a schema decision (Q10), not something to force through UserDefaults'
+/// shape today.
+enum FlowScrollPositionStore {
+    private static func key(itemId: String) -> String { "flowScrollPosition.\(itemId)" }
+
+    static func load(itemId: String, defaults: UserDefaults = .standard) -> Double {
+        let value = defaults.double(forKey: key(itemId: itemId))
+        return value.isFinite ? min(max(value, 0), 1) : 0
+    }
+
+    static func save(itemId: String, fraction: Double, defaults: UserDefaults = .standard) {
+        defaults.set(min(max(fraction, 0), 1), forKey: key(itemId: itemId))
+    }
+}
+
 // ── ReadingLayout protocol ───────────────────────────────────────────────────
 
 /// Common contract for a reading-mode implementation that renders a parsed
 /// document's blocks with adjustable typography, in-document search, and TOC
 /// navigation. `FlowViewSwiftUINative` (SwiftUI `Text`/`AttributedString` in
-/// a `LazyVStack`) and `FlowViewTextKit2` (`NSTextView`/TextKit 2 via
-/// `NSViewRepresentable`) both conform to this — the point of building two
-/// implementations of one protocol is to compare them on equal footing for
-/// CLAUDE.md's Q8 (SwiftUI Text vs TextKit 2 for the flow view).
+/// a `LazyVStack`) conforms to this -- originally built alongside a second,
+/// TextKit-2-based conformer so the two could be compared for CLAUDE.md's
+/// Q8; that question was decided 2026-09-12 in favor of SwiftUI-native for
+/// v1.0, and the TextKit 2 prototype was removed. The protocol stays generic
+/// (not folded into `FlowViewSwiftUINative` directly) since Q3's paginated
+/// view (open for v1.1) is a plausible future second conformer.
 ///
 /// Kept intentionally small: a `ReadingLayout` only needs to know how to
-/// render `document` at `typography`'s size, react to `search`'s query /
-/// current-match-index, and react to `navigation`'s requested section. The
-/// TOC's *content* is a pure function of the document
+/// render `document` at `typography`'s settings, react to `search`'s query /
+/// current-match-index, react to `navigation`'s requested section, and keep
+/// `progress`'s fraction in sync with where the user has scrolled to (and
+/// scroll to `progress.initialFraction` once on first appear). The TOC's
+/// *content* is a pure function of the document
 /// (`FlowDocumentVM.tableOfContents`) so it isn't part of this protocol —
-/// both implementations get the entry list for free from the same document
+/// every implementation gets the entry list for free from the same document
 /// value; only "jump to a section" needs a per-implementation reaction.
 protocol ReadingLayout: View {
     init(
         document: FlowDocumentVM,
         typography: Binding<TypographySettings>,
         search: SearchState,
-        navigation: SectionNavigator
+        navigation: SectionNavigator,
+        progress: ReadingProgress
     )
 }

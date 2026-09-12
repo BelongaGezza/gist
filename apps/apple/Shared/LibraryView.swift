@@ -402,14 +402,8 @@ struct LibraryView: View {
                     Button("Open in Reader") {
                         navigationPath.append(.rsvp(itemId: item.id))
                     }
-                    // Q8 prototypes (CLAUDE.md M2): two rendering approaches
-                    // for the not-yet-built flow view, side by side for
-                    // comparison.
-                    Button("Open in Flow View (SwiftUI)") {
-                        navigationPath.append(.flowSwiftUI(itemId: item.id))
-                    }
-                    Button("Open in Flow View (TextKit 2)") {
-                        navigationPath.append(.flowTextKit2(itemId: item.id))
+                    Button("Open in Flow View") {
+                        navigationPath.append(.flow(itemId: item.id))
                     }
                     Button("Manage Tags…") {
                         tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)

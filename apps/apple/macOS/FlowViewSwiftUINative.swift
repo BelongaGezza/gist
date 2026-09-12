@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Prototype A for CLAUDE.md's Q8: renders the document as one SwiftUI
-/// `Text`/`AttributedString` per block, inside a `LazyVStack` in a
-/// `ScrollView`. See `FlowViewTextKit2.swift` for the TextKit 2 alternative
-/// this is being compared against.
+/// The flow reading view (CLAUDE.md's Q8, decided 2026-09-12 in favor of
+/// SwiftUI-native for v1.0 -- see CLAUDE.md's M2 item 5 for the full
+/// rationale: mainly cross-platform reuse and native theme integration,
+/// traded against weaker text selection/find than a TextKit 2 prototype had.
+/// Renders the document as one SwiftUI `Text`/`AttributedString` per block,
+/// inside a `LazyVStack` in a `ScrollView`.
 ///
 /// Search highlighting works by finding case-insensitive match ranges
 /// against each block's plain text (`FlowBlockVM.plainText`, character-
@@ -19,6 +21,7 @@ struct FlowViewSwiftUINative: ReadingLayout {
     @Binding var typography: TypographySettings
     @ObservedObject var search: SearchState
     @ObservedObject var navigation: SectionNavigator
+    @ObservedObject var progress: ReadingProgress
 
     /// Section+block entries in document order, flattened once at init time
     /// (each gets its own synthetic id — see `FlowBlockEntry`) rather than
@@ -26,12 +29,35 @@ struct FlowViewSwiftUINative: ReadingLayout {
     private let flatBlocks: [FlowBlockEntry]
 
     @State private var matches: [(entryId: UUID, range: Range<Int>)] = []
+    /// Indices (into `flatBlocks`) of every block `LazyVStack` currently has
+    /// on screen, maintained via each row's `onAppear`/`onDisappear`. The
+    /// minimum of this set is treated as "the block the reader is at" for
+    /// both the progress fraction and keyboard paging -- cheap to maintain
+    /// (no scroll-geometry math) and accurate enough at block granularity.
+    @State private var visibleBlockIndices: Set<Int> = []
+    @State private var hasRestoredInitialPosition = false
 
-    init(document: FlowDocumentVM, typography: Binding<TypographySettings>, search: SearchState, navigation: SectionNavigator) {
+    private var currentBlockIndex: Int { visibleBlockIndices.min() ?? 0 }
+    private var lastBlockIndex: Int { max(flatBlocks.count - 1, 0) }
+    /// How many blocks a Page Up/Down keypress moves by. Block-count-based
+    /// rather than pixel/viewport-based -- real "one screen's worth" paging
+    /// would need scroll-geometry APIs to measure the viewport, which isn't
+    /// worth the added fragility here; jumping a fixed number of blocks is
+    /// simple, predictable, and good enough for keyboard paging.
+    private static let pageBlockCount = 12
+
+    init(
+        document: FlowDocumentVM,
+        typography: Binding<TypographySettings>,
+        search: SearchState,
+        navigation: SectionNavigator,
+        progress: ReadingProgress
+    ) {
         self.document = document
         self._typography = typography
         self.search = search
         self.navigation = navigation
+        self.progress = progress
         self.flatBlocks = document.sections.flatMap { section in
             section.blocks.map { FlowBlockEntry(sectionId: section.id, block: $0) }
         }
@@ -41,16 +67,39 @@ struct FlowViewSwiftUINative: ReadingLayout {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    ForEach(flatBlocks) { entry in
+                    ForEach(Array(flatBlocks.enumerated()), id: \.element.id) { index, entry in
                         blockView(entry)
                             .id(entry.id)
+                            .onAppear { visibleBlockIndices.insert(index) }
+                            .onDisappear { visibleBlockIndices.remove(index) }
                     }
                 }
                 .padding(24)
                 .frame(maxWidth: 700, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
+            .focusable()
+            .focusEffectDisabled()
+            .onKeyPress(.home) { jump(to: 0, proxy: proxy); return .handled }
+            .onKeyPress(.end) { jump(to: lastBlockIndex, proxy: proxy); return .handled }
+            .onKeyPress(.pageDown) { jump(to: currentBlockIndex + Self.pageBlockCount, proxy: proxy); return .handled }
+            .onKeyPress(.pageUp) { jump(to: currentBlockIndex - Self.pageBlockCount, proxy: proxy); return .handled }
+            .onKeyPress(.downArrow) { jump(to: currentBlockIndex + 1, proxy: proxy); return .handled }
+            .onKeyPress(.upArrow) { jump(to: currentBlockIndex - 1, proxy: proxy); return .handled }
             .onAppear { recomputeMatches() }
+            .task {
+                // Restore the persisted scroll position once, after the
+                // first layout pass has actually placed rows -- doing this
+                // synchronously in onAppear can race SwiftUI's initial
+                // layout and silently no-op the scrollTo.
+                guard !hasRestoredInitialPosition, progress.initialFraction > 0, !flatBlocks.isEmpty else { return }
+                hasRestoredInitialPosition = true
+                let target = Int(progress.initialFraction * Double(lastBlockIndex))
+                jump(to: target, proxy: proxy, animated: false)
+            }
+            .onChange(of: visibleBlockIndices) { _, _ in
+                progress.fraction = lastBlockIndex > 0 ? Double(currentBlockIndex) / Double(lastBlockIndex) : 0
+            }
             .onChange(of: search.query) { _, _ in
                 recomputeMatches()
                 scrollToCurrentMatch(proxy: proxy)
@@ -62,6 +111,19 @@ struct FlowViewSwiftUINative: ReadingLayout {
                 guard let sectionId, let target = flatBlocks.first(where: { $0.sectionId == sectionId }) else { return }
                 withAnimation { proxy.scrollTo(target.id, anchor: .top) }
             }
+        }
+    }
+
+    // MARK: - Navigation
+
+    private func jump(to index: Int, proxy: ScrollViewProxy, animated: Bool = true) {
+        guard !flatBlocks.isEmpty else { return }
+        let clamped = min(max(index, 0), lastBlockIndex)
+        let target = flatBlocks[clamped].id
+        if animated {
+            withAnimation { proxy.scrollTo(target, anchor: .top) }
+        } else {
+            proxy.scrollTo(target, anchor: .top)
         }
     }
 
@@ -112,7 +174,7 @@ struct FlowViewSwiftUINative: ReadingLayout {
                 .font(headingFont(level: level))
         case .paragraph(let runs):
             Text(highlighted(runs: runs, matches: blockMatches))
-                .lineSpacing(4)
+                .lineSpacing(typography.lineSpacing.extraPoints)
         case .list(let ordered, let items):
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(Array(items.enumerated()), id: \.offset) { index, item in
@@ -123,7 +185,7 @@ struct FlowViewSwiftUINative: ReadingLayout {
                     }
                 }
             }
-            .font(.system(size: typography.fontSize))
+            .font(.system(size: typography.fontSize, design: typography.fontDesign.fontDesign))
         case .image(_, let alt, let caption):
             VStack(alignment: .leading, spacing: 4) {
                 Image(systemName: "photo")
@@ -140,10 +202,11 @@ struct FlowViewSwiftUINative: ReadingLayout {
     }
 
     private func headingFont(level: Int) -> Font {
+        let design = typography.fontDesign.fontDesign
         switch level {
-        case ...1: return .system(size: typography.fontSize + 11, weight: .bold)
-        case 2: return .system(size: typography.fontSize + 6, weight: .bold)
-        default: return .system(size: typography.fontSize + 3, weight: .semibold)
+        case ...1: return .system(size: typography.fontSize + 11, weight: .bold, design: design)
+        case 2: return .system(size: typography.fontSize + 6, weight: .bold, design: design)
+        default: return .system(size: typography.fontSize + 3, weight: .semibold, design: design)
         }
     }
 
@@ -165,8 +228,11 @@ struct FlowViewSwiftUINative: ReadingLayout {
         var attr = AttributedString()
         for run in runs {
             var piece = AttributedString(run.text)
-            var font = Font.system(size: typography.fontSize)
+            var font = Font.system(size: typography.fontSize, design: typography.fontDesign.fontDesign)
             if run.code {
+                // Code spans always render monospaced -- that's a content
+                // distinction (this is literal code), not something the
+                // reader's font-design preference should override.
                 font = .system(size: typography.fontSize, design: .monospaced)
             } else {
                 if run.bold { font = font.bold() }

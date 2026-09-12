@@ -134,11 +134,8 @@ struct CollectionDetailView: View {
                     Button("Open in Reader") {
                         navigationPath.append(.rsvp(itemId: item.id))
                     }
-                    Button("Open in Flow View (SwiftUI)") {
-                        navigationPath.append(.flowSwiftUI(itemId: item.id))
-                    }
-                    Button("Open in Flow View (TextKit 2)") {
-                        navigationPath.append(.flowTextKit2(itemId: item.id))
+                    Button("Open in Flow View") {
+                        navigationPath.append(.flow(itemId: item.id))
                     }
                     Button("Manage Tags\u{2026}") {
                         tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)
