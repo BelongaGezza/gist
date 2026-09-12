@@ -107,7 +107,7 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
     let html = String::from_utf8_lossy(&body_bytes);
 
     // 7-8. Extract content and build Document.
-    Ok(build_document(&html, raw_url))
+    build_document(&html, raw_url, limits.max_nesting_depth)
 }
 
 // ── Agent builder ─────────────────────────────────────────────────────────────
@@ -314,8 +314,16 @@ const BLOCK_TAGS: &[&str] = &[
 ];
 
 /// Build a `Document` from raw HTML, without any network access.
-pub(crate) fn build_document(html: &str, url: &str) -> Document {
-    let (title, blocks) = extract_content(html);
+///
+/// `max_depth` bounds the DOM recursion in `collect_text` (F17) — an
+/// adversarial page with deeply nested elements is rejected with
+/// `ParseError::ResourceLimitExceeded` rather than exhausting the stack.
+pub(crate) fn build_document(
+    html: &str,
+    url: &str,
+    max_depth: usize,
+) -> Result<Document, ParseError> {
+    let (title, blocks) = extract_content(html, max_depth)?;
 
     let section = Section {
         id: "s0".to_string(),
@@ -334,11 +342,14 @@ pub(crate) fn build_document(html: &str, url: &str) -> Document {
         word_count: 0, // Document::new recomputes this
     };
 
-    Document::new(metadata, vec![section])
+    Ok(Document::new(metadata, vec![section]))
 }
 
 /// Extract `(title, blocks)` from an HTML string.
-pub(crate) fn extract_content(html: &str) -> (String, Vec<Block>) {
+pub(crate) fn extract_content(
+    html: &str,
+    max_depth: usize,
+) -> Result<(String, Vec<Block>), ParseError> {
     let document = Html::parse_document(html);
 
     // Title from <title>.
@@ -360,26 +371,26 @@ pub(crate) fn extract_content(html: &str) -> (String, Vec<Block>) {
 
     let blocks = match content_html {
         None => vec![],
-        Some(root) => collect_blocks(root),
+        Some(root) => collect_blocks(root, max_depth)?,
     };
 
-    (title, blocks)
+    Ok((title, blocks))
 }
 
 /// Walk `el`'s subtree and collect non-empty paragraphs as `Block::Paragraph`.
-fn collect_blocks(el: scraper::ElementRef<'_>) -> Vec<Block> {
+fn collect_blocks(el: scraper::ElementRef<'_>, max_depth: usize) -> Result<Vec<Block>, ParseError> {
     let mut paragraphs: Vec<String> = Vec::new();
     let mut current = String::new();
-    collect_text(el, &mut current, &mut paragraphs);
+    collect_text(el, &mut current, &mut paragraphs, 0, max_depth)?;
     flush(&mut current, &mut paragraphs);
 
-    paragraphs
+    Ok(paragraphs
         .into_iter()
         .filter(|p| !p.trim().is_empty())
         .map(|p| Block::Paragraph {
             runs: vec![TextRun::plain(p.trim().to_string())],
         })
-        .collect()
+        .collect())
 }
 
 fn flush(current: &mut String, paragraphs: &mut Vec<String>) {
@@ -390,8 +401,21 @@ fn flush(current: &mut String, paragraphs: &mut Vec<String>) {
     current.clear();
 }
 
-fn collect_text(el: scraper::ElementRef<'_>, current: &mut String, paragraphs: &mut Vec<String>) {
+/// Recursively walks `el`'s subtree, tracking `depth` against `max_depth`
+/// (F17) — without this cap, an adversarial page with deeply nested elements
+/// (well within the response-size cap) can exhaust the call stack.
+fn collect_text(
+    el: scraper::ElementRef<'_>,
+    current: &mut String,
+    paragraphs: &mut Vec<String>,
+    depth: usize,
+    max_depth: usize,
+) -> Result<(), ParseError> {
     use scraper::node::Node;
+
+    if depth > max_depth {
+        return Err(ParseError::ResourceLimitExceeded);
+    }
 
     for child in el.children() {
         match child.value() {
@@ -419,7 +443,7 @@ fn collect_text(el: scraper::ElementRef<'_>, current: &mut String, paragraphs: &
                 }
 
                 if let Some(child_el) = scraper::ElementRef::wrap(child) {
-                    collect_text(child_el, current, paragraphs);
+                    collect_text(child_el, current, paragraphs, depth + 1, max_depth)?;
                 }
 
                 // Flush again after a block element closes.
@@ -430,6 +454,7 @@ fn collect_text(el: scraper::ElementRef<'_>, current: &mut String, paragraphs: &
             _ => {}
         }
     }
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -604,7 +629,7 @@ mod tests {
 </body>
 </html>"#;
 
-        let doc = build_document(html, "https://example.com/page");
+        let doc = build_document(html, "https://example.com/page", 200).unwrap();
 
         assert_eq!(doc.metadata.title, "My Test Page");
         assert_eq!(
@@ -643,7 +668,7 @@ mod tests {
 </body>
 </html>"#;
 
-        let doc = build_document(html, "https://example.com/strip");
+        let doc = build_document(html, "https://example.com/strip", 200).unwrap();
         let blocks = &doc.sections[0].blocks;
         let all_text: String = blocks
             .iter()
@@ -683,7 +708,7 @@ mod tests {
 </body>
 </html>"#;
 
-        let doc = build_document(html, "https://example.com/fallback");
+        let doc = build_document(html, "https://example.com/fallback", 200).unwrap();
         let all_text: String = doc.sections[0]
             .blocks
             .iter()
@@ -696,7 +721,49 @@ mod tests {
     #[test]
     fn test_source_type_is_web() {
         let html = "<html><head><title>T</title></head><body><p>x</p></body></html>";
-        let doc = build_document(html, "https://example.com/");
+        let doc = build_document(html, "https://example.com/", 200).unwrap();
         assert_eq!(doc.metadata.source_type, "web");
+    }
+
+    // ── DOM recursion depth cap (F17) ────────────────────────────────────
+
+    #[test]
+    fn test_deeply_nested_html_is_rejected() {
+        // 300 nested <div>s, well within any response-size cap, exceeds a
+        // max_depth of 200 and must be rejected, not blow the call stack.
+        let mut html = String::from("<html><body>");
+        for _ in 0..300 {
+            html.push_str("<div>");
+        }
+        html.push_str("text");
+        for _ in 0..300 {
+            html.push_str("</div>");
+        }
+        html.push_str("</body></html>");
+
+        let result = build_document(&html, "https://example.com/deep", 200);
+        assert!(
+            matches!(result, Err(ParseError::ResourceLimitExceeded)),
+            "expected ResourceLimitExceeded for 300-deep nesting capped at 200"
+        );
+    }
+
+    #[test]
+    fn test_nesting_within_depth_cap_succeeds() {
+        let mut html = String::from("<html><body>");
+        for _ in 0..50 {
+            html.push_str("<div>");
+        }
+        html.push_str("shallow enough");
+        for _ in 0..50 {
+            html.push_str("</div>");
+        }
+        html.push_str("</body></html>");
+
+        let result = build_document(&html, "https://example.com/shallow", 200);
+        assert!(
+            result.is_ok(),
+            "50-deep nesting under a 200 cap should succeed"
+        );
     }
 }

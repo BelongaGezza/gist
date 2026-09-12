@@ -3,6 +3,10 @@ on:
   pull_request:
   schedule:
     - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
 jobs:
   quality:
     runs-on: ubuntu-latest

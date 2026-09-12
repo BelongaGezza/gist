@@ -18,6 +18,13 @@ pub struct ParseLimits {
     /// decompression (default 512 MB). Enforced *before* allocating the
     /// full buffer — provides zip-bomb protection.
     pub max_expanded_bytes: usize,
+    /// Maximum number of entries in a zip-based archive (epub/docx), checked
+    /// immediately after opening the archive — before any entry's content is
+    /// read (default 10 000). Bounds central-directory parsing cost, which
+    /// `max_bytes` (the archive's compressed size) doesn't: a crafted archive
+    /// with a huge number of near-empty entries can stay well under
+    /// `max_bytes` while still being expensive to enumerate.
+    pub max_zip_entries: usize,
 }
 
 impl Default for ParseLimits {
@@ -27,6 +34,7 @@ impl Default for ParseLimits {
             max_pages: 2_000,
             max_nesting_depth: 200,
             max_expanded_bytes: 512 * 1024 * 1024,
+            max_zip_entries: 10_000,
         }
     }
 }

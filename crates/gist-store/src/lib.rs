@@ -400,7 +400,10 @@ impl Store {
              )
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![query, limit as i64], |row| row.get::<_, String>(0))?;
+        let escaped = escape_fts5_query(query);
+        let rows = stmt.query_map(params![escaped, limit as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut ids = Vec::new();
         for row in rows {
             ids.push(row?);
@@ -745,6 +748,18 @@ impl Store {
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
+/// Escapes `query` for safe use as an FTS5 `MATCH` argument by wrapping the
+/// entire input in a single quoted phrase, doubling any embedded `"` (F19).
+/// Without this, free-text search input is interpreted by FTS5's own query
+/// grammar — `AND`/`OR`/`NOT`, `NEAR/n`, `column:` filters, a trailing prefix
+/// `*` — so unbalanced quotes throw an unsanitized syntax error back toward
+/// the caller, and adversarial input can build expensive query graphs.
+/// Quoting the whole thing as one phrase means a search box's contents can
+/// never be read as anything but literal text to match.
+fn escape_fts5_query(query: &str) -> String {
+    format!("\"{}\"", query.replace('"', "\"\""))
+}
+
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1012,5 +1027,54 @@ mod tests {
 
         // Deleting an id that no longer exists is not an error.
         store.delete_item(&doc.id).unwrap();
+    }
+
+    // ── FTS5 query sanitization (F19) ────────────────────────────────────
+
+    #[test]
+    fn escape_fts5_query_wraps_and_doubles_quotes() {
+        assert_eq!(escape_fts5_query("marsupial"), "\"marsupial\"");
+        assert_eq!(escape_fts5_query("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn search_items_treats_operators_as_literal_text_not_syntax() {
+        let (_dir, store) = open_test_store();
+        store.insert_item(&doc_with_title("marsupial")).unwrap();
+
+        // Before F19's fix, an unbalanced quote threw an unsanitized FTS5
+        // syntax error, and OR/NEAR/column-filter/prefix syntax was
+        // interpreted as query structure rather than literal search text.
+        // All of these must now return Ok, not propagate a syntax error.
+        for adversarial in [
+            "\"unterminated",
+            "marsupial OR *",
+            "a NEAR/2 b",
+            "col:marsupial",
+            "marsupial\" --",
+        ] {
+            let result = store.search_items(adversarial, 10);
+            assert!(
+                result.is_ok(),
+                "expected Ok for adversarial query {:?}, got {:?}",
+                adversarial,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn search_items_still_finds_plain_word_match() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("marsupial");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let results = store.search_items("marsupial", 10).unwrap();
+        assert!(
+            results.contains(&id),
+            "expected plain-word search to still find the match, got {:?}",
+            results
+        );
     }
 }

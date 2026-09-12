@@ -11,6 +11,8 @@
 
 **Third pass, same day (2026-09-12):** both High findings fixed in code and verified (`cargo test`/`clippy -D warnings`/`fmt --check` all green across the workspace). `[F15]` (zip-bomb via unbounded epub metadata reads) — `check_drm`/`read_zip_entry_string` now route through a shared `read_capped` helper capped at a new `MAX_METADATA_EXPANDED_BYTES` (4 MiB), independent of `ParseLimits.max_expanded_bytes`; 2 new tests build synthetic compression-bomb zips and assert rejection. `[F14]` (SSRF in `gist-web::fetch_url`) — `build_agent()` now sets `.https_only(true)` and `.resolver(safe_resolve)`, where `safe_resolve` filters resolved addresses to globally-routable ones only; both are enforced by `ureq` on every connection including redirect hops, which also closes `[M-1]` as a corollary; 10 new unit tests. `[F16]` (Medium, no zip entry-count cap) remains open — out of scope for this pass, which addressed the two High findings only, per instruction.
 
+**Fourth pass, same day (2026-09-12):** all four Medium findings fixed and verified (full workspace `cargo test`/`clippy -D warnings`/`fmt --check`/`cargo deny check bans licenses sources` green). `[F16]` — new `ParseLimits.max_zip_entries` (default 10 000), checked in both `gist-parse-epub` and `gist-parse-docx` immediately after `ZipArchive::new`, before any entry's content is read; 1 new test per crate. `[F17]` — `collect_text`/`collect_blocks` in `gist-web` now thread a `depth`/`max_depth` pair sourced from `limits.max_nesting_depth` and return `Result`, erroring with `ParseError::ResourceLimitExceeded` past the cap; `build_document`/`extract_content` return `Result` accordingly; 2 new tests. `[F18]` — all 5 workflow files now declare `permissions: contents: read`; `release-macos.yml` carries a comment flagging that M4's real release-publishing work will need a narrower `contents: write` added deliberately then. `[F19]` — new `gist-store::escape_fts5_query` wraps the entire search string as one quoted FTS5 phrase (doubling embedded `"`) before binding, so input can never be read as FTS5 query syntax; 3 new tests. All four were the last Medium findings blocking M2 exit per the security gate below.
+
 **Two deviations from spec v3 noted:**
 1. **Paginated view** deferred to v1.1 (spec §11 position maintained). Flow view built on a layout abstraction from day one so paginated is a second implementation, not a rewrite.
 2. **Full-text search** committed to v1.0 (spec §10.4 leaves open). Retrofitting FTS5 over an existing library requires schema migration + full re-index — worse to defer than to design in at M1.
@@ -72,8 +74,8 @@ pub struct ParseLimits {
 - **Fixed 2026-09-12** (see §2.8) — `gist-web::fetch_url` now enforces both rules via `ureq`'s `https_only` and `resolver` hooks, applied on every connection attempt including redirect hops. Was not yet a live vulnerability when found (`import_url` has no Swift call site yet), so this policy is stated here as the standing rule for any future network-fetch code, not only as a retrospective note on `gist-web`.
 
 ### 0.10 Untrusted-Input Resource Limit Policy — extended (audit `[F16]`/`[F17]`)
-- §0.4's `ParseLimits` policy is restated here with two gaps the audit found: (1) zip-based formats must cap **entry count** before per-entry limits run — a crafted central directory can be large before any byte-level limit is checked (`[F16]`, epub + docx); (2) any recursive walk of untrusted structured input (not just XML) must enforce `max_nesting_depth` — `gist-web`'s HTML block/text collectors were missed by the original policy because they predate `[F16]`/`[F17]`'s audit and were not written as "parsers" in the `gist-parse-*` sense (`[F17]`).
-- Corollary: the metadata/container reads inside a format (e.g. epub's `container.xml`/OPF/`encryption.xml`) are part of that format's `ParseLimits` contract, not exempt from it just because they're read before the "real" content. `[F15]` was exactly this gap — `max_expanded_bytes` was `usize::MAX` for those three reads while spine content correctly capped — **fixed 2026-09-12** (see §2.4). `[F16]` (entry-count cap) remains open.
+- §0.4's `ParseLimits` policy is restated here with two gaps the audit found, both **fixed 2026-09-12**: (1) zip-based formats must cap **entry count** before per-entry limits run — a crafted central directory can be large before any byte-level limit is checked (`[F16]`, epub + docx — fixed via a new `ParseLimits.max_zip_entries`); (2) any recursive walk of untrusted structured input (not just XML) must enforce `max_nesting_depth` — `gist-web`'s HTML block/text collectors were missed by the original policy because they predate `[F16]`/`[F17]`'s audit and were not written as "parsers" in the `gist-parse-*` sense (`[F17]` — fixed by threading a depth counter through `collect_text`/`collect_blocks`).
+- Corollary: the metadata/container reads inside a format (e.g. epub's `container.xml`/OPF/`encryption.xml`) are part of that format's `ParseLimits` contract, not exempt from it just because they're read before the "real" content. `[F15]` was exactly this gap — `max_expanded_bytes` was `usize::MAX` for those three reads while spine content correctly capped — **fixed 2026-09-12** (see §2.4).
 
 ---
 
@@ -178,7 +180,7 @@ gist/
 **Note:** `release-macos` is tag-triggered on the main repo only — fork PRs must not have access to signing secrets.
 
 **Open (audit 2026-09-12):**
-- `[F18]` **Medium.** None of the 5 existing workflow files sets a `permissions:` block, so each inherits the default (possibly read-write) `GITHUB_TOKEN` scope. Fix before M2 exit: add an explicit least-privilege `permissions:` block to each.
+- `[F18]` ✅ **Was Medium, fixed 2026-09-12.** None of the 5 existing workflow files set a `permissions:` block, so each inherited the default (possibly read-write) `GITHUB_TOKEN` scope. Fixed: all 5 now declare `permissions: contents: read` at the top level. `release-macos.yml` carries a comment flagging that M4's real release-publishing work will need a narrower `contents: write` added deliberately then, not speculatively now.
 - `[F25]` **Informational.** The `apple-build` row in the table above (and its `⏳ M2` status marker) describes a pipeline that **does not exist** — `.github/workflows/` has exactly 5 files (core-test, core-quality, parser-corpus, fuzz, release-macos), none named apple-build. Since all Swift work to date is hand-verified rather than compiler-checked (no full Xcode in this dev environment — see §3), there is currently no CI gate at all on the Swift half of the app. Close before M3: either stand up `apple-build` for real, or strike it from this table and CLAUDE.md until it exists.
 - `[F24]` **Low.** `cargo deny check advisories` is already known non-functional in this dev environment (see §0.3 and CLAUDE.md), but there is no compensating control — no Dependabot config anywhere in the repo — so the project is currently blind to newly published RUSTSEC advisories. Fix before M2 exit: add a minimal `.github/dependabot.yml` for the `cargo` ecosystem.
 
@@ -266,9 +268,9 @@ Phase C:          ├──> web
 
 **Fixed (2026-09-12, same day):**
 - `[F15]` ✅ **Was High, exploitable today.** `read_zip_entry_string`/`check_drm` read `container.xml`/OPF/`encryption.xml` with `max_expanded_bytes = usize::MAX` — unlike spine content, which caps correctly. Fixed: both now route through a shared `read_capped` helper capped at a new `MAX_METADATA_EXPANDED_BYTES` (4 MiB), independent of `ParseLimits.max_expanded_bytes`. Two new tests build synthetic compression-bomb zips targeting `container.xml` and `encryption.xml` and assert `ResourceLimitExceeded`.
+- `[F16]` ✅ **Was Medium, fixed 2026-09-12.** No zip entry-count cap before per-entry limits apply — the central directory was parsed in full before any limit ran. Fixed: new `ParseLimits.max_zip_entries` (default 10 000), checked immediately after `ZipArchive::new`. New test builds a 6-entry zip capped at 5 and asserts rejection.
 
 **Open (audit 2026-09-12):**
-- `[F16]` **Medium.** No zip entry-count cap before per-entry limits apply (lib.rs:74) — the central directory is parsed in full before any limit runs. Not fixed in the same pass as `[F15]` — scope was the two High findings only; still open.
 - `[F20]` **Low.** `check_drm()` (lib.rs:44-49) treats a malformed-but-valid `EncryptionMethod` with no `Algorithm` attribute as "no DRM." Per ADR-004's intent this should reject-on-ambiguity instead. Fix before M3.
 
 ---
@@ -284,8 +286,8 @@ Phase C:          ├──> web
 - All four `ParseLimits` fields enforced. `[F4]` ✅
 - Tables: parse and persist (M1); flatten at render (M2). `[Q2]` ✅ Resolved
 
-**Open (audit 2026-09-12):**
-- `[F16]` **Medium.** Same zip entry-count gap as `gist-parse-epub` above, at lib.rs:43 — no cap on entry count before per-entry limits apply. Still open (epub's `[F15]`, the other finding in this batch, is now closed — see §2.4).
+**Fixed (2026-09-12, same day):**
+- `[F16]` ✅ **Was Medium.** Same zip entry-count gap as `gist-parse-epub` above — no cap on entry count before per-entry limits apply. Fixed identically: checks `ParseLimits.max_zip_entries` immediately after `ZipArchive::new`. New test builds a 6-entry zip capped at 5 and asserts rejection.
 
 ---
 
@@ -330,9 +332,9 @@ Phase C:          ├──> web
 
 **Fixed (2026-09-12, same day):**
 - `[F14]` ✅ **Was High, blocking.** `fetch_url` only checked `scheme() == "https"` — it never validated the *resolved* IP, i.e. SSRF via a DNS-controlled domain presenting a valid cert while resolving to loopback/RFC1918/link-local. Fixed: `build_agent()` now sets `.https_only(true)` and `.resolver(safe_resolve)`; `safe_resolve` filters resolved addresses to globally-routable ones only (covers loopback/private/link-local incl. cloud metadata/multicast/broadcast/documentation/unspecified/RFC 6598 CGNAT, plus IPv4-mapped IPv6 and IPv6 unique-local/link-local). `[M-1]` (redirects not re-validated per-hop) is closed as a corollary — both `https_only` and the resolver are applied by `ureq` on every connection attempt including redirect hops, so no separate fix was needed. 10 new unit tests cover the address filter and `safe_resolve` directly.
+- `[F17]` ✅ **Was Medium.** `collect_text`/`collect_blocks` recursed over untrusted HTML with no depth cap — unlike every parser under `[F4]`'s `ParseLimits.max_nesting_depth` convention, which this file predated in spirit but didn't conform to. Fixed: both functions now thread a `depth`/`max_depth` pair (sourced from `limits.max_nesting_depth`) and return `Result`, erroring with `ParseError::ResourceLimitExceeded` past the cap; `build_document`/`extract_content` return `Result` accordingly, and `fetch_url` propagates it. 2 new tests (300-deep nesting rejected, 50-deep succeeds).
 
 **Open (audit 2026-09-12):**
-- `[F17]` **Medium.** `collect_text`/`collect_blocks` (lib.rs:296-359) recurse over untrusted HTML with no depth cap — unlike every parser under `[F4]`'s `ParseLimits.max_nesting_depth` convention, which this file predates in spirit but should now conform to. Stack-overflow DoS on adversarial HTML. Fix before M2 exit.
 - `[F21]` **Low.** robots.txt lookup drops the original URL's port, always checking port 443 — a non-standard-port HTTPS URL gets the wrong robots.txt. Fix before M3.
 
 ---
@@ -363,7 +365,7 @@ Phase C:          ├──> web
 - `import_file(path, observer)`: magic-byte type sniff via `infer`, extension fallback; dispatches to correct parser; cancellation checked at two points; stamps `source_ref`; copies into sandboxed storage and stamps `source_copy_ref` (see `[A5]` below); inserts into store.
 - `import_image_with_ocr`: stub (Phase M3 pipeline).
 - **`[A5]` ADR-006 (copy-on-import) — implemented 2026-09-12, closing the gap found in that day's architecture review.** `import_txt`/`import_file` now call `store.store_original_copy(&bytes, &ext)` after a successful parse (never for input GIST rejects — unsupported type, DRM, resource limits) and stamp the returned path onto the new `Metadata.source_copy_ref` field, alongside the existing informational-only `source_ref`. `Core::remove_items(delete_source_files: true)` now deletes `item.source_copy_path` (the sandboxed copy) and never touches `item.source_path` (the user's real file at its real location) — the exact bug this finding described is fixed; see the updated `remove_items_with_delete_source_files_true_deletes_the_sandboxed_copy_not_the_original` test, which explicitly asserts the original survives. `import_url` deliberately does **not** create a copy — there's no local file for a URL import to copy, only fetched content — so `source_copy_ref` stays `None` for those items and `delete_source_files` has nothing to do for them. See ADR-006 (updated 2026-09-12) for the full design, a naming clarification (`Metadata.doc_path` in the original ADR text is now `Metadata.source_copy_ref`, to avoid colliding with `doc_path`'s existing meaning as the serialised-IR-blob path), and a known limitation around content-hash dedup vs. per-item deletion (harmless today, needs reference counting before anything depends on a shared copy surviving).
-- `search_items(query, limit)`: ✅ wired 2026-09-12 — calls `store.search_items` for ranked ids, resolves each via a new `Store::get_item_by_id`, silently omits an id that no longer resolves (e.g. deleted between the FTS match and the lookup) rather than failing the whole search. Covered by a `gist-core` test that imports a fixture-style document and searches for a word it contains. **Open (audit 2026-09-12) `[F19]` Medium:** `gist-store::search_items` (lib.rs:399) binds query text safely against SQL injection but not against FTS5's own query grammar — unbalanced quotes/operators produce unsanitized errors or expensive query graphs. Fix before the search field ships in §3.2's `LibraryView` work — this is the actual blocking gate on that UI, not just "no call site yet."
+- `search_items(query, limit)`: ✅ wired 2026-09-12 — calls `store.search_items` for ranked ids, resolves each via a new `Store::get_item_by_id`, silently omits an id that no longer resolves (e.g. deleted between the FTS match and the lookup) rather than failing the whole search. Covered by a `gist-core` test that imports a fixture-style document and searches for a word it contains. **`[F19]` ✅ Was Medium, fixed 2026-09-12:** `gist-store::search_items` bound query text safely against SQL injection but not against FTS5's own query grammar — unbalanced quotes/operators produced unsanitized errors or expensive query graphs. Fixed: new `escape_fts5_query` helper wraps the entire query as one quoted FTS5 phrase (doubling embedded `"`) before binding, so input can never be read as `AND`/`OR`/`NOT`/`NEAR`/column-filter/prefix syntax. 3 new tests. The search field in §3.2's `LibraryView` work is no longer gated on this.
 - `remove_items(ids: &[String], delete_source_files: bool) -> Result<(), CoreError>`: **implemented 2026-09-12, corrected same day per `[A5]`.** Calls `store.remove_items(ids)` first (transactional DB delete), then — only after that succeeds — best-effort deletes each removed item's `.json`/`.tokens.json` blobs, and its sandboxed source copy too if `delete_source_files` is true. File-deletion failures are logged at `debug!` (per the `source_ref`-logging policy) and don't fail the call, since the library metadata is already gone by that point. Unknown ids are silently ignored (delegates to `Store::remove_items`'s semantics). Covered by five `gist-core` tests: single removal alongside a surviving item, bulk removal of 2–3 items, and both `delete_source_files` true/false cases — the true case asserts both that the sandboxed copy is deleted *and* that the user's original file survives untouched.
 
 **Logging discipline `[F12]`:** `source_ref` paths at `debug!` level only.
@@ -404,7 +406,7 @@ Phase C:          ├──> web
 
 **Sort:** sort control (key selector + direction toggle) always visible in the toolbar. Five sort keys: name (title), source type, date added, date last read, reading progress. Active key and direction persisted independently per view (grid/list) and survive restarts. Default: date added descending. Source-type sort groups items by format with secondary sort by date added descending.
 
-**Filter and search:** filter bar, full-text search (FTS5 via `gist-core`), cover thumbnails, progress rings. **Blocking gate (audit 2026-09-12, `[F19]` Medium):** `gist-store::search_items` sanitizes against SQL injection but not against FTS5's own query grammar — unbalanced quotes/operators currently produce unsanitized errors or expensive query graphs. Fix in `gist-store` before this search field is wired, not after — the field would otherwise ship a known-bad edge case on day one.
+**Filter and search:** filter bar, full-text search (FTS5 via `gist-core`), cover thumbnails, progress rings. **`[F19]` ✅ Fixed 2026-09-12 (see §2.2)** — `gist-store::search_items` now sanitizes against FTS5's own query grammar, not just SQL injection, so this search field is no longer gated on it.
 
 **Selection and removal:**
 - Multi-select via ⌘-click and checkbox mode (list view); keyboard-accessible (`Space` to toggle, `⌘A` to select all).
@@ -546,7 +548,7 @@ Same pattern as the Pre-M1 table above: these were exploitable or nearly so *tod
 | Action | Finding | Status |
 |---|---|---|
 | Route ePub `container.xml`/OPF/`encryption.xml` reads through a capped reader (was `max_expanded_bytes = usize::MAX`) | `[F15]` High | ✅ Fixed 2026-09-12 |
-| Add zip entry-count cap before per-entry limits, in both `gist-parse-epub` and `gist-parse-docx` | `[F16]` Medium | ⏳ Still open |
+| Add zip entry-count cap before per-entry limits, in both `gist-parse-epub` and `gist-parse-docx` | `[F16]` Medium | ✅ Fixed 2026-09-12 |
 
 ### M2 — Library & Reading · **5 weeks** 🔶 In progress — status as of 2026-09-12
 
@@ -568,7 +570,7 @@ Same pattern as the Pre-M1 table above: these were exploitable or nearly so *tod
 
 **Environment constraint carried through M2:** this dev environment has Xcode Command Line Tools only, not full Xcode — `xcodebuild` cannot run here. Every Swift change so far has been hand-verified against the generated bindings, not compiler-checked. Rust-side work (search wiring, URL import wiring, item-removal backend) should be prioritised precisely because it *can* be verified in this environment; Swift-heavy work (library UI, theme engine, flow view) carries higher risk of an uncaught compile error until it's built on a machine with full Xcode.
 
-**Exit criterion:** a team member can use it as their daily reader, including searching their library and removing items they no longer want. Not met yet — no compiled build exists to try, and the library/search/removal/theme/flow-view gaps above are real blockers even once it compiles. `[F14]` is fixed (2026-09-12), so a URL-import Swift call site is no longer gated on it. **Still gating exit:** `[F17]` (HTML recursion depth cap), `[F18]` (workflow `permissions:` blocks), `[F19]` (FTS5 query-grammar handling, gating the search field specifically), and `[F24]` (Dependabot as a compensating control for the non-functional `cargo deny check advisories`).
+**Exit criterion:** a team member can use it as their daily reader, including searching their library and removing items they no longer want. Not met yet — no compiled build exists to try, and the library/search/removal/theme/flow-view gaps above are real blockers even once it compiles. `[F14]`–`[F19]` are all fixed (2026-09-12), so none of them still gate exit. **Still gating exit:** `[F24]` (Dependabot as a compensating control for the non-functional `cargo deny check advisories`).
 
 ---
 
@@ -698,10 +700,10 @@ Findings from Security Review v1 (2026-09-08) are `F1`–`F12`/`F26`/`A1`–`A5`
 | A5 | Architecture | ✅ Closed | Discovered and resolved same day, 2026-09-12. ADR-006 (copy-on-import) was unimplemented — `source_ref`/`source_path` was the raw original filesystem path, not a sandboxed copy; `delete_source_files: true` on `remove_items` deleted that raw path. Fixed: `gist-store::store_original_copy` + `Metadata.source_copy_ref`/`library_items.source_copy_path` (schema v4), wired through `import_txt`/`import_file` and `remove_items`. See §2.2/§2.10 and ADR-006 for detail, including a known low-severity dedup-vs-deletion limitation that remains open but isn't release-blocking. Residual dedup-vs-deletion limitation independently reconfirmed by the 2026-09-12 audit (its finding L-6). |
 | F14 | High | ✅ Closed 2026-09-12 | (audit `H-1`+`M-1`). SSRF in `gist-web::fetch_url` — was scheme-only check, no resolved-IP validation, redirects not re-checked per hop. Fixed via `ureq`'s `https_only`+`resolver` hooks. See §2.8/§3.3/§6 R13. |
 | F15 | High | ✅ Closed 2026-09-12 | (audit `H-2`). Zip-bomb via unbounded `max_expanded_bytes` on epub metadata reads (`container.xml`/OPF/`encryption.xml`) — was exploitable via the shipped path. Fixed via a shared capped reader + `MAX_METADATA_EXPANDED_BYTES`. See §2.4/§6 R14. |
-| F16 | Medium | Open | Now, before next parser work (audit `M-3`). No zip entry-count cap before per-entry limits, in both `gist-parse-epub` and `gist-parse-docx`. See §2.4/§2.5. |
-| F17 | Medium | Open | Before M2 exit (audit `M-2`). Unbounded recursion in `gist-web`'s `collect_text`/`collect_blocks` — no `max_nesting_depth` cap, unlike every parser. See §0.10/§2.8. |
-| F18 | Medium | Open | Before M2 exit (audit `M-4`). No `permissions:` block in any of the 5 GitHub Actions workflows. See §1.3. |
-| F19 | Medium | Open | Before M2 exit, gates the search field specifically (audit `M-5`). `gist-store::search_items` doesn't sanitize against FTS5's own query grammar. See §2.2/§3.2. |
+| F16 | Medium | ✅ Closed 2026-09-12 | (audit `M-3`). No zip entry-count cap before per-entry limits, in both `gist-parse-epub` and `gist-parse-docx`. Fixed via a new `ParseLimits.max_zip_entries` (default 10 000). See §2.4/§2.5. |
+| F17 | Medium | ✅ Closed 2026-09-12 | (audit `M-2`). Unbounded recursion in `gist-web`'s `collect_text`/`collect_blocks` — was no `max_nesting_depth` cap, unlike every parser. Fixed by threading a depth counter through both functions. See §0.10/§2.8. |
+| F18 | Medium | ✅ Closed 2026-09-12 | (audit `M-4`). No `permissions:` block in any of the 5 GitHub Actions workflows. Fixed: all 5 now declare `permissions: contents: read`. See §1.3. |
+| F19 | Medium | ✅ Closed 2026-09-12 | (audit `M-5`). `gist-store::search_items` didn't sanitize against FTS5's own query grammar. Fixed via a new `escape_fts5_query` helper. See §2.2/§3.2. |
 | F20 | Low | Open | Before M3 (audit `L-2`). epub DRM check treats a malformed `EncryptionMethod` (no `Algorithm` attribute) as "no DRM" instead of rejecting on ambiguity. See §2.4. |
 | F21 | Low | Open | Before M3 (audit `L-3`). `gist-web` robots.txt lookup drops the original URL's port, always checks 443. See §2.8. |
 | F22 | Low | Open | Before M4 (audit `L-4`). `ffi_catch!` installs no custom panic hook; default panic messages hit stderr before `catch_unwind`. See §2.11/§5 M4. |
@@ -713,7 +715,7 @@ Findings from Security Review v1 (2026-09-08) are `F1`–`F12`/`F26`/`A1`–`A5`
 
 **Note (audit finding I-2, 2026-09-12):** `docs/security-review-v1.md` predates `F13`'s TOCTOU refinement (as tracked in `CLAUDE.md`) and all of `F14`–`F25`/`A6`–`A7` above, and predates the URL-import/search/removal Rust-side work generally — it is now materially behind this document and `CLAUDE.md` as sources of truth. Spot-checks of its other closed findings (F1/F2/F3/F6/F9/F11) still hold; this is a coverage gap in that document, not a regression in the code. A `security-review-v2.md` pass is future work, not done here — see the superseded-note added to that file directly.
 
-**Open items blocking release:** F10 (M4), A3 (M3), A4 (M4), A6 (M4). F12 accepted and deferred. F14/F15 fixed 2026-09-12 (see above). Additionally open per the 2026-09-12 audit: F16 (now, same batch as the now-closed F15), F17/F18/F19/F24 (before M2 exit), F20/F21/F25/A7 (before M3), F22/F23 (before M4).
+**Open items blocking release:** F10 (M4), A3 (M3), A4 (M4), A6 (M4). F12 accepted and deferred. F14–F19 all fixed 2026-09-12 (see above). Additionally open per the 2026-09-12 audit: F24 (before M2 exit), F20/F21/F25/A7 (before M3), F22/F23 (before M4).
 
 ---
 

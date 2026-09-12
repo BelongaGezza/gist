@@ -42,6 +42,16 @@ pub fn parse(
     let cursor = std::io::Cursor::new(bytes.to_vec());
     let mut archive = zip::ZipArchive::new(cursor)?;
 
+    // 2b. Entry-count cap (F16) — before touching any entry's content, since
+    // a crafted archive with a huge number of near-empty entries can stay
+    // well under max_bytes while still being expensive to enumerate.
+    if archive.len() > limits.max_zip_entries {
+        return Err(ParseError::ResourceLimitExceeded {
+            limit: format!("max_zip_entries={}", limits.max_zip_entries),
+            attempted: archive.len(),
+        });
+    }
+
     // 3. Parse styles.xml (needed for heading detection)
     let styles = parse_styles(&mut archive, limits)?;
 
@@ -690,6 +700,39 @@ mod tests {
             result,
             Err(ParseError::ResourceLimitExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn test_zip_entry_count_cap_is_enforced() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        // Build a zip with 6 tiny entries and set the cap to 5 — should be
+        // rejected before any entry's content is ever read (F16).
+        let mut zip_bytes = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut zip_bytes);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default();
+            for i in 0..6 {
+                writer
+                    .start_file(format!("entry{}.txt", i), options)
+                    .unwrap();
+                writer.write_all(b"x").unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let limits = ParseLimits {
+            max_zip_entries: 5,
+            ..ParseLimits::default()
+        };
+        let result = parse(&zip_bytes, "test", &limits);
+        assert!(
+            matches!(result, Err(ParseError::ResourceLimitExceeded { .. })),
+            "expected ResourceLimitExceeded for a 6-entry zip capped at 5, got {:?}",
+            result
+        );
     }
 
     #[test]
