@@ -297,6 +297,11 @@ impl Store {
         let originals_dir = self.storage_dir.join("originals");
         std::fs::create_dir_all(&originals_dir)?;
 
+        // Every current caller derives `ext` via `Path::extension()` (which
+        // can never contain a path separator), but this is a public method —
+        // sanitize defensively at its own boundary (F23) rather than relying
+        // entirely on that caller discipline holding for every future caller.
+        let ext = sanitize_ext(ext);
         let filename = if ext.is_empty() {
             hash
         } else {
@@ -760,6 +765,15 @@ fn escape_fts5_query(query: &str) -> String {
     format!("\"{}\"", query.replace('"', "\"\""))
 }
 
+/// Reduces `ext` to ASCII alphanumeric characters only, for safe use in a
+/// content-addressed filename (F23, used by [`Store::store_original_copy`]).
+/// A real file extension never legitimately needs `/`, `\`, `..`, or any
+/// other punctuation, so this drops such characters rather than trying to
+/// escape them — there's no path-construction meaning left to preserve.
+fn sanitize_ext(ext: &str) -> String {
+    ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -991,6 +1005,38 @@ mod tests {
         // No extension is fine too (e.g. an extensionless source file).
         let no_ext = store.store_original_copy(b"no extension here", "").unwrap();
         assert!(!no_ext.ends_with('.'));
+    }
+
+    // ── ext sanitization (F23) ───────────────────────────────────────────
+
+    #[test]
+    fn sanitize_ext_strips_path_traversal_characters() {
+        assert_eq!(sanitize_ext("txt"), "txt");
+        assert_eq!(sanitize_ext("../../etc/passwd"), "etcpasswd");
+        assert_eq!(sanitize_ext("../../../evil"), "evil");
+        assert_eq!(sanitize_ext("txt/../evil"), "txtevil");
+        assert_eq!(sanitize_ext(r"..\..\windows"), "windows");
+        assert_eq!(sanitize_ext(""), "");
+    }
+
+    #[test]
+    fn store_original_copy_confines_traversal_attempt_ext_to_originals_dir() {
+        let (dir, store) = open_test_store();
+
+        let path = store
+            .store_original_copy(b"malicious payload", "../../../../etc/passwd")
+            .unwrap();
+        let path = std::path::Path::new(&path);
+
+        // The resulting file must land inside <storage_dir>/originals/, not
+        // have escaped it via the traversal sequence in `ext`.
+        let originals_dir = dir.path().join("storage").join("originals");
+        assert_eq!(
+            path.parent().map(|p| p.canonicalize().unwrap()),
+            Some(originals_dir.canonicalize().unwrap()),
+            "traversal-attempt ext must not escape the originals directory"
+        );
+        assert!(path.exists());
     }
 
     #[test]

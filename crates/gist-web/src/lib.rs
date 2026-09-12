@@ -59,11 +59,7 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
     }
 
     // 3. robots.txt pre-check.
-    let robots_url = format!(
-        "{}://{}/robots.txt",
-        parsed.scheme(),
-        parsed.host_str().unwrap_or("")
-    );
+    let robots_url = robots_url_for(&parsed);
     let robots_agent = build_agent();
     // 4xx/5xx or network error → treat as allowed (ADR-005).
     if let Ok(resp) = robots_agent
@@ -215,6 +211,25 @@ pub(crate) fn read_limited(
 }
 
 // ── robots.txt ────────────────────────────────────────────────────────────────
+
+/// Builds the `/robots.txt` URL for `parsed`, preserving its scheme, host,
+/// and — unlike a manually-formatted `scheme://host/robots.txt` string — its
+/// port (F21). Uses `Url::join`, which replaces only the path/query/fragment
+/// of an absolute-path reference, so an explicit non-default port on `parsed`
+/// carries through correctly instead of always resolving to the default
+/// HTTPS port.
+pub(crate) fn robots_url_for(parsed: &Url) -> String {
+    parsed
+        .join("/robots.txt")
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| {
+            format!(
+                "{}://{}/robots.txt",
+                parsed.scheme(),
+                parsed.host_str().unwrap_or("")
+            )
+        })
+}
 
 /// Returns `true` when `path` is disallowed by the `*` or `GIST` blocks.
 ///
@@ -464,6 +479,23 @@ mod tests {
     use super::*;
 
     // ── robots.txt ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_robots_url_preserves_explicit_port() {
+        let parsed = Url::parse("https://example.com:8443/some/path").unwrap();
+        assert_eq!(
+            robots_url_for(&parsed),
+            "https://example.com:8443/robots.txt"
+        );
+    }
+
+    #[test]
+    fn test_robots_url_default_port_omitted() {
+        // No explicit port — url's Display omits the default HTTPS port,
+        // same as the original manual construction did.
+        let parsed = Url::parse("https://example.com/some/path?q=1#frag").unwrap();
+        assert_eq!(robots_url_for(&parsed), "https://example.com/robots.txt");
+    }
 
     #[test]
     fn test_robots_disallowed() {

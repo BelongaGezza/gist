@@ -1,0 +1,30 @@
+version: 2
+updates:
+  # Compensating control for cargo-deny's advisories check, which currently
+  # can't run in this dev environment (see CLAUDE.md's Security policies
+  # section — cargo-deny 0.18.3's bundled RustSec DB parser can't read a
+  # CVSS 4.0 entry; the fix needs cargo-deny 0.20+/rustc 1.88+). Weekly
+  # version-bump PRs surface most new advisories via updated dependency
+  # versions independent of that local tooling gap. This file also needs
+  # "Dependabot alerts" and "Dependabot security updates" enabled in the
+  # repo's Settings > Security page — that's an account-level toggle, not
+  # something a config file can turn on.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "rust"
+
+  # Companion to F3's SHA-pinning policy (every `uses:` line pinned to a full
+  # commit SHA) — Dependabot opens a PR to bump the pin (with the version
+  # comment) when a new release lands, so pinning doesn't silently calcify.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
