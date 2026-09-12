@@ -161,7 +161,13 @@ final class RsvpPlayer: ObservableObject {
 struct RsvpView: View {
     let itemId: String
     @EnvironmentObject var core: CoreClient
+    @EnvironmentObject var themeManager: ThemeManager
     @StateObject private var player = RsvpPlayer()
+
+    /// RSVP is the one place OLED "true black" matters most -- a word
+    /// display lit against a black background during a reading session --
+    /// so the theme's background is applied full-bleed here.
+    private var theme: Theme { themeManager.resolvedTheme }
 
     var body: some View {
         Group {
@@ -172,6 +178,7 @@ struct RsvpView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .background(theme.background.ignoresSafeArea())
         .navigationTitle("RSVP")
         .task { await player.load(core: core, itemId: itemId) }
         .onDisappear { Task { await player.stopAndPersist() } }
@@ -182,13 +189,14 @@ struct RsvpView: View {
             // Word display.
             Text(player.currentToken?.text ?? "")
                 .font(.system(size: 48, weight: .regular, design: .serif))
+                .foregroundStyle(theme.foreground)
                 .frame(maxWidth: .infinity)
                 .padding()
 
             if let progressText = player.progressText {
                 Text(progressText)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.foreground.opacity(0.6))
                     .monospacedDigit()
             }
 
@@ -196,6 +204,7 @@ struct RsvpView: View {
             VStack {
                 Text("\(player.wpm) WPM")
                     .font(.caption)
+                    .foregroundStyle(theme.foreground.opacity(0.6))
                     .monospacedDigit()
                 Slider(
                     value: Binding(
@@ -205,6 +214,7 @@ struct RsvpView: View {
                     in: 100...1000,
                     step: 10
                 )
+                .tint(theme.accent)
                 .frame(width: 200)
                 .accessibilityLabel("Reading speed")
             }
@@ -219,10 +229,12 @@ struct RsvpView: View {
             } label: {
                 Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
                     .font(.title)
+                    .foregroundStyle(theme.accent)
             }
             .keyboardShortcut(.space, modifiers: [])
             .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.background)
     }
 }
