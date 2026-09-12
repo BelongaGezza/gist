@@ -13,6 +13,7 @@ private let importableContentTypes: [UTType] = [
 
 struct LibraryView: View {
     @EnvironmentObject var core: CoreClient
+    @EnvironmentObject var themeManager: ThemeManager
     @Binding var navigationPath: [String]
     @State private var showImporter = false
     @State private var searchText = ""
@@ -42,6 +43,9 @@ struct LibraryView: View {
                 itemList
             }
         }
+        .background(themeManager.resolvedTheme.background)
+        .foregroundStyle(themeManager.resolvedTheme.foreground)
+        .scrollContentBackground(.hidden)
         .navigationTitle("Library")
         .searchable(text: $searchText, prompt: "Search library")
         .onChange(of: searchText) { _, newValue in
