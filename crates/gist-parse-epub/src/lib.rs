@@ -164,6 +164,7 @@ fn parse_opf(
         author,
         source_type: "epub".to_string(),
         source_ref: None,
+        source_copy_ref: None,
         import_date: None,
         language: None,
         word_count: 0, // recomputed by Document::new

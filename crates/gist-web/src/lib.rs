@@ -254,6 +254,7 @@ pub(crate) fn build_document(html: &str, url: &str) -> Document {
         author: None,
         source_type: "web".to_string(),
         source_ref: Some(url.to_string()),
+        source_copy_ref: None,
         import_date: None,
         language: None,
         word_count: 0, // Document::new recomputes this

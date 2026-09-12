@@ -1,5 +1,15 @@
 use std::path::Path;
 
+/// Lower-cased file extension with no leading dot (empty string if none).
+/// Shared by every import path that needs to name a sandboxed copy of the
+/// original file (ADR-006).
+fn file_ext(path: &Path) -> String {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+}
+
 // ── Parse error (shared across image/doc parsers) ──────────────────────────
 
 /// Errors returned by format-specific parsers and pre-processors.
@@ -164,8 +174,14 @@ impl Core {
 
         let mut doc = gist_parse_txt::parse(&bytes, stem, &limits)?;
 
-        // Stamp source path into metadata.
+        // Copy into sandboxed storage before stamping metadata (ADR-006) —
+        // only for content that parsed successfully.
+        let copy_path = self.store.store_original_copy(&bytes, &file_ext(path))?;
+
+        // Stamp source path (informational) and the sandboxed copy path
+        // (authoritative for any future file-based operation, e.g. removal).
         doc.metadata.source_ref = Some(path.to_string_lossy().into_owned());
+        doc.metadata.source_copy_ref = Some(copy_path);
 
         // Rebuild token stream (Document::new already did this, but we
         // re-run so changes to metadata are reflected if needed).
@@ -276,11 +292,7 @@ impl Core {
             .and_then(|s| s.to_str())
             .unwrap_or("untitled");
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+        let ext = file_ext(path);
 
         // Magic-byte detection first, extension as fallback.
         let mime = infer::get(&bytes).map(|t| t.mime_type()).unwrap_or("");
@@ -306,8 +318,16 @@ impl Core {
             return Err(ImportError::Cancelled);
         }
 
-        // Stamp source path.
+        // Copy into sandboxed storage before stamping metadata (ADR-006) —
+        // only for content that parsed successfully (DRM-rejected, unsupported,
+        // or resource-limited input never reaches this point, so no orphaned
+        // copies pile up for files GIST refused to import).
+        let copy_path = self.store.store_original_copy(&bytes, &ext)?;
+
+        // Stamp source path (informational) and the sandboxed copy path
+        // (authoritative for any future file-based operation, e.g. removal).
         doc.metadata.source_ref = Some(path.to_string_lossy().into_owned());
+        doc.metadata.source_copy_ref = Some(copy_path);
         doc.token_stream = doc.build_token_stream();
 
         let id = doc.id.clone();
@@ -330,6 +350,12 @@ impl Core {
     /// 3. Stamp the source URL, then rebuild the token stream.
     /// 4. Insert into the store.
     /// 5. Return the document id.
+    ///
+    /// Unlike `import_file`/`import_txt`, this never populates
+    /// `Metadata.source_copy_ref` (ADR-006's copy-on-import) — there is no
+    /// local file to copy, only fetched-and-extracted content. `source_ref`
+    /// (the URL) remains the only provenance record, and removal's
+    /// `delete_source_files` has nothing to do for URL-imported items.
     pub fn import_url(
         &self,
         url: &str,
@@ -370,9 +396,12 @@ impl Core {
     ///
     /// The internal `.json`/`.tokens.json` blobs (derived storage) are
     /// always deleted for every item the store actually removed. The
-    /// original imported file (`source_path`) is only deleted when
-    /// `delete_source_files` is true, since that file may be a
-    /// user-managed document living outside app storage.
+    /// sandboxed copy of the original file (`source_copy_path`, ADR-006) is
+    /// only deleted when `delete_source_files` is true. This deliberately
+    /// never touches `source_path` — the user's original file at its real,
+    /// possibly-outside-app-storage location — which GIST must never delete;
+    /// an item with no sandboxed copy (a URL import, or one imported before
+    /// ADR-006 landed) simply has nothing to delete here.
     ///
     /// File deletion is best-effort: a missing or unremovable file is
     /// logged at `debug!` (per this project's source-path logging policy)
@@ -408,15 +437,19 @@ impl Core {
             }
 
             if delete_source_files {
-                if let Some(source_path) = &item.source_path {
-                    if let Err(e) = std::fs::remove_file(source_path) {
+                if let Some(source_copy_path) = &item.source_copy_path {
+                    if let Err(e) = std::fs::remove_file(source_copy_path) {
                         tracing::debug!(
-                            "gist-core: failed to delete source file {}: {}",
-                            source_path,
+                            "gist-core: failed to delete source copy {}: {}",
+                            source_copy_path,
                             e
                         );
                     }
                 }
+                // else: no sandboxed copy exists for this item (URL import,
+                // or imported before ADR-006 landed) — nothing to delete.
+                // `item.source_path` (the user's real file) is never used
+                // here; see the doc comment above.
             }
         }
 
@@ -578,8 +611,28 @@ mod tests {
         assert!(txt2.exists());
     }
 
+    /// Finds the single file under `<storage>/originals/`, asserting there's
+    /// exactly one (the sandboxed copy ADR-006 requires `import_file` to
+    /// make).
+    fn the_one_sandboxed_copy(storage: &std::path::Path) -> std::path::PathBuf {
+        let originals_dir = storage.join("originals");
+        let copies: Vec<_> = std::fs::read_dir(&originals_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(
+            copies.len(),
+            1,
+            "expected exactly one sandboxed copy in {originals_dir:?}, found {copies:?}"
+        );
+        copies.into_iter().next().unwrap()
+    }
+
+    /// The core ADR-006 guarantee under test: `delete_source_files: true`
+    /// must delete the sandboxed copy GIST made at import time, and must
+    /// never touch the user's original file at its real location.
     #[test]
-    fn remove_items_with_delete_source_files_true_deletes_source() {
+    fn remove_items_with_delete_source_files_true_deletes_the_sandboxed_copy_not_the_original() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("test.db");
         let storage = dir.path().join("storage");
@@ -590,11 +643,17 @@ mod tests {
         std::fs::write(&txt, b"Delete my source file too.").unwrap();
         let id = core.import_file(&txt, &NullObserver).unwrap();
 
+        let copy_path = the_one_sandboxed_copy(&storage);
+
         core.remove_items(&[id], true).unwrap();
 
         assert!(
-            !txt.exists(),
-            "source file should be deleted when delete_source_files=true"
+            !copy_path.exists(),
+            "the sandboxed copy should be deleted when delete_source_files=true"
+        );
+        assert!(
+            txt.exists(),
+            "GIST must never delete the user's original file (ADR-006)"
         );
     }
 
@@ -610,11 +669,17 @@ mod tests {
         std::fs::write(&txt, b"Keep my source file.").unwrap();
         let id = core.import_file(&txt, &NullObserver).unwrap();
 
+        let copy_path = the_one_sandboxed_copy(&storage);
+
         core.remove_items(&[id], false).unwrap();
 
         assert!(
             txt.exists(),
             "source file should survive when delete_source_files=false"
+        );
+        assert!(
+            copy_path.exists(),
+            "sandboxed copy should also survive when delete_source_files=false"
         );
     }
 

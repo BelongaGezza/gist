@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -22,7 +23,7 @@ pub enum StoreError {
 
 // ── Schema version ────────────────────────────────────────────────────────
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 // ── LibraryItem (lightweight row, not the full Document) ──────────────────
 
@@ -49,9 +50,16 @@ pub struct RemovedItem {
     /// Path to the `<id>.json` document blob (derived storage, not the
     /// user's original file — always safe/expected to delete).
     pub doc_path: String,
-    /// Path to the original imported file, if known. Deleting this is
-    /// user-configurable (the original file may live outside app storage).
+    /// The original import location (filesystem path or URL), informational
+    /// only. Per ADR-006, this is never deleted or otherwise touched by
+    /// GIST — it may point outside app storage entirely.
     pub source_path: Option<String>,
+    /// Path to the sandboxed, content-addressed copy of the originally
+    /// imported file (ADR-006), if one exists. `None` for URL-imported items
+    /// (no local file was ever copied) or items imported before this field
+    /// existed. This — not `source_path` — is what removal deletes when the
+    /// caller asks to discard the source file.
+    pub source_copy_path: Option<String>,
 }
 
 // ── Collection ──────────────────────────────────────────────────────────────
@@ -176,6 +184,20 @@ impl Store {
             tracing::info!("gist-store: migrated schema to version 3 (collections + tags)");
         }
 
+        // v3 → v4: sandboxed copy of the originally imported file (ADR-006).
+        // `source_path` (from `Metadata.source_ref`) remains the raw,
+        // informational-only import location; this new column is the one
+        // file-deletion code should ever touch.
+        if version < 4 {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE library_items ADD COLUMN source_copy_path TEXT;
+                 PRAGMA user_version = 4;
+                 COMMIT;",
+            )?;
+            tracing::info!("gist-store: migrated schema to version 4 (source_copy_path)");
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
             storage_dir: storage_dir.to_owned(),
@@ -201,8 +223,10 @@ impl Store {
         let authors_json = serde_json::to_string(&authors)?;
         let meta_json = serde_json::to_string(meta)?;
         let doc_path_str = doc_path.to_string_lossy().into_owned();
-        // source_ref holds the origin path/URL; cover_path is not in M0 Metadata.
+        // source_ref holds the origin path/URL (informational only, ADR-006);
+        // cover_path is not in M0 Metadata.
         let source_path: Option<&str> = meta.source_ref.as_deref();
+        let source_copy_path: Option<&str> = meta.source_copy_ref.as_deref();
         let now_ms = now_millis();
 
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
@@ -211,8 +235,8 @@ impl Store {
         tx.execute(
             "INSERT OR REPLACE INTO library_items
              (id, title, authors, source_path, source_url, doc_path, cover_path,
-              created_at, updated_at, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              created_at, updated_at, metadata_json, source_copy_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 doc.id,
                 meta.title,
@@ -224,6 +248,7 @@ impl Store {
                 now_ms,
                 now_ms,
                 meta_json,
+                source_copy_path,
             ],
         )?;
 
@@ -242,6 +267,48 @@ impl Store {
         tx.commit()?;
         tracing::debug!("gist-store: inserted item {}", doc.id);
         Ok(())
+    }
+
+    /// Copy `bytes` into this store's sandboxed, content-addressed
+    /// `originals/` directory (ADR-006), returning the copy's absolute path
+    /// as a string. Callers stamp this onto `Metadata.source_copy_ref` before
+    /// calling [`Store::insert_item`].
+    ///
+    /// The filename is the SHA-256 hex digest of `bytes`, plus `ext` if
+    /// non-empty (no leading dot expected). Re-importing byte-identical
+    /// content reuses the existing file instead of writing a duplicate — an
+    /// existing file at the computed path is left untouched, not rewritten.
+    ///
+    /// **Known limitation:** because identical content dedupes to one file,
+    /// two library items imported from the same bytes share one copy on
+    /// disk. Nothing currently reads document content from this path (reads
+    /// always go through `doc_path`, the serialised IR), so this is safe
+    /// today, but removing one such item with `delete_source_files: true`
+    /// will delete the shared file out from under the other — a follow-up
+    /// would need reference counting (e.g. only delete when no other
+    /// `library_items` row still references the same `source_copy_path`) if
+    /// this ever needs to be exposed as a per-item guarantee.
+    pub fn store_original_copy(&self, bytes: &[u8], ext: &str) -> Result<String, StoreError> {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let digest = hasher.finalize();
+        let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+
+        let originals_dir = self.storage_dir.join("originals");
+        std::fs::create_dir_all(&originals_dir)?;
+
+        let filename = if ext.is_empty() {
+            hash
+        } else {
+            format!("{hash}.{ext}")
+        };
+        let copy_path = originals_dir.join(filename);
+
+        if !copy_path.exists() {
+            std::fs::write(&copy_path, bytes)?;
+        }
+
+        Ok(copy_path.to_string_lossy().into_owned())
     }
 
     /// Remove a single item. Thin wrapper around [`Store::remove_items`] so
@@ -263,14 +330,16 @@ impl Store {
     ///
     /// **File deletion ordering (why this function never touches the
     /// filesystem):** this function only removes DB rows and returns the
-    /// `doc_path`/`source_path` each removed row held. Callers (`gist-core`)
-    /// must delete the corresponding `.json`/`.tokens.json` blobs — and,
-    /// optionally, the original source file — only *after* this function
-    /// returns `Ok`. That ordering (DB commit, then best-effort file
-    /// cleanup) means an interruption can only ever leave behind an
-    /// orphaned *file* on disk (harmless, reclaimable later), never an
-    /// orphaned DB row pointing at files that no longer exist — the reverse
-    /// of the ordering bug this replaces.
+    /// `doc_path`/`source_path`/`source_copy_path` each removed row held.
+    /// Callers (`gist-core`) must delete the corresponding
+    /// `.json`/`.tokens.json` blobs — and, optionally, the sandboxed source
+    /// copy (`source_copy_path`, ADR-006; never `source_path`, which is the
+    /// user's original file at its real location and must never be deleted
+    /// by GIST) — only *after* this function returns `Ok`. That ordering (DB
+    /// commit, then best-effort file cleanup) means an interruption can only
+    /// ever leave behind an orphaned *file* on disk (harmless, reclaimable
+    /// later), never an orphaned DB row pointing at files that no longer
+    /// exist — the reverse of the ordering bug this replaces.
     ///
     /// **Unknown ids:** an id in `ids` that doesn't match any row is
     /// silently skipped rather than treated as an error, so a bulk remove
@@ -289,21 +358,25 @@ impl Store {
         let mut removed = Vec::new();
 
         {
-            let mut select_stmt =
-                tx.prepare("SELECT doc_path, source_path FROM library_items WHERE id = ?1")?;
+            let mut select_stmt = tx.prepare(
+                "SELECT doc_path, source_path, source_copy_path FROM library_items WHERE id = ?1",
+            )?;
             let mut delete_stmt = tx.prepare("DELETE FROM library_items WHERE id = ?1")?;
 
             for id in ids {
-                let row: Option<(String, Option<String>)> = select_stmt
-                    .query_row(params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+                let row: Option<(String, Option<String>, Option<String>)> = select_stmt
+                    .query_row(params![id], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
                     .optional()?;
 
-                if let Some((doc_path, source_path)) = row {
+                if let Some((doc_path, source_path, source_copy_path)) = row {
                     delete_stmt.execute(params![id])?;
                     removed.push(RemovedItem {
                         id: id.clone(),
                         doc_path,
                         source_path,
+                        source_copy_path,
                     });
                 }
                 // else: unknown id — silently skipped, see doc comment above.
@@ -869,6 +942,9 @@ mod tests {
         assert_eq!(removed[0].id, doc1.id);
         assert_eq!(removed[0].doc_path, doc1_path.to_string_lossy());
         assert_eq!(removed[0].source_path.as_deref(), Some("/tmp/alpha.txt"));
+        // doc_with_title never sets source_copy_ref (that's gist-core's job,
+        // via store_original_copy), so there's nothing to delete here.
+        assert_eq!(removed[0].source_copy_path, None);
 
         // The DB row for doc1 is gone; doc2's row is untouched.
         assert!(store.get_item_by_id(&doc1.id).unwrap().is_none());
@@ -879,6 +955,46 @@ mod tests {
         assert!(doc1_path.exists());
         assert!(doc1_tokens_path.exists());
         assert!(doc2_path.exists());
+    }
+
+    #[test]
+    fn store_original_copy_is_content_addressed_and_deduplicates() {
+        let (_dir, store) = open_test_store();
+
+        let path1 = store.store_original_copy(b"hello world", "txt").unwrap();
+        let path2 = store.store_original_copy(b"hello world", "txt").unwrap();
+        assert_eq!(
+            path1, path2,
+            "identical bytes + extension must hash to the same path"
+        );
+        assert!(std::path::Path::new(&path1).exists());
+        assert!(path1.ends_with(".txt"));
+
+        let different = store.store_original_copy(b"goodbye world", "txt").unwrap();
+        assert_ne!(path1, different);
+
+        // No extension is fine too (e.g. an extensionless source file).
+        let no_ext = store.store_original_copy(b"no extension here", "").unwrap();
+        assert!(!no_ext.ends_with('.'));
+    }
+
+    #[test]
+    fn source_copy_path_round_trips_through_insert_and_remove() {
+        let (_dir, store) = open_test_store();
+
+        let copy_path = store.store_original_copy(b"quokka content", "txt").unwrap();
+        let mut doc = doc_with_title("delta");
+        doc.metadata.source_copy_ref = Some(copy_path.clone());
+        store.insert_item(&doc).unwrap();
+
+        let removed = store.remove_items(&[doc.id.clone()]).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(
+            removed[0].source_copy_path.as_deref(),
+            Some(copy_path.as_str())
+        );
+        // source_path (informational only) is unaffected by the copy path.
+        assert_eq!(removed[0].source_path.as_deref(), Some("/tmp/delta.txt"));
     }
 
     #[test]

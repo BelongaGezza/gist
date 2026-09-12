@@ -51,7 +51,10 @@ All user data lives in `~/Library/Application Support/GIST/` (macOS):
 
 - `gist.sqlite` — library metadata, progress, annotations, FTS5 index
 - `docs/` — serialised Document JSON files
-- `originals/` — content-addressed copy of imported source files
+- `originals/` — content-addressed copy of imported source files, per ADR-006
+  (implemented 2026-09-12; file-based imports only — URL imports have no
+  local file to copy). `Metadata.source_ref` remains the raw original path,
+  informational only; `Metadata.source_copy_ref` points at the copy here.
 
 No data leaves the device. No accounts. No telemetry.
 
