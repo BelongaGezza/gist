@@ -3,8 +3,7 @@
 //! Policy: ADR-005 (TLS-only, 5-redirect max, 50 MB cap, 30s connect / 60s read,
 //! no cookies, robots.txt pre-check).
 
-use gist_core::ParseLimits;
-use gist_model::{Block, Document, Metadata, Section, TextRun};
+use gist_model::{Block, Document, Metadata, ParseLimits, Section, TextRun};
 use scraper::{Html, Selector};
 use url::Url;
 

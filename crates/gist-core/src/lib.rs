@@ -317,6 +317,48 @@ impl Core {
         Ok(id)
     }
 
+    /// Import content fetched from `url` into the library.
+    ///
+    /// Pipeline:
+    /// 1. Fetch and extract readable content via `gist_web::fetch_url`, which
+    ///    enforces ADR-005 (TLS-only, robots.txt pre-check, size cap) before
+    ///    any parsing happens — there's no separate local size pre-check the
+    ///    way `import_file` does, because there's no local file to stat.
+    /// 2. Check cancellation. Unlike `import_file`'s separate read/parse
+    ///    stages, `fetch_url` is a single blocking call, so there's only one
+    ///    natural point to check before it and one after.
+    /// 3. Stamp the source URL, then rebuild the token stream.
+    /// 4. Insert into the store.
+    /// 5. Return the document id.
+    pub fn import_url(
+        &self,
+        url: &str,
+        observer: &dyn ImportObserver,
+    ) -> Result<String, ImportError> {
+        if observer.is_cancelled() {
+            return Err(ImportError::Cancelled);
+        }
+
+        let mut doc = gist_web::fetch_url(url, &ParseLimits::default())
+            .map_err(|e| ImportError::Web(e.to_string()))?;
+
+        if observer.is_cancelled() {
+            return Err(ImportError::Cancelled);
+        }
+
+        // Stamp source URL (fetch_url's build_document already sets this,
+        // but stamp explicitly here too so the pipeline step matches
+        // import_file's pattern and doesn't rely on gist-web's internals).
+        doc.metadata.source_ref = Some(url.to_owned());
+        doc.token_stream = doc.build_token_stream();
+
+        let id = doc.id.clone();
+        self.store.insert_item(&doc)?;
+
+        tracing::debug!("gist-core: imported url as {}", id);
+        Ok(id)
+    }
+
     /// Import a single image file and run OCR using the provided engine.
     ///
     /// Phase M3 stub — the full pipeline (multi-page PDF tiling, heuristic
@@ -407,5 +449,26 @@ mod tests {
         // AlwaysCancelObserver returns is_cancelled=true immediately.
         let err = core.import_file(&txt, &AlwaysCancelObserver).unwrap_err();
         assert!(matches!(err, ImportError::Cancelled));
+    }
+
+    #[test]
+    fn import_url_rejects_non_https_without_network_access() {
+        // gist-web enforces HTTPS-only (ADR-005) before ever touching the
+        // network, so this exercises the import_url wiring without needing
+        // connectivity in CI or this sandbox.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let err = core
+            .import_url("http://example.com", &NullObserver)
+            .unwrap_err();
+        assert!(
+            matches!(err, ImportError::Web(_)),
+            "expected ImportError::Web for a non-HTTPS URL, got {:?}",
+            err
+        );
     }
 }

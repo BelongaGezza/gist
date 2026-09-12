@@ -9,6 +9,5 @@ license = "MIT"
 ureq      = { version = "2", default-features = false, features = ["rustls"] }
 scraper   = "0.20"
 url       = "2"
-gist-core  = { path = "../gist-core" }
 gist-model = { path = "../gist-model" }
 thiserror = { workspace = true }
