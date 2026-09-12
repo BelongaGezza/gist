@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// Hosts a `ReadingLayout` implementation plus its shared toolbar chrome
-/// (font-size stepper, search field with find-next/previous, and a TOC
-/// menu) — kept generic over `Layout` even though `FlowViewSwiftUINative` is
+/// (typography menu, search field with find-next/previous, and a nested TOC
+/// popover indented by heading level — see `TocListView` below) — kept
+/// generic over `Layout` even though `FlowViewSwiftUINative` is
 /// currently the only conformer (CLAUDE.md's Q8 decided 2026-09-12; the
 /// TextKit 2 alternative this was prototyped against was removed), since Q3
 /// (a paginated view, still open for v1.1) is a plausible second
@@ -15,6 +16,7 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
     @EnvironmentObject var themeManager: ThemeManager
     @State private var document: FlowDocumentVM?
     @State private var typography = TypographySettings()
+    @State private var showingToc = false
     @StateObject private var search = SearchState()
     @StateObject private var navigation = SectionNavigator()
     @StateObject private var progress: ReadingProgress
@@ -69,14 +71,16 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
     private func toolbarContent(document: FlowDocumentVM) -> some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             if !document.tableOfContents.isEmpty {
-                Menu {
-                    ForEach(document.tableOfContents) { entry in
-                        Button(String(repeating: "    ", count: max(entry.level - 1, 0)) + entry.title) {
-                            navigation.pendingSectionId = entry.sectionId
-                        }
-                    }
+                Button {
+                    showingToc = true
                 } label: {
                     Label("Contents", systemImage: "list.bullet")
+                }
+                .popover(isPresented: $showingToc) {
+                    TocListView(entries: document.tableOfContents) { sectionId in
+                        navigation.pendingSectionId = sectionId
+                        showingToc = false
+                    }
                 }
             }
 
@@ -146,5 +150,35 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
     private var matchCountLabel: String {
         guard !search.query.isEmpty else { return "" }
         return search.matchCount > 0 ? "\(search.currentMatchIndex + 1)/\(search.matchCount)" : "0/0"
+    }
+}
+
+/// Nested table-of-contents list, indented by heading level (`h1` flush,
+/// `h2` indented once, `h3` indented twice, ...) via `TocEntry.indentLevel`.
+/// Presented in a `.popover` off the same "Contents" toolbar button the
+/// previous flat implementation used -- the entry point is unchanged, only
+/// what appears once it's open. A `List` rather than a `Menu`: macOS menu
+/// items don't reliably support per-row indentation (the prior
+/// implementation faked it with literal leading spaces in the button title),
+/// whereas ordinary `List` rows can just carry leading padding.
+private struct TocListView: View {
+    let entries: [TocEntry]
+    let onSelect: (String) -> Void
+
+    /// Points of leading padding per nesting level.
+    private static let indentUnit: CGFloat = 16
+
+    var body: some View {
+        List(entries) { entry in
+            Button {
+                onSelect(entry.sectionId)
+            } label: {
+                Text(entry.title)
+                    .padding(.leading, CGFloat(entry.indentLevel) * Self.indentUnit)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(minWidth: 260, idealHeight: 320, maxHeight: 420)
     }
 }

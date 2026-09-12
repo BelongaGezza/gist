@@ -93,4 +93,80 @@ final class FlowViewTests: XCTestCase {
         let ranges = "café".rangesOfSubstring("fé")
         XCTAssertEqual(ranges, [2..<4])
     }
+
+    // MARK: - TocEntry.indentLevel
+
+    func testTocEntryIndentLevelIsHeadingLevelMinusOne() {
+        XCTAssertEqual(TocEntry(sectionIndex: 0, sectionId: "s", level: 1, title: "T").indentLevel, 0)
+        XCTAssertEqual(TocEntry(sectionIndex: 0, sectionId: "s", level: 2, title: "T").indentLevel, 1)
+        XCTAssertEqual(TocEntry(sectionIndex: 0, sectionId: "s", level: 3, title: "T").indentLevel, 2)
+        XCTAssertEqual(TocEntry(sectionIndex: 0, sectionId: "s", level: 6, title: "T").indentLevel, 5)
+    }
+
+    func testTocEntryIndentLevelClampsOutOfRangeLevelToFlush() {
+        // gist-model's `level: u8` isn't itself range-checked to 1...6; an
+        // unexpected 0 (or, in principle, negative if the type ever widened)
+        // must render flush rather than with negative padding.
+        XCTAssertEqual(TocEntry(sectionIndex: 0, sectionId: "s", level: 0, title: "T").indentLevel, 0)
+    }
+
+    // MARK: - FlowDocumentVM.tableOfContents (decode + nesting)
+
+    /// Builds the JSON shape `gist_model::Document` serialises -- see
+    /// `FlowSectionVM`/`FlowBlockVM`'s hand-written `init(from:)` in
+    /// FlowDocumentModel.swift, which mirror serde's externally-tagged enum
+    /// and tuple representations. `heading` sections take `(level, text)`;
+    /// headless sections take `nil`. Blocks are irrelevant to the TOC so
+    /// each section gets an empty `blocks` array.
+    private func documentJSON(headings: [(level: Int, title: String)?]) -> Data {
+        let sections = headings.enumerated().map { index, heading -> String in
+            let headingJSON = heading.map { "[\($0.level), \"\($0.title)\"]" } ?? "null"
+            return """
+            {"id": "s\(index)", "heading": \(headingJSON), "blocks": []}
+            """
+        }
+        let json = """
+        {
+            "id": "doc1",
+            "metadata": {"title": "Test Doc", "author": null},
+            "sections": [\(sections.joined(separator: ","))]
+        }
+        """
+        return Data(json.utf8)
+    }
+
+    func testTableOfContentsIncludesOnlyHeadingSectionsInDocumentOrderWithIndentLevels() throws {
+        let json = documentJSON(headings: [
+            (1, "Chapter 1"),
+            (2, "Section 1.1"),
+            nil,  // a headless paragraph-only section, e.g. front matter
+            (3, "Subsection 1.1.1"),
+            (1, "Chapter 2"),
+        ])
+        let document = try JSONDecoder().decode(FlowDocumentVM.self, from: json)
+        let toc = document.tableOfContents
+
+        XCTAssertEqual(toc.count, 4, "the headless section must not appear in the TOC")
+        XCTAssertEqual(toc.map(\.title), ["Chapter 1", "Section 1.1", "Subsection 1.1.1", "Chapter 2"])
+        XCTAssertEqual(toc.map(\.level), [1, 2, 3, 1])
+        XCTAssertEqual(toc.map(\.indentLevel), [0, 1, 2, 0])
+        // sectionIndex must point back at the section's real position in
+        // `document.sections`, skipping over the headless one (index 2).
+        XCTAssertEqual(toc.map(\.sectionIndex), [0, 1, 3, 4])
+    }
+
+    func testTableOfContentsIsEmptyWhenDocumentHasNoHeadings() throws {
+        let json = documentJSON(headings: [nil, nil, nil])
+        let document = try JSONDecoder().decode(FlowDocumentVM.self, from: json)
+        XCTAssertTrue(document.tableOfContents.isEmpty)
+    }
+
+    func testTableOfContentsWithAllSectionsAtSameLevelHaveEqualIndentAndPreserveOrder() throws {
+        let json = documentJSON(headings: [(2, "First"), (2, "Second"), (2, "Third")])
+        let document = try JSONDecoder().decode(FlowDocumentVM.self, from: json)
+        let toc = document.tableOfContents
+
+        XCTAssertEqual(toc.map(\.title), ["First", "Second", "Third"])
+        XCTAssertEqual(Set(toc.map(\.indentLevel)), [1], "all same heading level must indent equally")
+    }
 }
