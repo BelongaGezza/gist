@@ -42,6 +42,7 @@ struct LibraryView: View {
     @State private var urlToImport = ""
     @State private var showNewCollectionAlert = false
     @State private var newCollectionName = ""
+    @State private var tagEditorTarget: TagEditorTarget?
 
     /// Whether `searchText` is non-empty, i.e. `itemList` should render
     /// `core.searchResults` instead of the full `core.items` list.
@@ -123,6 +124,19 @@ struct LibraryView: View {
                 }
                 .disabled(selection.count != 1)
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    if let id = selection.first, let item = displayedItems.first(where: { $0.id == id }) {
+                        tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)
+                    }
+                } label: {
+                    Label("Tags", systemImage: "tag")
+                }
+                .disabled(selection.count != 1)
+            }
+        }
+        .sheet(item: $tagEditorTarget) { target in
+            TagEditorView(itemId: target.id, itemTitle: target.title)
         }
         .fileImporter(
             isPresented: $showImporter,
@@ -248,25 +262,20 @@ struct LibraryView: View {
     /// recognizer, so it never conflicted with selection).
     private var itemList: some View {
         List(displayedItems, selection: $selection) { item in
-            VStack(alignment: .leading) {
-                Text(item.title)
-                    .font(.headline)
-                if !item.authors.isEmpty {
-                    Text(item.authors.joined(separator: ", "))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            LibraryRowContent(item: item)
+                .contextMenu {
+                    Button("Open in Reader") {
+                        navigationPath.append(item.id)
+                    }
+                    Button("Manage Tags…") {
+                        tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)
+                    }
+                    Divider()
+                    Button("Remove…", role: .destructive) {
+                        selection = [item.id]
+                        showRemoveConfirm = true
+                    }
                 }
-            }
-            .contextMenu {
-                Button("Open in Reader") {
-                    navigationPath.append(item.id)
-                }
-                Divider()
-                Button("Remove…", role: .destructive) {
-                    selection = [item.id]
-                    showRemoveConfirm = true
-                }
-            }
         }
     }
 }
