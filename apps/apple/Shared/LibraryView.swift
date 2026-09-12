@@ -93,6 +93,10 @@ struct LibraryView: View {
     /// to keep the two controls' interaction unambiguous.
     @State private var tagFilter: String?
     @State private var tagFilteredItems: [LibraryItemVM] = []
+    /// Backs `.searchFocused` below so ⌘F can programmatically focus the
+    /// `.searchable` field -- previously it was reachable only by clicking
+    /// into it with the mouse/trackpad (see CLAUDE.md's M2 item-5 note).
+    @FocusState private var isSearchFieldFocused: Bool
 
     /// Whether `searchText` is non-empty, i.e. `itemList` should render
     /// `core.searchResults` instead of the full `core.items` list.
@@ -124,6 +128,18 @@ struct LibraryView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle("Library")
         .searchable(text: $searchText, prompt: "Search library")
+        .searchFocused($isSearchFieldFocused)
+        .background {
+            // Invisible button purely to host the ⌘F shortcut -- standard
+            // SwiftUI idiom for binding a keyboard shortcut to an action
+            // that isn't itself a visible control. `.searchFocused` (the
+            // declarative macOS/iOS 17+ counterpart to `.searchable`) does
+            // the actual focus work; no manual NSResponder/first-responder
+            // poking involved.
+            Button("Focus Search") { isSearchFieldFocused = true }
+                .keyboardShortcut("f", modifiers: .command)
+                .hidden()
+        }
         .onChange(of: searchText) { _, newValue in
             // A tag filter and an active search are mutually exclusive (see
             // `tagFilter`'s doc comment) -- starting a search cancels
