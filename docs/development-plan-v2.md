@@ -435,7 +435,7 @@ DRM error (`ParseError::DrmProtected`) must surface a distinct, user-facing expl
 ### 3.5 Reader — flow view · **XL** ⏳ M2
 Virtualised rendering, full typography controls, TOC/section jump, in-document search, progress bar, scroll-position persistence, keyboard/trackpad navigation.
 
-**Key architecture decision (see §7 Q8):** SwiftUI `Text` per block in a `LazyVStack` vs TextKit 2 via `NSViewRepresentable`. Recommendation: SwiftUI-native for v1.0 with `AttributedString`; escalate to TextKit 2 only if selection/highlighting proves inadequate. Build on a `ReadingLayout` protocol regardless.
+**Architecture decision (see §7 Q8) — DECIDED 2026-09-12: SwiftUI-native.** Both `Text`-per-block-in-a-`LazyVStack` and a TextKit 2 `NSViewRepresentable` were prototyped in M2 (`apps/apple/macOS/FlowViewSwiftUINative.swift`; the TextKit 2 prototype was removed once the decision landed). Selection/find-highlighting did prove weaker in SwiftUI, as the "escalate only if inadequate" framing anticipated — but the decision went to SwiftUI anyway, since cross-platform reuse (TextKit 2/`NSTextView` is AppKit-only; GIST also targets iOS) and native `ThemeManager`/environment integration outweighed that gap for v1.0. Revisit only if a later requirement (e.g. copy-to-clipboard, share-sheet quoting) makes real text selection non-negotiable. Built on a `ReadingLayout` protocol, kept generic so Q3's paginated view (still open, v1.1) can conform later without touching `FlowReaderContainer`.
 
 ### 3.6 RSVP view + speed dial · **L** ⏳ M3
 Fixed-position word display with ORP highlight, play/pause, rotary speed dial, numeric WPM readout, accessible stepper alternative, scrub/seek, back-5-words, punctuation-pause toggle, exit-to-flow, session stats.
@@ -661,6 +661,7 @@ Beta feedback triaged; release notes; landing/README; GitHub issue templates; v1
 - Q7: IR storage format — `<id>.json` + `<id>.tokens.json` on disk, SQLite holds metadata + paths (ADR-007) ✅
 - Q9: Minimum macOS version = macOS 14 (unlocks `@Observable`, modern `NavigationSplitView`, string catalogs) ✅
 - Q12: Web fetch policy — ADR-005 written and gist-web implemented ✅ `[F26]`
+- Q8: SwiftUI `Text` vs TextKit 2 for the flow view — **decided 2026-09-12: SwiftUI-native**, both prototyped in M2 first. See §3.5's architecture-decision note for the full rationale. ✅
 
 **Still open — decide before implementation begins:**
 
@@ -668,7 +669,6 @@ Beta feedback triaged; release notes; landing/README; GitHub issue templates; v1
 |---|---|---|
 | **Q3** | Paginated view: v1.0 or v1.1? *(This plan: v1.1, but flow view built on layout abstraction regardless)* | M2 start |
 | **Q4** | Windows OCR: `Windows.Media.Ocr` vs Tesseract? *(Design the `OcrEngine` trait to support both; decide implementation at Windows kickoff)* | Windows kickoff |
-| **Q8** | SwiftUI `Text` vs TextKit 2 for the flow view? *(Prototype both in M2; decide before M3)* | M2 end |
 | **Q10** | Schema/IR versioning and forward compatibility? *(Required before first public beta)* | M4 start |
 | **Q11** | At-rest document integrity **and confidentiality**: is BLAKE3 checksumming warranted for stored document blobs `[A4]`? *(Broadened 2026-09-12, audit finding I-3/`[A6]`)* And separately: is encryption-at-rest warranted for ADR-007's IR blobs and ADR-006's original-copy files, both currently plaintext, given the product stores personal reading material? If so, record an **ADR-011** (OS-native keychain-backed — e.g. iOS Data Protection / macOS equivalent — not custom crypto). Both are human-architect decisions this plan flags but does not pre-decide. | M4 start |
 
