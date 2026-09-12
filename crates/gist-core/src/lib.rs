@@ -535,6 +535,21 @@ impl Core {
         Ok(self.store.list_tags_for_item(item_id)?)
     }
 
+    /// Return the names of every tag that exists across the library.
+    /// See `gist_store::Store::list_all_tags`.
+    pub fn list_all_tags(&self) -> Result<Vec<String>, CoreError> {
+        Ok(self.store.list_all_tags()?)
+    }
+
+    /// Return all library items tagged with `tag_name` (newest first).
+    /// See `gist_store::Store::list_items_by_tag`.
+    pub fn list_items_by_tag(
+        &self,
+        tag_name: &str,
+    ) -> Result<Vec<gist_store::LibraryItem>, CoreError> {
+        Ok(self.store.list_items_by_tag(tag_name)?)
+    }
+
     /// Import a single image file and run OCR using the provided engine.
     ///
     /// Phase M3 stub — the full pipeline (multi-page PDF tiling, heuristic
@@ -876,5 +891,31 @@ mod tests {
 
         let tags_after_removal = core.list_tags_for_item(&item_id).unwrap();
         assert_eq!(tags_after_removal, vec!["favourite".to_string()]);
+    }
+
+    #[test]
+    fn list_all_tags_and_list_items_by_tag_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let tagged_path = dir.path().join("tagged.txt");
+        std::fs::write(&tagged_path, b"This one gets tagged.").unwrap();
+        let tagged_id = core.import_file(&tagged_path, &NullObserver).unwrap();
+
+        let untagged_path = dir.path().join("untagged.txt");
+        std::fs::write(&untagged_path, b"This one does not.").unwrap();
+        let untagged_id = core.import_file(&untagged_path, &NullObserver).unwrap();
+
+        core.add_tag(&tagged_id, "favourite").unwrap();
+
+        assert_eq!(core.list_all_tags().unwrap(), vec!["favourite".to_string()]);
+
+        let items = core.list_items_by_tag("favourite").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, tagged_id);
+        assert!(items.iter().all(|i| i.id != untagged_id));
     }
 }

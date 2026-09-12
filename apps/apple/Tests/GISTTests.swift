@@ -216,6 +216,30 @@ final class GISTTests: XCTestCase {
         tags = await client.listTagsForItem(itemId: item.id)
         XCTAssertTrue(tags.isEmpty)
     }
+
+    // MARK: - Tag-based filtering
+
+    func testListAllTagsAndListItemsByTagRoundTrip() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        await client.listAllTags()
+        XCTAssertTrue(client.allTags.isEmpty)
+
+        await client.addTag(itemId: item.id, tagName: "favorites")
+        await client.listAllTags()
+        XCTAssertEqual(client.allTags, ["favorites"])
+
+        let tagged = await client.listItemsByTag(tagName: "favorites")
+        XCTAssertEqual(tagged.map(\.id), [item.id])
+
+        let untagged = await client.listItemsByTag(tagName: "nonexistent")
+        XCTAssertTrue(untagged.isEmpty)
+    }
 }
 
 /// `LibraryFiltering` is pure logic factored out of `LibraryView` precisely
@@ -292,5 +316,45 @@ final class LibraryFilteringTests: XCTestCase {
         let t2 = TagEditorTarget(id: "item-1", title: "Bar")
         XCTAssertEqual(t1.id, t2.id)
         XCTAssertNotEqual(t1, t2)
+    }
+
+    // MARK: - Sorting
+
+    private static let unsorted: [LibraryItemVM] = [
+        LibraryItemVM(id: "1", title: "Banana", authors: ["Zeta"], sourcePath: nil),
+        LibraryItemVM(id: "2", title: "apple", authors: ["Alpha"], sourcePath: nil),
+        LibraryItemVM(id: "3", title: "Cherry", authors: [], sourcePath: nil),
+    ]
+
+    /// `.dateAddedNewest` must be a true no-op (not merely "looks the same
+    /// today") since every FFI list call already returns newest-first --
+    /// re-sorting here would be redundant work at best and silently wrong if
+    /// a caller's array ever isn't already ordered that way.
+    func testSortedDateAddedNewestPreservesOriginalOrder() {
+        let result = LibraryFiltering.sorted(Self.unsorted, by: .dateAddedNewest)
+        XCTAssertEqual(result.map(\.id), ["1", "2", "3"])
+    }
+
+    func testSortedDateAddedOldestReversesOrder() {
+        let result = LibraryFiltering.sorted(Self.unsorted, by: .dateAddedOldest)
+        XCTAssertEqual(result.map(\.id), ["3", "2", "1"])
+    }
+
+    func testSortedTitleAZIsCaseInsensitive() {
+        let result = LibraryFiltering.sorted(Self.unsorted, by: .titleAZ)
+        // "apple" (lowercase) must sort with "Banana"/"Cherry" by letter, not
+        // after them by ASCII case.
+        XCTAssertEqual(result.map(\.title), ["apple", "Banana", "Cherry"])
+    }
+
+    func testSortedTitleZAIsReverseOfTitleAZ() {
+        let result = LibraryFiltering.sorted(Self.unsorted, by: .titleZA)
+        XCTAssertEqual(result.map(\.title), ["Cherry", "Banana", "apple"])
+    }
+
+    func testSortedAuthorAZTreatsNoAuthorAsEmptyString() {
+        let result = LibraryFiltering.sorted(Self.unsorted, by: .authorAZ)
+        // "" (Cherry, no author) sorts before "Alpha" before "Zeta".
+        XCTAssertEqual(result.map(\.id), ["3", "2", "1"])
     }
 }

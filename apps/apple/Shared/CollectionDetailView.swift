@@ -21,6 +21,11 @@ struct CollectionDetailView: View {
     @State private var selection = Set<String>()
     @State private var tagEditorTarget: TagEditorTarget?
     @State private var showRemoveConfirm = false
+    @State private var sortOrder: LibrarySortOrder = .dateAddedNewest
+
+    private var sortedItems: [LibraryItemVM] {
+        LibraryFiltering.sorted(items, by: sortOrder)
+    }
 
     var body: some View {
         Group {
@@ -60,6 +65,17 @@ struct CollectionDetailView: View {
                     Label("Remove from Collection", systemImage: "folder.badge.minus")
                 }
                 .disabled(selection.isEmpty)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Picker("Sort By", selection: $sortOrder) {
+                        ForEach(LibrarySortOrder.allCases) { order in
+                            Text(order.label).tag(order)
+                        }
+                    }
+                } label: {
+                    Label("Sort", systemImage: "arrow.up.arrow.down")
+                }
             }
         }
         .sheet(item: $tagEditorTarget) { target in
@@ -112,7 +128,7 @@ struct CollectionDetailView: View {
     }
 
     private var itemList: some View {
-        List(items, selection: $selection) { item in
+        List(sortedItems, selection: $selection) { item in
             LibraryRowContent(item: item)
                 .contextMenu {
                     Button("Open in Reader") {
