@@ -197,6 +197,23 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    /// Returns the items belonging to a collection (newest first), via
+    /// `GistCore::list_items_in_collection`. Unlike `refresh()`/`search()`,
+    /// this doesn't publish into a shared `@Published` property -- callers
+    /// (currently just `CollectionDetailView`) hold the result as local view
+    /// state, since only one collection is browsed at a time.
+    func listItemsInCollection(collectionId: String) async -> [LibraryItemVM] {
+        guard let core else { return [] }
+        do {
+            let ffiItems = try core.listItemsInCollection(collectionId: collectionId)
+            error = nil
+            return mapItems(ffiItems)
+        } catch {
+            self.error = "\(error)"
+            return []
+        }
+    }
+
     /// Import any supported file (txt, epub, docx) via the generic FFI
     /// import path, which sniffs the format from magic bytes / extension.
     func importFile(url: URL) async {
@@ -254,7 +271,7 @@ struct LibraryItemVM: Identifiable {
     let sourcePath: String?
 }
 
-struct CollectionVM: Identifiable {
+struct CollectionVM: Identifiable, Hashable {
     let id: String
     let name: String
     let createdAt: Int64
