@@ -60,3 +60,21 @@ targets:
       - Tests
     dependencies:
       - target: GISTmacOS
+    settings:
+      base:
+        # GISTmacOS's PRODUCT_NAME is "GIST" (not the target name), so the
+        # default XcodeGen-inferred TEST_HOST/BUNDLE_LOADER (which assume
+        # product name == target name) point at a nonexistent GISTmacOS.app.
+        # Point them at the real product explicitly.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/GIST.app/Contents/MacOS/GIST"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  GISTmacOS:
+    build:
+      targets:
+        GISTmacOS: all
+        GISTTests: [test]
+    test:
+      targets:
+        - GISTTests

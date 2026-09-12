@@ -7,6 +7,9 @@ final class CoreClient: ObservableObject {
     static let shared = CoreClient()
 
     @Published var items: [LibraryItemVM] = []
+    @Published var searchResults: [LibraryItemVM] = []
+    @Published var isSearching = false
+    @Published var collections: [CollectionVM] = []
     @Published var isLoading = false
     @Published var error: String?
     /// Set (instead of `error`) when an import fails specifically because the
@@ -41,17 +44,156 @@ final class CoreClient: ObservableObject {
         defer { isLoading = false }
         do {
             let ffiItems = try core.listItems(offset: 0, limit: 500)
-            items = ffiItems.map { item in
-                LibraryItemVM(
-                    id: item.id,
-                    title: item.title ?? "Untitled",
-                    authors: item.authors,
-                    sourcePath: item.sourcePath
-                )
+            items = mapItems(ffiItems)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    private func mapItems(_ ffiItems: [FfiLibraryItem]) -> [LibraryItemVM] {
+        ffiItems.map { item in
+            LibraryItemVM(
+                id: item.id,
+                title: item.title ?? "Untitled",
+                authors: item.authors,
+                sourcePath: item.sourcePath
+            )
+        }
+    }
+
+    /// Runs an FTS5 search via `GistCore::search_items` and publishes into
+    /// `searchResults`. An empty/whitespace-only query clears the results
+    /// rather than round-tripping to FFI, since `LibraryView` treats a
+    /// non-empty `searchResults` set as "showing search, not the full list."
+    func search(query: String) async {
+        guard let core else { return }
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            searchResults = []
+            return
+        }
+        isSearching = true
+        defer { isSearching = false }
+        do {
+            let ffiItems = try core.searchItems(query: query, limit: 200)
+            searchResults = mapItems(ffiItems)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    /// Removes items from the library. `deleteSourceFiles` controls whether
+    /// GIST's sandboxed ADR-006 copy is also deleted (the user's real,
+    /// original file is never touched either way — see CLAUDE.md's
+    /// copy-on-import note).
+    func removeItems(ids: [String], deleteSourceFiles: Bool) async {
+        guard let core else { return }
+        do {
+            try core.removeItems(ids: ids, deleteSourceFiles: deleteSourceFiles)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+        await refresh()
+    }
+
+    /// Imports a web page by URL via `Core::import_url`, following the same
+    /// DRM/error-handling shape as `importFile` (DRM is unreachable in
+    /// practice for a web-fetch import, but the shared `GistError` type
+    /// still carries the case, so we still branch on it for consistency).
+    func importUrl(urlString: String) async {
+        guard let core else { return }
+        drmProtectedFile = nil
+        do {
+            _ = try core.importUrl(url: urlString)
+            error = nil
+        } catch let gistError as GistError {
+            switch gistError {
+            case .DrmProtected:
+                drmProtectedFile = URL(string: urlString)
+            case .Core, .InternalPanic:
+                error = "\(gistError)"
+            }
+        } catch {
+            self.error = "\(error)"
+        }
+        await refresh()
+    }
+
+    // MARK: - Collections & tags
+
+    func createCollection(name: String) async {
+        guard let core else { return }
+        do {
+            _ = try core.createCollection(name: name)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+        await listCollections()
+    }
+
+    func listCollections() async {
+        guard let core else { return }
+        do {
+            let ffiCollections = try core.listCollections()
+            collections = ffiCollections.map {
+                CollectionVM(id: $0.id, name: $0.name, createdAt: $0.createdAt)
             }
             error = nil
         } catch {
             self.error = "\(error)"
+        }
+    }
+
+    func addItemToCollection(itemId: String, collectionId: String) async {
+        guard let core else { return }
+        do {
+            try core.addItemToCollection(itemId: itemId, collectionId: collectionId)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    func removeItemFromCollection(itemId: String, collectionId: String) async {
+        guard let core else { return }
+        do {
+            try core.removeItemFromCollection(itemId: itemId, collectionId: collectionId)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    func addTag(itemId: String, tagName: String) async {
+        guard let core else { return }
+        do {
+            try core.addTag(itemId: itemId, tagName: tagName)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    func removeTag(itemId: String, tagName: String) async {
+        guard let core else { return }
+        do {
+            try core.removeTag(itemId: itemId, tagName: tagName)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    func listTagsForItem(itemId: String) async -> [String] {
+        guard let core else { return [] }
+        do {
+            return try core.listTagsForItem(itemId: itemId)
+        } catch {
+            self.error = "\(error)"
+            return []
         }
     }
 
@@ -110,4 +252,10 @@ struct LibraryItemVM: Identifiable {
     let title: String
     let authors: [String]
     let sourcePath: String?
+}
+
+struct CollectionVM: Identifiable {
+    let id: String
+    let name: String
+    let createdAt: Int64
 }

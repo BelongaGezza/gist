@@ -130,6 +130,13 @@ pub struct FfiLibraryItem {
     pub cover_path: Option<String>,
 }
 
+#[derive(uniffi::Record)]
+pub struct FfiCollection {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+}
+
 // ── GistCore object ──────────────────────────────────────────────────────────
 
 #[derive(uniffi::Object)]
@@ -258,6 +265,111 @@ impl GistCore {
         ffi_catch!({
             self.inner
                 .remove_items(&ids, delete_source_files)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Create a new collection. Returns the generated collection id.
+    /// See `gist_core::Core::create_collection`.
+    pub fn create_collection(&self, name: String) -> Result<String, GistError> {
+        ffi_catch!({ self.inner.create_collection(&name).map_err(GistError::from) })
+    }
+
+    /// Return all collections, newest first.
+    /// See `gist_core::Core::list_collections`.
+    pub fn list_collections(&self) -> Result<Vec<FfiCollection>, GistError> {
+        ffi_catch!({
+            let collections = self.inner.list_collections().map_err(GistError::from)?;
+            Ok(collections
+                .into_iter()
+                .map(|c| FfiCollection {
+                    id: c.id,
+                    name: c.name,
+                    created_at: c.created_at,
+                })
+                .collect())
+        })
+    }
+
+    /// Add an item to a collection. Idempotent — adding twice is a no-op.
+    /// See `gist_core::Core::add_item_to_collection`.
+    pub fn add_item_to_collection(
+        &self,
+        item_id: String,
+        collection_id: String,
+    ) -> Result<(), GistError> {
+        ffi_catch!({
+            self.inner
+                .add_item_to_collection(&item_id, &collection_id)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Remove an item from a collection.
+    /// See `gist_core::Core::remove_item_from_collection`.
+    pub fn remove_item_from_collection(
+        &self,
+        item_id: String,
+        collection_id: String,
+    ) -> Result<(), GistError> {
+        ffi_catch!({
+            self.inner
+                .remove_item_from_collection(&item_id, &collection_id)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Return all library items belonging to a collection (newest first).
+    /// See `gist_core::Core::list_items_in_collection`.
+    pub fn list_items_in_collection(
+        &self,
+        collection_id: String,
+    ) -> Result<Vec<FfiLibraryItem>, GistError> {
+        ffi_catch!({
+            let items = self
+                .inner
+                .list_items_in_collection(&collection_id)
+                .map_err(GistError::from)?;
+            Ok(items
+                .into_iter()
+                .map(|i| FfiLibraryItem {
+                    id: i.id,
+                    title: i.title,
+                    authors: i.authors,
+                    source_path: i.source_path,
+                    cover_path: i.cover_path,
+                })
+                .collect())
+        })
+    }
+
+    /// Attach a tag (by name) to an item, creating the tag if it doesn't
+    /// already exist. Idempotent — adding the same tag twice is a no-op.
+    /// See `gist_core::Core::add_tag`.
+    pub fn add_tag(&self, item_id: String, tag_name: String) -> Result<(), GistError> {
+        ffi_catch!({
+            self.inner
+                .add_tag(&item_id, &tag_name)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Detach a tag (by name) from an item. Does not delete the tag itself.
+    /// See `gist_core::Core::remove_tag`.
+    pub fn remove_tag(&self, item_id: String, tag_name: String) -> Result<(), GistError> {
+        ffi_catch!({
+            self.inner
+                .remove_tag(&item_id, &tag_name)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Return the names of all tags attached to an item.
+    /// See `gist_core::Core::list_tags_for_item`.
+    pub fn list_tags_for_item(&self, item_id: String) -> Result<Vec<String>, GistError> {
+        ffi_catch!({
+            self.inner
+                .list_tags_for_item(&item_id)
                 .map_err(GistError::from)
         })
     }
