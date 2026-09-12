@@ -19,8 +19,11 @@ struct FlowDocumentVM: Decodable {
     let sections: [FlowSectionVM]
 
     /// Table of contents: one entry per section that has a heading, in
-    /// document order. Deliberately not virtualised/nested by level — a
-    /// flat jump list is enough to compare the two rendering approaches.
+    /// document order. Each entry carries the heading's level (`h1`-`h6`,
+    /// straight from `gist_model::Section.heading`'s `(u8, String)` tuple —
+    /// no Rust-side change was needed, the level was already in the JSON and
+    /// simply wasn't surfaced in the UI) so the hosting container can nest
+    /// the rendered list by indentation; see `TocEntry.indentLevel`.
     var tableOfContents: [TocEntry] {
         sections.enumerated().compactMap { index, section in
             guard let heading = section.heading else { return nil }
@@ -40,6 +43,14 @@ struct TocEntry: Identifiable, Hashable {
     let level: Int
     let title: String
     var id: String { sectionId }
+
+    /// Nesting depth for rendering: `h1` is flush (0), `h2` indented once
+    /// (1), `h3` indented twice (2), and so on. `gist-model`'s
+    /// `Block::Heading { level: u8, .. }` doesn't itself constrain the range
+    /// (parsers are expected to emit `1...6`, but nothing enforces it), so
+    /// this clamps rather than producing negative padding for an
+    /// out-of-range `level < 1`.
+    var indentLevel: Int { max(level - 1, 0) }
 }
 
 struct FlowSectionVM: Decodable {
