@@ -11,6 +11,25 @@ private let importableContentTypes: [UTType] = [
     UTType("org.openxmlformats.wordprocessingml.document"),
 ].compactMap { $0 }
 
+/// Pure filtering logic factored out of `LibraryView` so it's unit-testable
+/// without constructing SwiftUI state (a view's `@State` can't be set from
+/// outside the view). See `GISTTests` for coverage.
+enum LibraryFiltering {
+    /// Whether `searchText` is non-empty, i.e. `displayedItems` should render
+    /// search results instead of the full item list.
+    static func isSearchActive(searchText: String) -> Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func displayedItems(
+        searchText: String,
+        items: [LibraryItemVM],
+        searchResults: [LibraryItemVM]
+    ) -> [LibraryItemVM] {
+        isSearchActive(searchText: searchText) ? searchResults : items
+    }
+}
+
 struct LibraryView: View {
     @EnvironmentObject var core: CoreClient
     @Binding var navigationPath: [String]
@@ -27,11 +46,11 @@ struct LibraryView: View {
     /// Whether `searchText` is non-empty, i.e. `itemList` should render
     /// `core.searchResults` instead of the full `core.items` list.
     private var isSearchActive: Bool {
-        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        LibraryFiltering.isSearchActive(searchText: searchText)
     }
 
     private var displayedItems: [LibraryItemVM] {
-        isSearchActive ? core.searchResults : core.items
+        LibraryFiltering.displayedItems(searchText: searchText, items: core.items, searchResults: core.searchResults)
     }
 
     var body: some View {

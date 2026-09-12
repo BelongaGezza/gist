@@ -57,7 +57,16 @@ targets:
     type: bundle.unit-test
     platform: macOS
     sources:
-      - Tests
+      - path: Tests
+        excludes:
+          - "Fixtures/**"
+      # Fixture files (plain text, not Swift) copied into the test bundle as
+      # resources so tests can look them up at runtime via
+      # Bundle(for:).url(forResource:withExtension:) rather than referencing
+      # a path into the top-level fixtures/ directory (which isn't guaranteed
+      # to exist relative to the test bundle's runtime working directory).
+      - path: Tests/Fixtures
+        buildPhase: resources
     dependencies:
       - target: GISTmacOS
     settings:

@@ -38,6 +38,24 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    /// Test-only construction path: builds a `CoreClient` around a real
+    /// `GistCore` pointed at caller-supplied db/storage locations, instead of
+    /// `.shared`'s production Application Support directory. This exists so
+    /// `GISTTests` can exercise real FFI + SQLite + filesystem behaviour
+    /// against a scratch temp directory per test, without touching (or
+    /// depending on) a real user's Application Support state.
+    ///
+    /// Additive only: `.shared` still goes through `private init()` above,
+    /// unchanged, so no production call site is affected.
+    init(dbPath: String, storageDir: String) {
+        do {
+            core = try GistCore(dbPath: dbPath, storageDir: storageDir)
+        } catch {
+            self.core = nil
+            self.error = "Failed to initialise GIST core: \(error)"
+        }
+    }
+
     func refresh() async {
         guard let core else { return }
         isLoading = true
