@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var core: CoreClient
+    @EnvironmentObject var themeManager: ThemeManager
     @State private var navigationPath: [String] = []
 
     var body: some View {
@@ -16,5 +17,10 @@ struct ContentView: View {
             }
         }
         .task { await core.refresh() }
+        .tint(themeManager.resolvedTheme.accent)
+        .background(themeManager.resolvedTheme.background)
+        .preferredColorScheme(
+            themeManager.selection == .system ? nil : themeManager.resolvedTheme.colorScheme
+        )
     }
 }
