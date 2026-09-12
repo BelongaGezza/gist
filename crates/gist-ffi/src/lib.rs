@@ -144,6 +144,15 @@ impl GistCore {
         })
     }
 
+    /// Fetch and import readable content from `url`. See `gist_core::Core::import_url`.
+    pub fn import_url(&self, url: String) -> Result<String, GistError> {
+        ffi_catch!({
+            self.inner
+                .import_url(&url, &gist_core::NullObserver)
+                .map_err(GistError::from)
+        })
+    }
+
     pub fn list_items(&self, offset: u64, limit: u64) -> Result<Vec<FfiLibraryItem>, GistError> {
         ffi_catch!({
             let items = self

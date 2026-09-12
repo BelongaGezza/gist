@@ -13,6 +13,7 @@ gist-parse-docx = { path = "../gist-parse-docx" }
 infer            = "0.15"
 gist-rsvp      = { path = "../gist-rsvp" }
 gist-store     = { path = "../gist-store" }
+gist-web       = { path = "../gist-web" }
 serde_json     = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }
