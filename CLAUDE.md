@@ -8,6 +8,10 @@ GIST is a cross-platform RSVP-style reading app. The Rust core handles all parsi
 
 The app is named **GIST**. All crates use the `gist-*` prefix. The older name "Readrrr" appears only in `docs/development-plan-v1.md` — ignore it; v2 supersedes it.
 
+## Working conventions
+
+- **Reports:** when a deliverable report is required (security review, audit, analysis writeup, etc.), default to a plain Markdown file. Only use the `artifact-design` skill / a styled HTML artifact when explicitly asked for one.
+
 ## Repository layout
 
 ```
@@ -40,7 +44,7 @@ gist/
     ├── development-plan-v1.md  # Superseded — use v2
     ├── development-plan-v2.md  # Current plan (security hardening integrated)
     ├── product-spec-reader-app-v3.md
-    └── security-review-v1.md   # M0 security review; all findings closed or tracked
+    └── security-review-v1.md   # M0 security review; findings closed or tracked but doc itself superseded/partial as of 2026-09-12 — see CLAUDE.md security register for current state
 ```
 
 ## Key architectural decisions (ADRs in docs/adr/)
@@ -57,6 +61,15 @@ gist/
 | 008 | FTS5: external-content table + tokens shadow table + sync triggers |
 | 009 | OcrEngine: uniffi callback interface (Swift implements, Rust orchestrates) |
 | 010 | HTTP: ureq + rustls (no tokio, no system OpenSSL) |
+
+## Independent security audit (2026-09-12, main @ 59cff8c)
+
+An independent consultant audit of the Rust core, import pipelines, FFI boundary, and CI/supply-chain posture landed same-day as the collections/search/URL-import/removal/copy-on-import work above. Findings are tracked as `F14`–`F25`/`A6`–`A7` in the security register below. The two High findings were fixed same-day:
+
+- **`F15` ✅ Closed 2026-09-12.** `gist-parse-epub`'s DRM/container-metadata reads (`container.xml`/OPF/`encryption.xml`) had no `max_expanded_bytes` cap, unlike spine content — a zip bomb targeting those three files worked against the shipped import path. Fixed: `check_drm`/`read_zip_entry_string` now route through a shared `read_capped` helper capped at `MAX_METADATA_EXPANDED_BYTES` (4 MiB), independent of `ParseLimits.max_expanded_bytes`. Covered by two new tests building a synthetic compression-bomb zip targeting each of `container.xml` and `encryption.xml`.
+- **`F14` ✅ Closed 2026-09-12.** `gist-web::fetch_url` only checked `scheme() == "https"`, never the resolved IP — SSRF via a DNS-controlled domain resolving to loopback/RFC1918/link-local. Fixed: `build_agent()` now sets `.https_only(true)` and `.resolver(safe_resolve)`, where `safe_resolve` filters out non-globally-routable addresses (loopback/private/link-local incl. cloud metadata/multicast/broadcast/documentation/unspecified/RFC 6598 CGNAT, plus IPv4-mapped IPv6 and IPv6 unique-local/link-local). Both are enforced by `ureq` on every connection attempt including redirect hops, which as a corollary also closes **`M-1`** (redirects weren't re-validated per-hop) — no separate fix was needed for that half of the finding. Covered by new unit tests on the address filter and `safe_resolve` itself.
+
+See the security register for the full list, and `docs/development-plan-v2.md` §0/§5/§8 for milestone scheduling.
 
 ## Security policies — must not be relaxed
 
@@ -88,8 +101,8 @@ All Rust crates are implemented:
 
 SwiftUI macOS app — status as of 2026-09-12:
 1. App skeleton + `CoreClient` wrapping FFI — **done** (`CoreClient` is a `@MainActor final class`, not literally a Swift `actor`, but serves the same single-touch-point role)
-2. Library grid/list view (collections, tags, sort/filter, FTS search, removal) — **not started.** `LibraryView.swift` is a flat, unsorted `List`; `SidebarView.swift` is an 11-line placeholder. The collections/tags data model now exists at the `gist-store` schema/CRUD layer only (schema v3, 2026-09-12: `collections`/`item_collections`/`tags`/`item_tags` tables, all join rows cascade-deleted from `library_items`; `Store` methods `create_collection`/`list_collections`/`add_item_to_collection`/`remove_item_from_collection`/`list_items_in_collection`/`add_tag`/`remove_tag`/`list_tags_for_item`, tested including the cascade case) — there is still no `gist-core`/`gist-ffi` wiring and no UI, both deliberately left as follow-up work. FTS search and item removal both now have a full Rust-side path (`GistCore::search_items` and `GistCore::remove_items` in `gist-ffi`, see the two notes above), but `apps/apple/Generated/gist_ffi.swift` hasn't been regenerated since either landed (still dated 2026-09-10, no `search_items`/`searchItems`/`remove_items`/`removeItems` symbols in it — `./tools/gen-bindings.sh` needs a run before Swift can even see the new exports), and there's no UI entry point regardless — `LibraryView` has no search field, no multi-select/removal affordance, and `CoreClient` has no wrapper method for either.
-3. Import flows + OCR review screen + DRM error presentation — **partially done.** txt/epub/docx import is wired end-to-end (`GistCore.import_file` FFI export → `CoreClient.importFile` → `LibraryView` file picker) with a dedicated DRM alert (`ImportError::DrmProtected` / `GistError::DrmProtected`, structured across the FFI boundary, not string-matched). URL-paste import now has an FFI export (`Core::import_url` in `gist-core`, `GistCore::import_url` in `gist-ffi`, wired 2026-09-12, covered by a `gist-core` test that exercises the non-HTTPS rejection path without a live network call) but still no UI — `apps/apple/Generated/gist_ffi.swift` hasn't been regenerated since, and `CoreClient`/`LibraryView` have no call site for it. OCR review screen does not exist; `Core::import_image_with_ocr` is still `todo!("OCR import pipeline — Phase M3")` — calling it over FFI panics cleanly (caught by `ffi_catch!`, surfaces as `GistError::InternalPanic`) but that's indistinguishable from a real bug in the UI, so don't wire a button to it before M3.
+2. Library grid/list view (collections, tags, sort/filter, FTS search, removal) — **not started.** `LibraryView.swift` is a flat, unsorted `List`; `SidebarView.swift` is an 11-line placeholder. The collections/tags data model now exists at the `gist-store` schema/CRUD layer only (schema v3, 2026-09-12: `collections`/`item_collections`/`tags`/`item_tags` tables, all join rows cascade-deleted from `library_items`; `Store` methods `create_collection`/`list_collections`/`add_item_to_collection`/`remove_item_from_collection`/`list_items_in_collection`/`add_tag`/`remove_tag`/`list_tags_for_item`, tested including the cascade case) — there is still no `gist-core`/`gist-ffi` wiring and no UI, both deliberately left as follow-up work. FTS search and item removal both now have a full Rust-side path (`GistCore::search_items` and `GistCore::remove_items` in `gist-ffi`, see the two notes above), but `apps/apple/Generated/gist_ffi.swift` hasn't been regenerated since either landed (still dated 2026-09-10, no `search_items`/`searchItems`/`remove_items`/`removeItems` symbols in it — `./tools/gen-bindings.sh` needs a run before Swift can even see the new exports), and there's no UI entry point regardless — `LibraryView` has no search field, no multi-select/removal affordance, and `CoreClient` has no wrapper method for either. **Before the search field ships:** `F19` — `search_items` sanitizes against SQL injection but not FTS5's own query grammar; unbalanced quotes/operators currently produce unsanitized errors or expensive query graphs.
+3. Import flows + OCR review screen + DRM error presentation — **partially done.** txt/epub/docx import is wired end-to-end (`GistCore.import_file` FFI export → `CoreClient.importFile` → `LibraryView` file picker) with a dedicated DRM alert (`ImportError::DrmProtected` / `GistError::DrmProtected`, structured across the FFI boundary, not string-matched). **`F15` ✅ Closed 2026-09-12:** the DRM/container-metadata reads in that same epub path (`container.xml`/OPF/`encryption.xml`) now have a 4 MiB expanded-bytes cap independent of `ParseLimits`, closing the zip-bomb gap — see the audit section above. URL-paste import now has an FFI export (`Core::import_url` in `gist-core`, `GistCore::import_url` in `gist-ffi`, wired 2026-09-12, covered by a `gist-core` test that exercises the non-HTTPS rejection path without a live network call) but still no UI — `apps/apple/Generated/gist_ffi.swift` hasn't been regenerated since, and `CoreClient`/`LibraryView` have no call site for it. **`F14` ✅ Closed 2026-09-12:** `gist-web::fetch_url` now resolves through `safe_resolve`, which rejects non-globally-routable addresses, applied by `ureq` on every connection including redirect hops — the SSRF gap that was blocking a Swift call site for `import_url` is fixed, so wiring one is no longer gated on this. OCR review screen does not exist; `Core::import_image_with_ocr` is still `todo!("OCR import pipeline — Phase M3")` — calling it over FFI panics cleanly (caught by `ffi_catch!`, surfaces as `GistError::InternalPanic`) but that's indistinguishable from a real bug in the UI, so don't wire a button to it before M3. Note also `A7`: ADR-009's OCR callback interface has no `ParseLimits`-style size/dimension cap on the raw image bytes it will pass across FFI — needs an ADR-009 addendum before this screen's pipeline is wired.
 4. Theme engine (light/dark/sepia/OLED, OS-follow) — **not started.**
 5. Flow reading view (virtualised, typography controls, TOC, in-document search) — **not started**, file doesn't exist. Q8 (SwiftUI Text vs TextKit 2) can't be decided until this starts.
 
@@ -104,7 +117,7 @@ Exit criterion: a team member can use it as their daily reader. Not met yet — 
 | Q3: Paginated view — v1.0 or v1.1? (plan says v1.1; flow view uses ReadingLayout abstraction) | M2 start |
 | Q8: SwiftUI Text vs TextKit 2 for flow view? (prototype both in M2) | M2 end |
 | Q10: Schema/IR versioning + forward compatibility policy | M4 start |
-| Q11: At-rest document integrity — BLAKE3 checksums on stored blobs? | M4 start |
+| Q11: At-rest document *confidentiality and* integrity — BLAKE3 checksums, **and** (broadened 2026-09-12 per audit finding `A6`) whether IR blobs (ADR-007) and original-copy files (ADR-006) need encryption-at-rest, not just checksums. Personal reading material is currently plaintext on disk. Needs a new ADR-011, OS-native keychain-backed (iOS Data Protection / macOS equivalent) — not custom crypto. | M4 start |
 
 ## Build & toolchain
 
@@ -157,7 +170,9 @@ XcodeGen generates the Xcode project — do NOT commit `apps/apple/*.xcodeproj`.
 | apple-build | PR touching apps/apple or FFI | XcodeGen → xcodebuild macOS debug + unit tests |
 | release-macos | tag v* | **Guard step exits non-zero until M4 implemented** |
 
-All third-party actions pinned to commit SHAs (see workflow files).
+**`F25`: the `apple-build` row above does not exist.** Only 5 workflow files are in `.github/workflows/` (core-test, core-quality, parser-corpus, fuzz, release-macos) — no apple-build among them. Since all Swift code is currently hand-verified rather than compiler-checked (see Current state above), there is no CI gate at all on the Swift half of the app today. That row is aspirational, not a status report — don't rely on it being true until `F25` is closed.
+
+All third-party actions pinned to commit SHAs (see workflow files). **`F18`:** none of the 5 workflows sets a `permissions:` block, so each inherits the default (possibly read-write) `GITHUB_TOKEN` scope — fix before M2 exit.
 
 ## Milestone register
 
@@ -165,12 +180,14 @@ All third-party actions pinned to commit SHAs (see workflow files).
 |-----------|--------|------|
 | M0 | ✅ Done | Architecture + vertical slice (txt → RSVP in macOS app) |
 | M1 | ✅ Done, CI-verified | Security hardening + parser breadth (epub/docx/web/imageprep) |
-| M2 | 🔶 In progress | Library & Reading UI (SwiftUI macOS) — import + RSVP wired; library/theme/flow-view not started; nothing compiler-verified yet |
-| M3 | — | RSVP view, annotations, accessibility pass |
-| M4 | — | Hardening, entitlements review, notarised DMG pipeline |
+| M2 | 🔶 In progress | Library & Reading UI (SwiftUI macOS) — import + RSVP wired; library/theme/flow-view not started; nothing compiler-verified yet. Security gate before exit: `F14`/`F15` ✅ closed 2026-09-12; `F16` (zip entry-count cap) still open, same batch as `F15` but not yet done; `F17`/`F18`/`F19`/`F24` fixed before exit. |
+| M3 | — | RSVP view, annotations, accessibility pass. Security gate: `F20`/`F21`/`F25` closed, `A7` (ADR-009 addendum) written before OCR wiring begins, entitlements review (`A3`) done. |
+| M4 | — | Hardening, entitlements review, notarised DMG pipeline. Security gate: `F22`/`F23` closed, `A6` (ADR-011 encryption-at-rest decision) recorded, `A4` (BLAKE3 integrity decision) recorded. |
 | M5 | — | v1.0 public release |
 
 ## Security register (open items)
+
+Rows `F1`–`F13`/`A1`–`A5` are from Security Review v1 (2026-09-08) and the same-day `A5` fix. Rows `F14`–`F25`/`A6`–`A7` are from the independent audit dated 2026-09-12 against main @ `59cff8c` (Rust core, import pipelines, FFI boundary, CI/supply-chain) — see `docs/development-plan-v2.md` §8 for the full scheduling rationale.
 
 | ID | Severity | Open | Notes |
 |----|----------|------|-------|
@@ -178,7 +195,21 @@ All third-party actions pinned to commit SHAs (see workflow files).
 | F12 | Info | Accepted | Document source_ref paths in PRIVACY.md before M4 |
 | A3 | Architecture | M3 | App Sandbox entitlements review + explicit .entitlements file |
 | A4 | Architecture | M4 | Decide at-rest integrity (BLAKE3 checksums) — record ADR |
-| A5 | Architecture | ✅ Closed same day | Found and fixed 2026-09-12. ADR-006 (copy-on-import) was unimplemented, meaning `Core::remove_items(delete_source_files: true)` deleted the user's real file at its real location. Fixed: `gist-store::store_original_copy` (SHA-256 content-addressed copy under `<storage_dir>/originals/`) + `Metadata.source_copy_ref`/schema v4 `source_copy_path`, wired through `import_txt`/`import_file`/`remove_items`. Known low-severity residual: content-hash dedup means two items from identical bytes share one copy file, so deleting one item's copy can remove a file another surviving item's row still references (harmless today — nothing reads content from that path — but no reference counting yet). See ADR-006. |
-| F13 | Informational | Accepted | TOCTOU gap in `gist-core::import_txt`/`import_file`: `fs::metadata` size check happens before a separate `fs::read`, so a file swapped between the two calls could bypass the `max_bytes` gate. Not exploitable under the current threat model (local single-user app, user picks the file via the OS panel); revisit if a multi-user or network-triggered import path is ever added. |
+| A5 | Architecture | ✅ Closed same day | Found and fixed 2026-09-12. ADR-006 (copy-on-import) was unimplemented, meaning `Core::remove_items(delete_source_files: true)` deleted the user's real file at its real location. Fixed: `gist-store::store_original_copy` (SHA-256 content-addressed copy under `<storage_dir>/originals/`) + `Metadata.source_copy_ref`/schema v4 `source_copy_path`, wired through `import_txt`/`import_file`/`remove_items`. Known low-severity residual: content-hash dedup means two items from identical bytes share one copy file, so deleting one item's copy can remove a file another surviving item's row still references (harmless today — nothing reads content from that path — but no reference counting yet). See ADR-006. **Independently reconfirmed by the 2026-09-12 audit (its finding L-6).** |
+| F13 | Informational | Accepted | TOCTOU gap in `gist-core::import_txt`/`import_file`: `fs::metadata` size check happens before a separate `fs::read`, so a file swapped between the two calls could bypass the `max_bytes` gate. Not exploitable under the current threat model (local single-user app, user picks the file via the OS panel); revisit if a multi-user or network-triggered import path is ever added. **Refined by the 2026-09-12 audit (its finding L-1):** more precisely, this is an unbounded-allocation-before-rejection window, not a bypass of the final size gate — becomes materially worse if `import_txt`/`import_file` is ever reused for a watched-folder/network-share import path, which has no OS file-picker to bound what gets swapped in. |
+| F14 | High | ✅ Closed 2026-09-12 | SSRF in `gist-web::fetch_url` (lib.rs:44-105): only checked `scheme() == "https"`, never validated the resolved IP. A DNS-controlled domain could present a valid cert while resolving to loopback/RFC1918/link-local. Fixed: `build_agent()` sets `.https_only(true)` and `.resolver(safe_resolve)`; `safe_resolve` filters resolved `SocketAddr`s to globally-routable ones only (loopback/private/link-local incl. cloud metadata/multicast/broadcast/documentation/unspecified/RFC 6598 CGNAT, plus IPv4-mapped IPv6 and IPv6 unique-local/link-local). Both checks are enforced by `ureq` on every connection attempt, including redirect hops, which also closes the compounding `M-1` gap (redirects weren't re-validated per-hop) as a corollary — no separate fix needed. 10 new unit tests. |
+| F15 | High | ✅ Closed 2026-09-12 | Zip-bomb in `gist-parse-epub` (lib.rs): `read_zip_entry_string`/`check_drm` read `container.xml`/OPF/`encryption.xml` with `max_expanded_bytes = usize::MAX`, unlike spine content, which caps correctly. Was exploitable via the shipped end-to-end epub import path. Fixed: both routed through a shared `read_capped` helper, capped at a new `MAX_METADATA_EXPANDED_BYTES` (4 MiB) independent of `ParseLimits.max_expanded_bytes` (which budgets spine content, not metadata read before the spine is known). 2 new tests build synthetic compression-bomb zips targeting `container.xml` and `encryption.xml` respectively and assert `ResourceLimitExceeded`. |
+| F16 | Medium | Now, before next parser work | No zip entry-count cap before per-entry limits apply, in both `gist-parse-epub` (lib.rs:74) and `gist-parse-docx` (lib.rs:43) — the central directory is parsed in full before any limit runs. |
+| F17 | Medium | Before M2 exit | Unbounded recursion in `collect_text`/`collect_blocks` walking untrusted HTML (`gist-web` lib.rs:296-359) — no depth cap, unlike every other parser's `ParseLimits.max_nesting_depth` convention. Stack-overflow DoS on adversarial HTML. |
+| F18 | Medium | Before M2 exit | No `permissions:` block in any of the 5 GitHub Actions workflows — each inherits the default (possibly read-write) `GITHUB_TOKEN` scope. |
+| F19 | Medium | Before M2 exit | `gist-store::search_items` (lib.rs:399) binds user search text safely against SQL injection but not against FTS5's own query grammar — unbalanced quotes/operators cause unsanitized errors or expensive query graphs. Fix before the search field ships in `LibraryView` (M2 item 2 above). |
+| F20 | Low | Before M3 | epub DRM check (`check_drm`, lib.rs:44-49) silently treats a malformed-but-valid `EncryptionMethod` with no `Algorithm` attribute as "no DRM" — should reject-on-ambiguity per ADR-004's intent instead. |
+| F21 | Low | Before M3 | robots.txt lookup in `gist-web` drops the original URL's port, always checking port 443. |
+| F22 | Low | Before M4 | `ffi_catch!` (gist-ffi/src/lib.rs:42-49) never leaks panic payloads into `GistError` (good) but installs no custom panic hook, so default panic messages still hit stderr before the catch — a latent leak path if stderr is ever captured into logs/telemetry. |
+| F23 | Low | Before M4 | `store_original_copy` (gist-store/src/lib.rs:291-312) relies on every caller using `file_ext()` to keep `ext` traversal-safe; the function itself doesn't defensively re-validate. |
+| F24 | Low | Before M2 exit | `cargo deny check advisories` is already documented above as non-functional in this dev environment, but there is no compensating control at all — no Dependabot config anywhere in the repo — so the project is currently blind to new RUSTSEC advisories. |
+| F25 | Informational | Before M3 | CI pipelines table above and `development-plan-v2.md` both document an `apple-build` pipeline that does not exist in `.github/workflows/` — only 5 workflow files exist, none of them apple-build. Since all Swift code today is hand-verified rather than compiler-checked, there is currently no CI gate at all on the Swift half of the app. |
+| A6 | Architecture | M4 | At-rest confidentiality undecided. ADR-007's IR blobs (`<id>.json`/`<id>.tokens.json`) and ADR-006's original-copy files are plaintext on disk. Q11 (above) broadened from an integrity-only question to a confidentiality decision; needs a new ADR-011 (encryption-at-rest, OS-native keychain-backed — e.g. iOS Data Protection / macOS equivalent, not custom crypto) before M4. This is a decision for a human architect to make; this pass only flags that it's needed. |
+| A7 | Architecture | M3 | ADR-009's OCR callback interface (M3 scope) will pass raw image bytes across FFI from user photos/scans with no `ParseLimits`-style size/dimension cap defined, unlike every other importer. Needs a short ADR-009 addendum before M3 OCR wiring begins — a decision for a human architect, flagged here, not pre-decided. |
 
-All other findings from Security Review v1 are closed.
+All other findings from Security Review v1 are closed. `docs/security-review-v1.md` itself predates F13's refinement and all of `F14`–`F25`/`A6`–`A7` — it is superseded/partial pending a v2 pass; this file (`CLAUDE.md`) is the current source of truth.
