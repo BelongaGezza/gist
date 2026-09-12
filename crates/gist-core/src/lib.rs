@@ -456,6 +456,72 @@ impl Core {
         Ok(())
     }
 
+    // ── Collections ─────────────────────────────────────────────────────────
+
+    /// Create a new collection. Returns the generated collection id.
+    /// See `gist_store::Store::create_collection`.
+    pub fn create_collection(&self, name: &str) -> Result<String, CoreError> {
+        Ok(self.store.create_collection(name)?)
+    }
+
+    /// Return all collections, newest first.
+    /// See `gist_store::Store::list_collections`.
+    pub fn list_collections(&self) -> Result<Vec<gist_store::Collection>, CoreError> {
+        Ok(self.store.list_collections()?)
+    }
+
+    /// Add an item to a collection. Idempotent — adding twice is a no-op.
+    /// See `gist_store::Store::add_item_to_collection`.
+    pub fn add_item_to_collection(
+        &self,
+        item_id: &str,
+        collection_id: &str,
+    ) -> Result<(), CoreError> {
+        Ok(self.store.add_item_to_collection(item_id, collection_id)?)
+    }
+
+    /// Remove an item from a collection.
+    /// See `gist_store::Store::remove_item_from_collection`.
+    pub fn remove_item_from_collection(
+        &self,
+        item_id: &str,
+        collection_id: &str,
+    ) -> Result<(), CoreError> {
+        Ok(self
+            .store
+            .remove_item_from_collection(item_id, collection_id)?)
+    }
+
+    /// Return all library items belonging to a collection (newest first).
+    /// See `gist_store::Store::list_items_in_collection`.
+    pub fn list_items_in_collection(
+        &self,
+        collection_id: &str,
+    ) -> Result<Vec<gist_store::LibraryItem>, CoreError> {
+        Ok(self.store.list_items_in_collection(collection_id)?)
+    }
+
+    // ── Tags ────────────────────────────────────────────────────────────────
+
+    /// Attach a tag (by name) to an item, creating the tag if it doesn't
+    /// already exist. Idempotent — adding the same tag twice is a no-op.
+    /// See `gist_store::Store::add_tag`.
+    pub fn add_tag(&self, item_id: &str, tag_name: &str) -> Result<(), CoreError> {
+        Ok(self.store.add_tag(item_id, tag_name)?)
+    }
+
+    /// Detach a tag (by name) from an item. Does not delete the tag itself.
+    /// See `gist_store::Store::remove_tag`.
+    pub fn remove_tag(&self, item_id: &str, tag_name: &str) -> Result<(), CoreError> {
+        Ok(self.store.remove_tag(item_id, tag_name)?)
+    }
+
+    /// Return the names of all tags attached to an item.
+    /// See `gist_store::Store::list_tags_for_item`.
+    pub fn list_tags_for_item(&self, item_id: &str) -> Result<Vec<String>, CoreError> {
+        Ok(self.store.list_tags_for_item(item_id)?)
+    }
+
     /// Import a single image file and run OCR using the provided engine.
     ///
     /// Phase M3 stub — the full pipeline (multi-page PDF tiling, heuristic
@@ -703,5 +769,75 @@ mod tests {
         core.remove_items(&ids, false).unwrap();
 
         assert!(core.list_items(0, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_collection_add_item_and_list_contents_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("in_collection.txt");
+        std::fs::write(&txt, b"A document that will live in a collection.").unwrap();
+        let item_id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let other_txt = dir.path().join("not_in_collection.txt");
+        std::fs::write(&other_txt, b"A document that stays uncollected.").unwrap();
+        let other_id = core.import_file(&other_txt, &NullObserver).unwrap();
+
+        let collection_id = core.create_collection("Favourites").unwrap();
+
+        let collections = core.list_collections().unwrap();
+        assert!(
+            collections
+                .iter()
+                .any(|c| c.id == collection_id && c.name == "Favourites"),
+            "expected newly created collection to appear in list_collections, got {:?}",
+            collections
+        );
+
+        core.add_item_to_collection(&item_id, &collection_id)
+            .unwrap();
+
+        let contents = core.list_items_in_collection(&collection_id).unwrap();
+        assert!(contents.iter().any(|i| i.id == item_id));
+        assert!(!contents.iter().any(|i| i.id == other_id));
+
+        core.remove_item_from_collection(&item_id, &collection_id)
+            .unwrap();
+
+        let contents_after_removal = core.list_items_in_collection(&collection_id).unwrap();
+        assert!(!contents_after_removal.iter().any(|i| i.id == item_id));
+    }
+
+    #[test]
+    fn add_and_remove_tag_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("tagged.txt");
+        std::fs::write(&txt, b"A document that will be tagged.").unwrap();
+        let item_id = core.import_file(&txt, &NullObserver).unwrap();
+
+        assert!(core.list_tags_for_item(&item_id).unwrap().is_empty());
+
+        core.add_tag(&item_id, "sci-fi").unwrap();
+        core.add_tag(&item_id, "favourite").unwrap();
+
+        // Adding the same tag twice is idempotent.
+        core.add_tag(&item_id, "sci-fi").unwrap();
+
+        let tags = core.list_tags_for_item(&item_id).unwrap();
+        assert_eq!(tags, vec!["favourite".to_string(), "sci-fi".to_string()]);
+
+        core.remove_tag(&item_id, "sci-fi").unwrap();
+
+        let tags_after_removal = core.list_tags_for_item(&item_id).unwrap();
+        assert_eq!(tags_after_removal, vec!["favourite".to_string()]);
     }
 }

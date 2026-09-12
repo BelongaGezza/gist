@@ -14,21 +14,84 @@ private let importableContentTypes: [UTType] = [
 struct LibraryView: View {
     @EnvironmentObject var core: CoreClient
     @State private var showImporter = false
+    @State private var searchText = ""
+    @State private var searchTask: Task<Void, Never>?
+    @State private var selection = Set<String>()
+    @State private var showRemoveConfirm = false
+    @State private var showUrlImportAlert = false
+    @State private var urlToImport = ""
+    @State private var showNewCollectionAlert = false
+    @State private var newCollectionName = ""
+
+    /// Whether `searchText` is non-empty, i.e. `itemList` should render
+    /// `core.searchResults` instead of the full `core.items` list.
+    private var isSearchActive: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var displayedItems: [LibraryItemVM] {
+        isSearchActive ? core.searchResults : core.items
+    }
 
     var body: some View {
         Group {
-            if core.items.isEmpty && !core.isLoading {
-                emptyState
+            if displayedItems.isEmpty && !core.isLoading {
+                isSearchActive ? AnyView(noResultsState) : AnyView(emptyState)
             } else {
                 itemList
             }
         }
         .navigationTitle("Library")
+        .searchable(text: $searchText, prompt: "Search library")
+        .onChange(of: searchText) { _, newValue in
+            // Debounce: cancel any in-flight wait and start a fresh one, same
+            // Task-based cancellation idiom RsvpPlayer.play() uses for its
+            // per-token sleep loop (see RsvpView.swift).
+            searchTask?.cancel()
+            searchTask = Task {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else { return }
+                await core.search(query: newValue)
+            }
+        }
+        .task { await core.listCollections() }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { showImporter = true } label: {
-                    Label("Import", systemImage: "plus")
+                    Label("Import File", systemImage: "plus")
                 }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { showUrlImportAlert = true } label: {
+                    Label("Import URL", systemImage: "link")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    ForEach(core.collections) { collection in
+                        Button(collection.name) {
+                            let ids = selection
+                            Task {
+                                for id in ids {
+                                    await core.addItemToCollection(itemId: id, collectionId: collection.id)
+                                }
+                            }
+                        }
+                    }
+                    if !core.collections.isEmpty {
+                        Divider()
+                    }
+                    Button("New Collection…") { showNewCollectionAlert = true }
+                } label: {
+                    Label("Add to Collection", systemImage: "folder.badge.plus")
+                }
+                .disabled(selection.isEmpty)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button(role: .destructive) { showRemoveConfirm = true } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+                .disabled(selection.isEmpty)
             }
         }
         .fileImporter(
@@ -54,7 +117,7 @@ struct LibraryView: View {
             )
         }
         .alert(
-            "Import Failed",
+            "Error",
             isPresented: Binding(
                 get: { core.error != nil },
                 set: { if !$0 { core.error = nil } }
@@ -63,6 +126,46 @@ struct LibraryView: View {
             Button("OK", role: .cancel) { core.error = nil }
         } message: {
             Text(core.error ?? "")
+        }
+        .alert("Paste URL to Import", isPresented: $showUrlImportAlert) {
+            TextField("https://example.com/article", text: $urlToImport)
+            Button("Cancel", role: .cancel) { urlToImport = "" }
+            Button("Import") {
+                let urlString = urlToImport
+                urlToImport = ""
+                Task { await core.importUrl(urlString: urlString) }
+            }
+        } message: {
+            Text("GIST fetches the page, extracts the readable content, and adds it to your library.")
+        }
+        .alert("New Collection", isPresented: $showNewCollectionAlert) {
+            TextField("Collection name", text: $newCollectionName)
+            Button("Cancel", role: .cancel) { newCollectionName = "" }
+            Button("Create") {
+                let name = newCollectionName
+                newCollectionName = ""
+                Task { await core.createCollection(name: name) }
+            }
+        }
+        .alert(
+            selection.count == 1 ? "Remove 1 item?" : "Remove \(selection.count) items?",
+            isPresented: $showRemoveConfirm
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Remove from Library") {
+                let ids = Array(selection)
+                selection.removeAll()
+                Task { await core.removeItems(ids: ids, deleteSourceFiles: false) }
+            }
+            Button("Also Delete Original File", role: .destructive) {
+                let ids = Array(selection)
+                selection.removeAll()
+                Task { await core.removeItems(ids: ids, deleteSourceFiles: true) }
+            }
+        } message: {
+            Text(
+                "\"Remove from Library\" only removes GIST's record and its sandboxed copy — your original file, wherever it lives, is never touched. \"Also Delete Original File\" additionally deletes GIST's own imported copy (see ADR-006); it never deletes the original either."
+            )
         }
     }
 
@@ -81,8 +184,21 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var noResultsState: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+            Text("No matches")
+                .font(.title2)
+            Text("No items match \"\(searchText)\"")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var itemList: some View {
-        List(core.items) { item in
+        List(displayedItems, selection: $selection) { item in
             NavigationLink(value: item.id) {
                 VStack(alignment: .leading) {
                     Text(item.title)

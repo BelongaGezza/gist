@@ -1,0 +1,122 @@
+name: apple-build
+
+# Closes F25 (see CLAUDE.md security register): until this workflow existed,
+# there was no CI gate at all on the Swift half of the app — every Swift
+# change was hand-verified against generated bindings, not compiler-checked.
+on:
+  pull_request:
+    paths:
+      - 'apps/apple/**'
+      - 'crates/gist-ffi/**'
+      - 'tools/gen-bindings.sh'
+      - 'tools/build-core-xcframework.sh'
+      - '.github/workflows/apple-build.yml'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # project.yml's `options.xcodeVersion: "16"` is XcodeGen project-file
+      # metadata (LastUpgradeCheck/compatibility attributes) only — it does
+      # not gate which Xcode toolchain must build the project. What actually
+      # matters is `options.deploymentTarget.macOS: "26.5"`, which needs a
+      # current Xcode. Pin to latest-stable rather than a specific version:
+      # exact Xcode versions available on GitHub's macos-latest image shift
+      # frequently, and hardcoding one here would go stale fast. Revisit if
+      # build reproducibility ever needs an exact pin instead.
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1.7.0
+        with:
+          xcode-version: latest-stable
+
+      - uses: dtolnay/rust-toolchain@4305c38b25d97ef35a8ad1f985ccf33d0b9d0787  # stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo registry
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c6158d  # v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-apple-build-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-apple-build-
+
+      # XcodeGen is not preinstalled on GitHub's macos-latest runner image
+      # (checked against the actions/runner-images manifest). Install a
+      # pinned version via a specific homebrew-core formula commit rather
+      # than a bare `brew install xcodegen`, which would resolve to whatever
+      # is current on the day the job happens to run — same SHA-pinning
+      # rationale this repo already applies to GitHub Actions themselves.
+      - name: Install XcodeGen (pinned 2.46.0)
+        run: brew install https://raw.githubusercontent.com/Homebrew/homebrew-core/a33c03507920c04766b647fdd33fdb9701c07566/Formula/x/xcodegen.rb
+
+      # uniffi 0.28+ no longer ships a standalone uniffi-bindgen on
+      # crates.io; gist-ffi builds its own via the uniffi-bindgen-bin
+      # feature (see crates/gist-ffi/Cargo.toml). It needs a newer MSRV than
+      # this repo's pinned rust-toolchain.toml (1.87.0), so it's built
+      # explicitly with `+stable`, mirroring the install comment in
+      # tools/gen-bindings.sh.
+      - name: Install uniffi-bindgen
+        run: |
+          cargo +stable install --path crates/gist-ffi --bin uniffi-bindgen \
+            --features uniffi-bindgen-bin --root "$HOME/.cargo-uniffi-bindgen"
+          echo "$HOME/.cargo-uniffi-bindgen/bin" >> "$GITHUB_PATH"
+
+      # Builds gist-ffi (release, both Apple Silicon and Intel targets),
+      # lipos it into a universal static lib, generates the Swift bindings
+      # into apps/apple/Generated/, and packages artifacts/GistCore.xcframework
+      # — the framework apps/apple/project.yml's GISTmacOS target links
+      # against. This is the one repo script that covers both "cargo build
+      # gist-ffi" and "generate bindings" in the correct order.
+      - name: Build gist-ffi xcframework + Swift bindings
+        run: ./tools/build-core-xcframework.sh
+
+      - name: xcodegen generate
+        working-directory: apps/apple
+        run: xcodegen generate
+
+      # GISTmacOS is the only target/scheme defined in apps/apple/project.yml
+      # (confirmed via `xcodebuild -list`: targets GISTmacOS + GISTTests, one
+      # scheme, GISTmacOS). That scheme's test action, and GISTTests's
+      # TEST_HOST/BUNDLE_LOADER, are both explicit in project.yml's
+      # `schemes:`/`settings:` blocks — XcodeGen's autogeneration does NOT
+      # wire GISTTests as testable on its own despite the
+      # `dependencies: [{target: GISTmacOS}]` relationship, and GISTmacOS's
+      # PRODUCT_NAME ("GIST") differs from its target name, which breaks the
+      # default TEST_HOST inference too. Both gaps were found by actually
+      # running `xcodegen generate` + `xcodebuild test` locally (this
+      # environment has full Xcode, not just Command Line Tools) and fixed in
+      # project.yml — do not remove that explicit scheme/TEST_HOST config, or
+      # this job's `xcodebuild test` step will fail the same way again.
+      # CODE_SIGNING_ALLOWED=NO because CI has no Apple Developer signing
+      # identity and project.yml's CODE_SIGN_STYLE is Automatic; A3
+      # (entitlements review) is still open per the security register, so
+      # this intentionally does not attempt real code signing.
+      - name: xcodebuild build
+        working-directory: apps/apple
+        run: |
+          xcodebuild build \
+            -project GIST.xcodeproj \
+            -scheme GISTmacOS \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+
+      - name: xcodebuild test
+        working-directory: apps/apple
+        run: |
+          xcodebuild test \
+            -project GIST.xcodeproj \
+            -scheme GISTmacOS \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
