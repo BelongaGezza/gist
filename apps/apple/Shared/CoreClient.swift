@@ -271,6 +271,23 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    /// Fetches a document's full block structure (headings/paragraphs/
+    /// images/lists) for the flow-view prototypes — as opposed to
+    /// `startRsvp`'s flat token stream. Same one-shot-fetch-then-decode
+    /// shape as `startRsvp`. Returns `nil` on failure and sets `error`.
+    func loadDocument(itemId: String) async -> FlowDocumentVM? {
+        guard let core else { return nil }
+        do {
+            let json = try core.getDocumentJson(itemId: itemId)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(FlowDocumentVM.self, from: Data(json.utf8))
+        } catch {
+            self.error = "\(error)"
+            return nil
+        }
+    }
+
     /// Persists the current token index so playback can resume later.
     func saveProgress(itemId: String, tokenIndex: Int) async {
         guard let core else { return }
