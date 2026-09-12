@@ -8,6 +8,7 @@ import SwiftUI
 struct SidebarView: View {
     @EnvironmentObject var core: CoreClient
     @Binding var selection: LibrarySelection?
+    @State private var showThemeSettings = false
 
     var body: some View {
         List(selection: $selection) {
@@ -26,5 +27,17 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .navigationTitle("GIST")
         .task { await core.listCollections() }
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    showThemeSettings = true
+                } label: {
+                    Label("Appearance", systemImage: "paintpalette")
+                }
+            }
+        }
+        .sheet(isPresented: $showThemeSettings) {
+            ThemeSettingsView()
+        }
     }
 }

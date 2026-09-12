@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var core: CoreClient
+    @EnvironmentObject var themeManager: ThemeManager
     @State private var navigationPath: [String] = []
     /// Root of the detail pane -- `.all` (the full library) or a single
     /// collection, driven by `SidebarView`'s selection. Kept as a
@@ -32,6 +33,11 @@ struct ContentView: View {
             navigationPath.removeAll()
         }
         .task { await core.refresh() }
+        .tint(themeManager.resolvedTheme.accent)
+        .background(themeManager.resolvedTheme.background)
+        .preferredColorScheme(
+            themeManager.selection == .system ? nil : themeManager.resolvedTheme.colorScheme
+        )
     }
 
     @ViewBuilder
