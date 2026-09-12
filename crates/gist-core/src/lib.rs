@@ -359,6 +359,70 @@ impl Core {
         Ok(id)
     }
 
+    /// Remove one or more items from the library.
+    ///
+    /// Deletes the DB rows first (transactionally, via
+    /// `gist_store::Store::remove_items`) and only attempts on-disk file
+    /// cleanup after that call returns `Ok` — this ordering is deliberate:
+    /// it guarantees a mid-operation interruption leaves at worst an
+    /// orphaned file (harmless, reclaimable), never an orphaned library row
+    /// pointing at files that no longer exist.
+    ///
+    /// The internal `.json`/`.tokens.json` blobs (derived storage) are
+    /// always deleted for every item the store actually removed. The
+    /// original imported file (`source_path`) is only deleted when
+    /// `delete_source_files` is true, since that file may be a
+    /// user-managed document living outside app storage.
+    ///
+    /// File deletion is best-effort: a missing or unremovable file is
+    /// logged at `debug!` (per this project's source-path logging policy)
+    /// and does not fail the overall call, since the library metadata is
+    /// already gone by the time file cleanup runs.
+    ///
+    /// ids that don't match any library item are silently ignored (see
+    /// `gist_store::Store::remove_items`'s doc comment for the exact
+    /// semantics this delegates to).
+    pub fn remove_items(&self, ids: &[String], delete_source_files: bool) -> Result<(), CoreError> {
+        let removed = self.store.remove_items(ids)?;
+
+        for item in removed {
+            if let Err(e) = std::fs::remove_file(&item.doc_path) {
+                tracing::debug!(
+                    "gist-core: failed to delete document blob {}: {}",
+                    item.doc_path,
+                    e
+                );
+            }
+
+            let tokens_path = item
+                .doc_path
+                .strip_suffix(".json")
+                .map(|s| format!("{s}.tokens.json"))
+                .unwrap_or_else(|| format!("{}.tokens.json", item.doc_path));
+            if let Err(e) = std::fs::remove_file(&tokens_path) {
+                tracing::debug!(
+                    "gist-core: failed to delete tokens blob {}: {}",
+                    tokens_path,
+                    e
+                );
+            }
+
+            if delete_source_files {
+                if let Some(source_path) = &item.source_path {
+                    if let Err(e) = std::fs::remove_file(source_path) {
+                        tracing::debug!(
+                            "gist-core: failed to delete source file {}: {}",
+                            source_path,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Import a single image file and run OCR using the provided engine.
     ///
     /// Phase M3 stub — the full pipeline (multi-page PDF tiling, heuristic
@@ -470,5 +534,109 @@ mod tests {
             "expected ImportError::Web for a non-HTTPS URL, got {:?}",
             err
         );
+    }
+
+    #[test]
+    fn remove_items_removes_one_and_keeps_the_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt1 = dir.path().join("keep.txt");
+        std::fs::write(&txt1, b"This document should survive removal.").unwrap();
+        let id_keep = core.import_file(&txt1, &NullObserver).unwrap();
+
+        let txt2 = dir.path().join("gone.txt");
+        std::fs::write(&txt2, b"This document should vanish, quokka style.").unwrap();
+        let id_gone = core.import_file(&txt2, &NullObserver).unwrap();
+
+        // Blob paths for the item we're about to remove.
+        let doc_path = storage.join(format!("{id_gone}.json"));
+        let tokens_path = storage.join(format!("{id_gone}.tokens.json"));
+        assert!(doc_path.exists());
+        assert!(tokens_path.exists());
+
+        core.remove_items(&[id_gone.clone()], false).unwrap();
+
+        // list_items no longer surfaces the removed item, but does surface
+        // the other one.
+        let items = core.list_items(0, 10).unwrap();
+        assert!(!items.iter().any(|i| i.id == id_gone));
+        assert!(items.iter().any(|i| i.id == id_keep));
+
+        // search_items no longer surfaces the removed item either.
+        let results = core.search_items("quokka", 10).unwrap();
+        assert!(!results.iter().any(|i| i.id == id_gone));
+
+        // Blob files are gone from the storage dir.
+        assert!(!doc_path.exists());
+        assert!(!tokens_path.exists());
+
+        // delete_source_files was false — the original file is untouched.
+        assert!(txt2.exists());
+    }
+
+    #[test]
+    fn remove_items_with_delete_source_files_true_deletes_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("source_true.txt");
+        std::fs::write(&txt, b"Delete my source file too.").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        core.remove_items(&[id], true).unwrap();
+
+        assert!(
+            !txt.exists(),
+            "source file should be deleted when delete_source_files=true"
+        );
+    }
+
+    #[test]
+    fn remove_items_with_delete_source_files_false_keeps_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("source_false.txt");
+        std::fs::write(&txt, b"Keep my source file.").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        core.remove_items(&[id], false).unwrap();
+
+        assert!(
+            txt.exists(),
+            "source file should survive when delete_source_files=false"
+        );
+    }
+
+    #[test]
+    fn remove_items_bulk_empties_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let txt = dir.path().join(format!("bulk{i}.txt"));
+            std::fs::write(&txt, format!("Bulk removal candidate number {i}.")).unwrap();
+            ids.push(core.import_file(&txt, &NullObserver).unwrap());
+        }
+
+        assert_eq!(core.list_items(0, 10).unwrap().len(), 3);
+
+        core.remove_items(&ids, false).unwrap();
+
+        assert!(core.list_items(0, 10).unwrap().is_empty());
     }
 }

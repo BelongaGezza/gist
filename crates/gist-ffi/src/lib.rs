@@ -217,6 +217,24 @@ impl GistCore {
         })
     }
 
+    /// Remove one or more items from the library (single-item context menu
+    /// or bulk multi-select both go through this one call). Deletes the DB
+    /// rows transactionally first, then best-effort cleans up the internal
+    /// `.json`/`.tokens.json` blobs; when `delete_source_files` is true, the
+    /// original imported file is deleted too. See `gist_core::Core::remove_items`
+    /// for the full ordering/atomicity contract.
+    pub fn remove_items(
+        &self,
+        ids: Vec<String>,
+        delete_source_files: bool,
+    ) -> Result<(), GistError> {
+        ffi_catch!({
+            self.inner
+                .remove_items(&ids, delete_source_files)
+                .map_err(GistError::from)
+        })
+    }
+
     /// Import an image file and run OCR using the provided engine.
     /// Returns the document ID on success.
     pub fn import_image_with_ocr(

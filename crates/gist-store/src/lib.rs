@@ -38,6 +38,22 @@ pub struct LibraryItem {
     pub token_count: Option<usize>,
 }
 
+// ── RemovedItem (returned by remove_items so callers can clean up files) ──
+
+/// Identifies an item removed by [`Store::remove_items`], carrying the file
+/// paths the caller needs to delete the on-disk blobs (and, optionally, the
+/// original source file) after the DB transaction has committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedItem {
+    pub id: String,
+    /// Path to the `<id>.json` document blob (derived storage, not the
+    /// user's original file — always safe/expected to delete).
+    pub doc_path: String,
+    /// Path to the original imported file, if known. Deleting this is
+    /// user-configurable (the original file may live outside app storage).
+    pub source_path: Option<String>,
+}
+
 // ── Collection ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,20 +244,75 @@ impl Store {
         Ok(())
     }
 
-    /// Remove an item and all its associated files and FTS index entries.
-    /// The `tokens` table has `ON DELETE CASCADE` so token rows and FTS5 entries
-    /// are cleaned up automatically when the library_items row is deleted.
+    /// Remove a single item. Thin wrapper around [`Store::remove_items`] so
+    /// there is exactly one deletion code path (rather than two that can
+    /// drift apart); see that method's doc comment for the ordering,
+    /// atomicity, and unknown-id behaviour it implements.
     pub fn delete_item(&self, id: &str) -> Result<(), StoreError> {
-        // Delete JSON and token files first (best-effort; don't fail if missing).
-        let doc_path = self.storage_dir.join(format!("{}.json", id));
-        let token_path = self.storage_dir.join(format!("{}.tokens.json", id));
-        let _ = std::fs::remove_file(&doc_path);
-        let _ = std::fs::remove_file(&token_path);
-
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        conn.execute("DELETE FROM library_items WHERE id = ?1", params![id])?;
-        tracing::debug!("gist-store: deleted item {}", id);
+        let ids = [id.to_string()];
+        self.remove_items(&ids)?;
         Ok(())
+    }
+
+    /// Remove one or more items from the library in a single transaction.
+    ///
+    /// **Atomicity:** every id in `ids` is looked up and deleted inside one
+    /// `unchecked_transaction`. If any DB operation errors partway through,
+    /// the transaction is rolled back (not committed) and none of the rows
+    /// are removed — all-or-nothing on the database side.
+    ///
+    /// **File deletion ordering (why this function never touches the
+    /// filesystem):** this function only removes DB rows and returns the
+    /// `doc_path`/`source_path` each removed row held. Callers (`gist-core`)
+    /// must delete the corresponding `.json`/`.tokens.json` blobs — and,
+    /// optionally, the original source file — only *after* this function
+    /// returns `Ok`. That ordering (DB commit, then best-effort file
+    /// cleanup) means an interruption can only ever leave behind an
+    /// orphaned *file* on disk (harmless, reclaimable later), never an
+    /// orphaned DB row pointing at files that no longer exist — the reverse
+    /// of the ordering bug this replaces.
+    ///
+    /// **Unknown ids:** an id in `ids` that doesn't match any row is
+    /// silently skipped rather than treated as an error, so a bulk remove
+    /// is idempotent/best-effort against ids that may already be gone
+    /// (e.g. removed concurrently). The returned `Vec<RemovedItem>` contains
+    /// only the ids that were actually found and removed, in no guaranteed
+    /// order, so callers can tell exactly which ids took effect.
+    ///
+    /// `reading_progress`, `tokens`, and (via the `tokens_ad` trigger)
+    /// `fts_index` rows are cleaned up automatically through
+    /// `ON DELETE CASCADE` / triggers — this function never deletes from
+    /// those tables directly.
+    pub fn remove_items(&self, ids: &[String]) -> Result<Vec<RemovedItem>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        let mut removed = Vec::new();
+
+        {
+            let mut select_stmt =
+                tx.prepare("SELECT doc_path, source_path FROM library_items WHERE id = ?1")?;
+            let mut delete_stmt = tx.prepare("DELETE FROM library_items WHERE id = ?1")?;
+
+            for id in ids {
+                let row: Option<(String, Option<String>)> = select_stmt
+                    .query_row(params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .optional()?;
+
+                if let Some((doc_path, source_path)) = row {
+                    delete_stmt.execute(params![id])?;
+                    removed.push(RemovedItem {
+                        id: id.clone(),
+                        doc_path,
+                        source_path,
+                    });
+                }
+                // else: unknown id — silently skipped, see doc comment above.
+            }
+        }
+
+        tx.commit()?;
+        tracing::debug!("gist-store: removed {} item(s)", removed.len());
+        Ok(removed)
     }
 
     /// Full-text search across all imported document tokens.
@@ -630,6 +701,19 @@ mod tests {
         id
     }
 
+    fn doc_with_title(title: &str) -> gist_model::Document {
+        let section = gist_model::Section {
+            id: "s0".to_string(),
+            heading: None,
+            blocks: vec![gist_model::Block::Paragraph {
+                runs: vec![gist_model::TextRun::plain(format!("hello from {title}"))],
+            }],
+        };
+        let mut meta = gist_model::Metadata::minimal(title);
+        meta.source_ref = Some(format!("/tmp/{title}.txt"));
+        gist_model::Document::new(meta, vec![section])
+    }
+
     #[test]
     fn fresh_open_migrates_to_latest_schema_version() {
         let dir = tempfile::tempdir().unwrap();
@@ -753,5 +837,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(collection_count, 1);
+    }
+
+    /// `remove_items` treats an id that matches no row as a no-op for that
+    /// id — not an error for the whole call — so a mixed batch of valid and
+    /// invalid ids removes exactly the valid ones and reports only those in
+    /// its return value. This test locks in that exact behaviour.
+    #[test]
+    fn remove_items_removes_valid_ids_and_ignores_unknown_ids_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        let store = Store::open(&db, &storage).unwrap();
+
+        let doc1 = doc_with_title("alpha");
+        let doc2 = doc_with_title("beta");
+        store.insert_item(&doc1).unwrap();
+        store.insert_item(&doc2).unwrap();
+
+        let doc1_path = storage.join(format!("{}.json", doc1.id));
+        let doc1_tokens_path = storage.join(format!("{}.tokens.json", doc1.id));
+        let doc2_path = storage.join(format!("{}.json", doc2.id));
+        assert!(doc1_path.exists());
+        assert!(doc2_path.exists());
+
+        let ids = vec![doc1.id.clone(), "does-not-exist".to_string()];
+        let removed = store.remove_items(&ids).unwrap();
+
+        // Only the valid id is reported as removed.
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id, doc1.id);
+        assert_eq!(removed[0].doc_path, doc1_path.to_string_lossy());
+        assert_eq!(removed[0].source_path.as_deref(), Some("/tmp/alpha.txt"));
+
+        // The DB row for doc1 is gone; doc2's row is untouched.
+        assert!(store.get_item_by_id(&doc1.id).unwrap().is_none());
+        assert!(store.get_item_by_id(&doc2.id).unwrap().is_some());
+
+        // remove_items does not touch the filesystem itself — both blobs
+        // still exist on disk after the call; that's the caller's job.
+        assert!(doc1_path.exists());
+        assert!(doc1_tokens_path.exists());
+        assert!(doc2_path.exists());
+    }
+
+    #[test]
+    fn delete_item_is_equivalent_to_remove_items_of_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        let store = Store::open(&db, &storage).unwrap();
+
+        let doc = doc_with_title("gamma");
+        store.insert_item(&doc).unwrap();
+
+        store.delete_item(&doc.id).unwrap();
+        assert!(store.get_item_by_id(&doc.id).unwrap().is_none());
+
+        // Deleting an id that no longer exists is not an error.
+        store.delete_item(&doc.id).unwrap();
     }
 }
