@@ -2,6 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use uuid::Uuid;
 
 // ── Error ──────────────────────────────────────────────────────────────────
 
@@ -21,7 +22,7 @@ pub enum StoreError {
 
 // ── Schema version ────────────────────────────────────────────────────────
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 // ── LibraryItem (lightweight row, not the full Document) ──────────────────
 
@@ -35,6 +36,15 @@ pub struct LibraryItem {
     pub created_at: i64,
     // TODO M2: populate from tokens table
     pub token_count: Option<usize>,
+}
+
+// ── Collection ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────
@@ -119,6 +129,35 @@ impl Store {
                  COMMIT;",
             )?;
             tracing::info!("gist-store: migrated schema to version 2 (FTS5 token index)");
+        }
+
+        // v2 → v3: collections + tags
+        if version < 3 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS collections (
+                     id         TEXT PRIMARY KEY,
+                     name       TEXT NOT NULL,
+                     created_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS item_collections (
+                     item_id       TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+                     collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+                     PRIMARY KEY (item_id, collection_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS tags (
+                     id   TEXT PRIMARY KEY,
+                     name TEXT NOT NULL UNIQUE
+                 );
+                 CREATE TABLE IF NOT EXISTS item_tags (
+                     item_id TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+                     tag_id  TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                     PRIMARY KEY (item_id, tag_id)
+                 );
+                 PRAGMA user_version = 3;
+                 COMMIT;",
+            )?;
+            tracing::info!("gist-store: migrated schema to version 3 (collections + tags)");
         }
 
         Ok(Self {
@@ -387,6 +426,177 @@ impl Store {
             .optional()?;
         Ok(idx.unwrap_or(0) as usize)
     }
+
+    // ── Collections ──────────────────────────────────────────────────────
+
+    /// Create a new collection and return its generated id.
+    pub fn create_collection(&self, name: &str) -> Result<String, StoreError> {
+        let id = Uuid::now_v7().to_string();
+        let now_ms = now_millis();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "INSERT INTO collections (id, name, created_at) VALUES (?1, ?2, ?3)",
+            params![id, name, now_ms],
+        )?;
+        Ok(id)
+    }
+
+    /// Return all collections, newest first.
+    pub fn list_collections(&self) -> Result<Vec<Collection>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt =
+            conn.prepare("SELECT id, name, created_at FROM collections ORDER BY created_at DESC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Collection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+        let mut collections = Vec::new();
+        for row in rows {
+            collections.push(row?);
+        }
+        Ok(collections)
+    }
+
+    /// Add an item to a collection. Idempotent — adding twice is a no-op.
+    pub fn add_item_to_collection(
+        &self,
+        item_id: &str,
+        collection_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "INSERT OR IGNORE INTO item_collections (item_id, collection_id) VALUES (?1, ?2)",
+            params![item_id, collection_id],
+        )?;
+        Ok(())
+    }
+
+    /// Remove an item from a collection.
+    pub fn remove_item_from_collection(
+        &self,
+        item_id: &str,
+        collection_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "DELETE FROM item_collections WHERE item_id = ?1 AND collection_id = ?2",
+            params![item_id, collection_id],
+        )?;
+        Ok(())
+    }
+
+    /// Return all library items belonging to a collection (newest first).
+    pub fn list_items_in_collection(
+        &self,
+        collection_id: &str,
+    ) -> Result<Vec<LibraryItem>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT li.id, li.title, li.authors, li.source_path, li.cover_path, li.created_at
+             FROM library_items li
+             JOIN item_collections ic ON ic.item_id = li.id
+             WHERE ic.collection_id = ?1
+             ORDER BY li.created_at DESC",
+        )?;
+
+        let rows = stmt.query_map(params![collection_id], |row| {
+            let authors_json: String = row.get(2)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                authors_json,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            let (id, title, authors_json, source_path, cover_path, created_at) = row?;
+            let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
+            items.push(LibraryItem {
+                id,
+                title,
+                authors,
+                source_path,
+                cover_path,
+                created_at,
+                token_count: None, // TODO M2: populate from tokens table
+            });
+        }
+        Ok(items)
+    }
+
+    // ── Tags ─────────────────────────────────────────────────────────────
+
+    /// Attach a tag (by name) to an item, creating the tag if it doesn't
+    /// already exist. Idempotent — adding the same tag twice is a no-op.
+    pub fn add_tag(&self, item_id: &str, tag_name: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let tx = conn.unchecked_transaction()?;
+
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT id FROM tags WHERE name = ?1",
+                params![tag_name],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let tag_id = match existing {
+            Some(id) => id,
+            None => {
+                let id = Uuid::now_v7().to_string();
+                tx.execute(
+                    "INSERT INTO tags (id, name) VALUES (?1, ?2)",
+                    params![id, tag_name],
+                )?;
+                id
+            }
+        };
+
+        tx.execute(
+            "INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?1, ?2)",
+            params![item_id, tag_id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Detach a tag (by name) from an item. Does not delete the tag itself.
+    pub fn remove_tag(&self, item_id: &str, tag_name: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "DELETE FROM item_tags
+             WHERE item_id = ?1
+               AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
+            params![item_id, tag_name],
+        )?;
+        Ok(())
+    }
+
+    /// Return the names of all tags attached to an item.
+    pub fn list_tags_for_item(&self, item_id: &str) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT t.name
+             FROM tags t
+             JOIN item_tags it ON it.tag_id = t.id
+             WHERE it.item_id = ?1
+             ORDER BY t.name ASC",
+        )?;
+        let rows = stmt.query_map(params![item_id], |row| row.get::<_, String>(0))?;
+        let mut names = Vec::new();
+        for row in rows {
+            names.push(row?);
+        }
+        Ok(names)
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -396,4 +606,152 @@ fn now_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+// ── tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gist_model::{Document, Metadata};
+
+    fn open_test_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        let store = Store::open(&db, &storage).unwrap();
+        (dir, store)
+    }
+
+    fn insert_test_item(store: &Store) -> String {
+        let doc = Document::new(Metadata::minimal("Test Title"), vec![]);
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+        id
+    }
+
+    #[test]
+    fn fresh_open_migrates_to_latest_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("fresh.db");
+        let storage = dir.path().join("storage");
+        let _store = Store::open(&db, &storage).unwrap();
+
+        let conn = Connection::open(&db).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn collection_create_add_list_roundtrip() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        let collection_id = store.create_collection("Favorites").unwrap();
+
+        store
+            .add_item_to_collection(&item_id, &collection_id)
+            .unwrap();
+
+        let items = store.list_items_in_collection(&collection_id).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, item_id);
+
+        let collections = store.list_collections().unwrap();
+        assert!(collections.iter().any(|c| c.id == collection_id));
+    }
+
+    #[test]
+    fn removing_item_from_collection_leaves_item_and_collection_intact() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        let collection_id = store.create_collection("Later").unwrap();
+
+        store
+            .add_item_to_collection(&item_id, &collection_id)
+            .unwrap();
+        store
+            .remove_item_from_collection(&item_id, &collection_id)
+            .unwrap();
+
+        let items = store.list_items_in_collection(&collection_id).unwrap();
+        assert!(items.is_empty());
+
+        // The item and collection themselves are unaffected.
+        assert!(store.get_item_by_id(&item_id).unwrap().is_some());
+        assert!(store
+            .list_collections()
+            .unwrap()
+            .iter()
+            .any(|c| c.id == collection_id));
+    }
+
+    #[test]
+    fn tag_add_is_idempotent_and_listable() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+
+        store.add_tag(&item_id, "sci-fi").unwrap();
+        store.add_tag(&item_id, "sci-fi").unwrap(); // duplicate — must not error
+
+        let tags = store.list_tags_for_item(&item_id).unwrap();
+        assert_eq!(tags, vec!["sci-fi".to_string()]);
+    }
+
+    #[test]
+    fn tag_remove_leaves_other_tags_intact() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+
+        store.add_tag(&item_id, "sci-fi").unwrap();
+        store.add_tag(&item_id, "favorite").unwrap();
+        store.remove_tag(&item_id, "sci-fi").unwrap();
+
+        let tags = store.list_tags_for_item(&item_id).unwrap();
+        assert_eq!(tags, vec!["favorite".to_string()]);
+    }
+
+    #[test]
+    fn deleting_item_cascades_to_collection_and_tag_join_rows() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        let collection_id = store.create_collection("Archive").unwrap();
+
+        store
+            .add_item_to_collection(&item_id, &collection_id)
+            .unwrap();
+        store.add_tag(&item_id, "classic").unwrap();
+
+        store.delete_item(&item_id).unwrap();
+
+        // No orphaned join rows for either table.
+        let conn = store.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let item_collections_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM item_collections WHERE item_id = ?1",
+                params![item_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let item_tags_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM item_tags WHERE item_id = ?1",
+                params![item_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(item_collections_count, 0);
+        assert_eq!(item_tags_count, 0);
+
+        // The collection and tag themselves survive — only the join rows go.
+        let collection_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE id = ?1",
+                params![collection_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(collection_count, 1);
+    }
 }
