@@ -77,6 +77,12 @@ targets:
         # Point them at the real product explicitly.
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/GIST.app/Contents/MacOS/GIST"
         BUNDLE_LOADER: "$(TEST_HOST)"
+        # Without this, `xcodebuild test` fails at the CodeSign step with
+        # "Cannot code sign because the target does not have an Info.plist
+        # file and one is not being generated automatically" -- GISTTests
+        # has no INFOPLIST_FILE of its own (unlike GISTmacOS), so it needs
+        # Xcode to synthesize one.
+        GENERATE_INFOPLIST_FILE: YES
 
 schemes:
   GISTmacOS:
