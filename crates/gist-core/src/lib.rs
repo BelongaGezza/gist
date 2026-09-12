@@ -254,6 +254,19 @@ impl Core {
         Ok(self.store.save_progress(item_id, token_index)?)
     }
 
+    /// Return a document's full content (metadata + section/block structure)
+    /// serialised as JSON, for reading views that need the parsed block
+    /// structure rather than RSVP's flat token stream — e.g. the flow-view
+    /// prototypes (M2, Q8). Read-only: doesn't touch progress or rebuild the
+    /// token stream. Mirrors `start_rsvp`'s "look up, then serialise" shape.
+    pub fn get_document(&self, item_id: &str) -> Result<String, CoreError> {
+        let doc = self
+            .store
+            .get_item(item_id)?
+            .ok_or_else(|| CoreError::NotFound(item_id.to_owned()))?;
+        Ok(serde_json::to_string(&doc)?)
+    }
+
     /// Import any supported file (ePub, DOCX, TXT) into the library.
     ///
     /// Type detection: magic bytes via `infer`, with file extension as fallback.
@@ -810,6 +823,30 @@ mod tests {
 
         let contents_after_removal = core.list_items_in_collection(&collection_id).unwrap();
         assert!(!contents_after_removal.iter().any(|i| i.id == item_id));
+    }
+
+    #[test]
+    fn get_document_returns_parsed_blocks_as_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("flow.txt");
+        std::fs::write(&txt, b"A quokka wandered through the heading-free prose.").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let json = core.get_document(&id).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["id"], serde_json::Value::String(id));
+        assert!(
+            value["sections"].is_array() && !value["sections"].as_array().unwrap().is_empty(),
+            "expected at least one section in {value:?}"
+        );
+
+        let unknown = core.get_document("not-a-real-id");
+        assert!(matches!(unknown, Err(CoreError::NotFound(_))));
     }
 
     #[test]
