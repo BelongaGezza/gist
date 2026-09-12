@@ -51,6 +51,7 @@ pub fn parse(bytes: &[u8], stem: &str, limits: &ParseLimits) -> Result<Document,
         author: None,
         source_type: "txt".to_string(),
         source_ref: None,
+        source_copy_ref: None,
         import_date: None,
         language: None,
         word_count: 0, // Document::new recomputes this

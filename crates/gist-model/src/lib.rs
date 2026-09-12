@@ -38,7 +38,18 @@ pub struct Metadata {
     pub title: String,
     pub author: Option<String>,
     pub source_type: String,
+    /// The original import location (filesystem path or URL), kept for
+    /// display/provenance only ("Imported from ~/Downloads/book.epub").
+    /// Per ADR-006, this is never used to read or delete files — that's
+    /// `source_copy_ref`'s job.
     pub source_ref: Option<String>,
+    /// Path to a sandboxed, content-addressed copy of the originally
+    /// imported file (ADR-006), made at import time so the app never needs
+    /// to read from or delete a location outside its own storage directory.
+    /// `None` for URL imports (there is no local file to copy) and for
+    /// documents imported before this field existed.
+    #[serde(default)]
+    pub source_copy_ref: Option<String>,
     pub import_date: Option<String>,
     pub language: Option<String>,
     pub word_count: u32,
@@ -51,6 +62,7 @@ impl Metadata {
             author: None,
             source_type: String::new(),
             source_ref: None,
+            source_copy_ref: None,
             import_date: None,
             language: None,
             word_count: 0,
