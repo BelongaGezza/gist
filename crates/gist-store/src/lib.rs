@@ -817,8 +817,29 @@ impl Store {
 /// the caller, and adversarial input can build expensive query graphs.
 /// Quoting the whole thing as one phrase means a search box's contents can
 /// never be read as anything but literal text to match.
+///
+/// The trailing `*` is appended by us, outside the quotes, never from
+/// `query` -- FTS5 treats `"phrase"*` as a prefix match on the phrase's
+/// final token, which is what live search-as-you-type needs: typing "Gen"
+/// should find "General" without waiting for the whole word. It's still
+/// injection-safe because the `*` is a fixed literal we control, not
+/// user-controlled syntax reaching outside the quotes; a bare `"phrase"`
+/// (what this returned before) instead requires an exact whole-token match,
+/// which is what caused short/partial-word searches to silently find
+/// nothing even when the full word was right there in the document.
+///
+/// Note this only ever meaningfully affects a query's *last* word: per
+/// ADR-008, `fts_index` holds one row per single `Word` token (not whole
+/// documents or lines), so a multi-word query like `"hello world"*` can
+/// only match a row whose entire indexed text happens to equal that full
+/// phrase -- which never happens, since every row is one token. Multi-word
+/// search isn't wired up to work here at all today; that's a pre-existing,
+/// separate gap from the one this fixes, not a regression from adding `*`.
 fn escape_fts5_query(query: &str) -> String {
-    format!("\"{}\"", query.replace('"', "\"\""))
+    if query.is_empty() {
+        return "\"\"".to_string();
+    }
+    format!("\"{}\"*", query.replace('"', "\"\""))
 }
 
 /// Reduces `ext` to ASCII alphanumeric characters only, for safe use in a
@@ -1170,8 +1191,9 @@ mod tests {
 
     #[test]
     fn escape_fts5_query_wraps_and_doubles_quotes() {
-        assert_eq!(escape_fts5_query("marsupial"), "\"marsupial\"");
-        assert_eq!(escape_fts5_query("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(escape_fts5_query("marsupial"), "\"marsupial\"*");
+        assert_eq!(escape_fts5_query("say \"hi\""), "\"say \"\"hi\"\"\"*");
+        assert_eq!(escape_fts5_query(""), "\"\"");
     }
 
     #[test]
@@ -1213,5 +1235,30 @@ mod tests {
             "expected plain-word search to still find the match, got {:?}",
             results
         );
+    }
+
+    /// Regression test for a real user-reported bug: typing a short prefix
+    /// of a word (as live search-as-you-type naturally does before the user
+    /// finishes typing) found nothing, even though the full word was right
+    /// there in the document -- `escape_fts5_query`'s exact-phrase quoting
+    /// required a complete-token match, silently disabling prefix search
+    /// entirely regardless of query length. Covers both a short (3-char)
+    /// and very short (1-char) prefix.
+    #[test]
+    fn search_items_finds_short_prefix_of_a_longer_word() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("marsupial");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        for prefix in ["mar", "m"] {
+            let results = store.search_items(prefix, 10).unwrap();
+            assert!(
+                results.contains(&id),
+                "expected prefix {:?} to find \"marsupial\", got {:?}",
+                prefix,
+                results
+            );
+        }
     }
 }
