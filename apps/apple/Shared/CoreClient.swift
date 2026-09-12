@@ -10,6 +10,7 @@ final class CoreClient: ObservableObject {
     @Published var searchResults: [LibraryItemVM] = []
     @Published var isSearching = false
     @Published var collections: [CollectionVM] = []
+    @Published var allTags: [String] = []
     @Published var isLoading = false
     @Published var error: String?
     /// Set (instead of `error`) when an import fails specifically because the
@@ -209,6 +210,36 @@ final class CoreClient: ObservableObject {
         guard let core else { return [] }
         do {
             return try core.listTagsForItem(itemId: itemId)
+        } catch {
+            self.error = "\(error)"
+            return []
+        }
+    }
+
+    /// Publishes every tag name that exists anywhere in the library into
+    /// `allTags`, for populating a filter menu -- unlike `listTagsForItem`,
+    /// this isn't scoped to one item.
+    func listAllTags() async {
+        guard let core else { return }
+        do {
+            allTags = try core.listAllTags()
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    /// Returns the items tagged with `tagName` (newest first), via
+    /// `GistCore::list_items_by_tag`. Like `listItemsInCollection`, this
+    /// doesn't publish into a shared `@Published` property -- callers hold
+    /// the result as local view state for whichever single tag filter is
+    /// currently active.
+    func listItemsByTag(tagName: String) async -> [LibraryItemVM] {
+        guard let core else { return [] }
+        do {
+            let ffiItems = try core.listItemsByTag(tagName: tagName)
+            error = nil
+            return mapItems(ffiItems)
         } catch {
             self.error = "\(error)"
             return []

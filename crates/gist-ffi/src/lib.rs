@@ -382,6 +382,33 @@ impl GistCore {
         })
     }
 
+    /// Return the names of every tag that exists across the library.
+    /// See `gist_core::Core::list_all_tags`.
+    pub fn list_all_tags(&self) -> Result<Vec<String>, GistError> {
+        ffi_catch!({ self.inner.list_all_tags().map_err(GistError::from) })
+    }
+
+    /// Return all library items tagged with `tag_name` (newest first).
+    /// See `gist_core::Core::list_items_by_tag`.
+    pub fn list_items_by_tag(&self, tag_name: String) -> Result<Vec<FfiLibraryItem>, GistError> {
+        ffi_catch!({
+            let items = self
+                .inner
+                .list_items_by_tag(&tag_name)
+                .map_err(GistError::from)?;
+            Ok(items
+                .into_iter()
+                .map(|i| FfiLibraryItem {
+                    id: i.id,
+                    title: i.title,
+                    authors: i.authors,
+                    source_path: i.source_path,
+                    cover_path: i.cover_path,
+                })
+                .collect())
+        })
+    }
+
     /// Import an image file and run OCR using the provided engine.
     /// Returns the document ID on success.
     pub fn import_image_with_ocr(

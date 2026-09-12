@@ -749,6 +749,62 @@ impl Store {
         }
         Ok(names)
     }
+
+    /// Return the names of every tag that exists across the whole library,
+    /// alphabetically -- used to populate a filter menu, not scoped to any
+    /// one item (see `list_tags_for_item` for that).
+    pub fn list_all_tags(&self) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare("SELECT name FROM tags ORDER BY name ASC")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut names = Vec::new();
+        for row in rows {
+            names.push(row?);
+        }
+        Ok(names)
+    }
+
+    /// Return all library items tagged with `tag_name` (newest first).
+    /// Mirrors `list_items_in_collection`'s query shape.
+    pub fn list_items_by_tag(&self, tag_name: &str) -> Result<Vec<LibraryItem>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT li.id, li.title, li.authors, li.source_path, li.cover_path, li.created_at
+             FROM library_items li
+             JOIN item_tags it ON it.item_id = li.id
+             JOIN tags t ON t.id = it.tag_id
+             WHERE t.name = ?1
+             ORDER BY li.created_at DESC",
+        )?;
+
+        let rows = stmt.query_map(params![tag_name], |row| {
+            let authors_json: String = row.get(2)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                authors_json,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            let (id, title, authors_json, source_path, cover_path, created_at) = row?;
+            let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
+            items.push(LibraryItem {
+                id,
+                title,
+                authors,
+                source_path,
+                cover_path,
+                created_at,
+                token_count: None, // TODO M2: populate from tokens table
+            });
+        }
+        Ok(items)
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -896,6 +952,41 @@ mod tests {
 
         let tags = store.list_tags_for_item(&item_id).unwrap();
         assert_eq!(tags, vec!["favorite".to_string()]);
+    }
+
+    #[test]
+    fn list_all_tags_returns_distinct_names_alphabetically() {
+        let (_dir, store) = open_test_store();
+        let item_a = insert_test_item(&store);
+        let item_b = insert_test_item(&store);
+
+        store.add_tag(&item_a, "sci-fi").unwrap();
+        store.add_tag(&item_b, "sci-fi").unwrap(); // shared tag, must not duplicate
+        store.add_tag(&item_b, "favorite").unwrap();
+
+        assert_eq!(
+            store.list_all_tags().unwrap(),
+            vec!["favorite".to_string(), "sci-fi".to_string()]
+        );
+    }
+
+    #[test]
+    fn list_items_by_tag_returns_only_tagged_items() {
+        let (_dir, store) = open_test_store();
+        let tagged = insert_test_item(&store);
+        let untagged = insert_test_item(&store);
+
+        store.add_tag(&tagged, "favorite").unwrap();
+
+        let items = store.list_items_by_tag("favorite").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, tagged);
+        assert!(items.iter().all(|i| i.id != untagged));
+
+        assert!(store
+            .list_items_by_tag("nonexistent-tag")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

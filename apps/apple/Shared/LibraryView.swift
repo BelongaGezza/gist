@@ -28,6 +28,48 @@ enum LibraryFiltering {
     ) -> [LibraryItemVM] {
         isSearchActive(searchText: searchText) ? searchResults : items
     }
+
+    /// Applies `order` to `items`. `.dateAddedNewest` is a no-op: every FFI
+    /// list call (`listItems`/`searchItems`/`listItemsByTag`/
+    /// `listItemsInCollection`) already returns newest-first straight from
+    /// SQL's `ORDER BY created_at DESC`, so reversing that in place gives
+    /// oldest-first without a second query.
+    static func sorted(_ items: [LibraryItemVM], by order: LibrarySortOrder) -> [LibraryItemVM] {
+        switch order {
+        case .dateAddedNewest:
+            return items
+        case .dateAddedOldest:
+            return items.reversed()
+        case .titleAZ:
+            return items.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        case .titleZA:
+            return items.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedDescending }
+        case .authorAZ:
+            return items.sorted {
+                ($0.authors.first ?? "").localizedCaseInsensitiveCompare($1.authors.first ?? "") == .orderedAscending
+            }
+        }
+    }
+}
+
+enum LibrarySortOrder: String, CaseIterable, Identifiable {
+    case dateAddedNewest
+    case dateAddedOldest
+    case titleAZ
+    case titleZA
+    case authorAZ
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .dateAddedNewest: return "Date Added (Newest)"
+        case .dateAddedOldest: return "Date Added (Oldest)"
+        case .titleAZ: return "Title (A–Z)"
+        case .titleZA: return "Title (Z–A)"
+        case .authorAZ: return "Author (A–Z)"
+        }
+    }
 }
 
 struct LibraryView: View {
@@ -44,6 +86,13 @@ struct LibraryView: View {
     @State private var showNewCollectionAlert = false
     @State private var newCollectionName = ""
     @State private var tagEditorTarget: TagEditorTarget?
+    @State private var sortOrder: LibrarySortOrder = .dateAddedNewest
+    /// The tag currently filtering the list, or `nil` for no filter. Mutually
+    /// exclusive with an active search (picking a tag clears `searchText`
+    /// and vice versa) -- combining "search within this tag" isn't supported,
+    /// to keep the two controls' interaction unambiguous.
+    @State private var tagFilter: String?
+    @State private var tagFilteredItems: [LibraryItemVM] = []
 
     /// Whether `searchText` is non-empty, i.e. `itemList` should render
     /// `core.searchResults` instead of the full `core.items` list.
@@ -52,13 +101,20 @@ struct LibraryView: View {
     }
 
     private var displayedItems: [LibraryItemVM] {
-        LibraryFiltering.displayedItems(searchText: searchText, items: core.items, searchResults: core.searchResults)
+        let base = tagFilter != nil
+            ? tagFilteredItems
+            : LibraryFiltering.displayedItems(searchText: searchText, items: core.items, searchResults: core.searchResults)
+        return LibraryFiltering.sorted(base, by: sortOrder)
     }
 
     var body: some View {
         Group {
             if displayedItems.isEmpty && !core.isLoading {
-                isSearchActive ? AnyView(noResultsState) : AnyView(emptyState)
+                if tagFilter != nil {
+                    AnyView(noTagResultsState)
+                } else {
+                    isSearchActive ? AnyView(noResultsState) : AnyView(emptyState)
+                }
             } else {
                 itemList
             }
@@ -69,6 +125,12 @@ struct LibraryView: View {
         .navigationTitle("Library")
         .searchable(text: $searchText, prompt: "Search library")
         .onChange(of: searchText) { _, newValue in
+            // A tag filter and an active search are mutually exclusive (see
+            // `tagFilter`'s doc comment) -- starting a search cancels
+            // whichever tag filter was active.
+            if LibraryFiltering.isSearchActive(searchText: newValue) {
+                tagFilter = nil
+            }
             // Debounce: cancel any in-flight wait and start a fresh one, same
             // Task-based cancellation idiom RsvpPlayer.play() uses for its
             // per-token sleep loop (see RsvpView.swift).
@@ -80,6 +142,17 @@ struct LibraryView: View {
             }
         }
         .task { await core.listCollections() }
+        .task { await core.listAllTags() }
+        // Keyed on tagFilter so picking a different tag (or clearing it)
+        // reloads; nil clears tagFilteredItems back to empty since
+        // displayedItems ignores it once tagFilter is nil anyway.
+        .task(id: tagFilter) {
+            if let tagFilter {
+                tagFilteredItems = await core.listItemsByTag(tagName: tagFilter)
+            } else {
+                tagFilteredItems = []
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { showImporter = true } label: {
@@ -89,6 +162,51 @@ struct LibraryView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button { showUrlImportAlert = true } label: {
                     Label("Import URL", systemImage: "link")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Picker("Sort By", selection: $sortOrder) {
+                        ForEach(LibrarySortOrder.allCases) { order in
+                            Text(order.label).tag(order)
+                        }
+                    }
+                } label: {
+                    Label("Sort", systemImage: "arrow.up.arrow.down")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button {
+                        tagFilter = nil
+                    } label: {
+                        if tagFilter == nil {
+                            Label("All Tags", systemImage: "checkmark")
+                        } else {
+                            Text("All Tags")
+                        }
+                    }
+                    if !core.allTags.isEmpty {
+                        Divider()
+                        ForEach(core.allTags, id: \.self) { tag in
+                            Button {
+                                tagFilter = tag
+                                searchText = ""
+                            } label: {
+                                if tagFilter == tag {
+                                    Label(tag, systemImage: "checkmark")
+                                } else {
+                                    Text(tag)
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label(
+                        "Filter",
+                        systemImage: tagFilter == nil
+                            ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill"
+                    )
                 }
             }
             ToolbarItem(placement: .primaryAction) {
@@ -240,6 +358,19 @@ struct LibraryView: View {
             Text("No matches")
                 .font(.title2)
             Text("No items match \"\(searchText)\"")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var noTagResultsState: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "tag")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+            Text("No items")
+                .font(.title2)
+            Text("No items are tagged \"\(tagFilter ?? "")\"")
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
