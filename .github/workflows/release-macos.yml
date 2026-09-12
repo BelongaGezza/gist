@@ -2,6 +2,14 @@ name: release-macos
 on:
   push:
     tags: ["v*"]
+
+permissions:
+  contents: read
+  # NOTE: this pipeline is currently a stub (see the guard step below). Once
+  # M4 implements real release publishing, revisit this block — creating a
+  # GitHub release / uploading assets needs `contents: write`, scoped to
+  # just that job step, not added speculatively now.
+
 jobs:
   release:
     runs-on: macos-latest
