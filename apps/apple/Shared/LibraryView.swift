@@ -13,6 +13,7 @@ private let importableContentTypes: [UTType] = [
 
 struct LibraryView: View {
     @EnvironmentObject var core: CoreClient
+    @Binding var navigationPath: [String]
     @State private var showImporter = false
     @State private var searchText = ""
     @State private var searchTask: Task<Void, Never>?
@@ -197,17 +198,38 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Row content is deliberately NOT a `NavigationLink` here. Wrapping the
+    /// whole row in one, inside a `List(selection:)`, is a known macOS
+    /// SwiftUI trap: the link swallows the single click as a navigation
+    /// push, so the click never lands as a selection and `selection` can
+    /// never become non-empty -- the toolbar Remove button then looks
+    /// permanently (and inexplicably) disabled. Single click now just
+    /// selects (List's native behavior for plain row content); opening a
+    /// book is an explicit double-click or the context menu's "Open in
+    /// Reader", which appends to `navigationPath` instead.
     private var itemList: some View {
         List(displayedItems, selection: $selection) { item in
-            NavigationLink(value: item.id) {
-                VStack(alignment: .leading) {
-                    Text(item.title)
-                        .font(.headline)
-                    if !item.authors.isEmpty {
-                        Text(item.authors.joined(separator: ", "))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+            VStack(alignment: .leading) {
+                Text(item.title)
+                    .font(.headline)
+                if !item.authors.isEmpty {
+                    Text(item.authors.joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                navigationPath.append(item.id)
+            }
+            .contextMenu {
+                Button("Open in Reader") {
+                    navigationPath.append(item.id)
+                }
+                Divider()
+                Button("Remove…", role: .destructive) {
+                    selection = [item.id]
+                    showRemoveConfirm = true
                 }
             }
         }
