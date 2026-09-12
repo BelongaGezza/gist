@@ -33,7 +33,7 @@ enum LibraryFiltering {
 struct LibraryView: View {
     @EnvironmentObject var core: CoreClient
     @EnvironmentObject var themeManager: ThemeManager
-    @Binding var navigationPath: [String]
+    @Binding var navigationPath: [ReadingDestination]
     @State private var showImporter = false
     @State private var searchText = ""
     @State private var searchTask: Task<Void, Never>?
@@ -121,7 +121,7 @@ struct LibraryView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     if let id = selection.first {
-                        navigationPath.append(id)
+                        navigationPath.append(.rsvp(itemId: id))
                     }
                 } label: {
                     Label("Open", systemImage: "book")
@@ -269,7 +269,16 @@ struct LibraryView: View {
             LibraryRowContent(item: item)
                 .contextMenu {
                     Button("Open in Reader") {
-                        navigationPath.append(item.id)
+                        navigationPath.append(.rsvp(itemId: item.id))
+                    }
+                    // Q8 prototypes (CLAUDE.md M2): two rendering approaches
+                    // for the not-yet-built flow view, side by side for
+                    // comparison.
+                    Button("Open in Flow View (SwiftUI)") {
+                        navigationPath.append(.flowSwiftUI(itemId: item.id))
+                    }
+                    Button("Open in Flow View (TextKit 2)") {
+                        navigationPath.append(.flowTextKit2(itemId: item.id))
                     }
                     Button("Manage Tags…") {
                         tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)

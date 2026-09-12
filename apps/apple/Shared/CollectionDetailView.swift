@@ -14,7 +14,7 @@ import SwiftUI
 struct CollectionDetailView: View {
     @EnvironmentObject var core: CoreClient
     let collection: CollectionVM
-    @Binding var navigationPath: [String]
+    @Binding var navigationPath: [ReadingDestination]
 
     @State private var items: [LibraryItemVM] = []
     @State private var isLoading = false
@@ -38,7 +38,7 @@ struct CollectionDetailView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     if let id = selection.first {
-                        navigationPath.append(id)
+                        navigationPath.append(.rsvp(itemId: id))
                     }
                 } label: {
                     Label("Open", systemImage: "book")
@@ -116,7 +116,13 @@ struct CollectionDetailView: View {
             LibraryRowContent(item: item)
                 .contextMenu {
                     Button("Open in Reader") {
-                        navigationPath.append(item.id)
+                        navigationPath.append(.rsvp(itemId: item.id))
+                    }
+                    Button("Open in Flow View (SwiftUI)") {
+                        navigationPath.append(.flowSwiftUI(itemId: item.id))
+                    }
+                    Button("Open in Flow View (TextKit 2)") {
+                        navigationPath.append(.flowTextKit2(itemId: item.id))
                     }
                     Button("Manage Tags\u{2026}") {
                         tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)

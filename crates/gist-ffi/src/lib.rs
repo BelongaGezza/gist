@@ -251,6 +251,14 @@ impl GistCore {
         })
     }
 
+    /// Return a document's full content (metadata + section/block structure)
+    /// as a JSON string, for non-RSVP reading views — e.g. the flow-view
+    /// prototypes (M2, Q8) — that need the parsed block structure rather
+    /// than RSVP's flat token stream. Read-only.
+    pub fn get_document_json(&self, item_id: String) -> Result<String, GistError> {
+        ffi_catch!({ self.inner.get_document(&item_id).map_err(GistError::from) })
+    }
+
     /// Remove one or more items from the library (single-item context menu
     /// or bulk multi-select both go through this one call). Deletes the DB
     /// rows transactionally first, then best-effort cleans up the internal
