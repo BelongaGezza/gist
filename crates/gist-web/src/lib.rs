@@ -1,10 +1,15 @@
 //! gist-web — URL fetch + readability extraction
 //!
 //! Policy: ADR-005 (TLS-only, 5-redirect max, 50 MB cap, 30s connect / 60s read,
-//! no cookies, robots.txt pre-check).
+//! no cookies, robots.txt pre-check). Also enforces an SSRF resolver policy
+//! (security register F14): every connection — including each redirect hop —
+//! is resolved through [`safe_resolve`], which rejects any address that isn't
+//! globally routable, so a DNS-controlled hostname with a valid TLS certificate
+//! can't be used to reach loopback/RFC1918/link-local targets.
 
 use gist_model::{Block, Document, Metadata, ParseLimits, Section, TextRun};
 use scraper::{Html, Selector};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use url::Url;
 
 // ── Limits ────────────────────────────────────────────────────────────────────
@@ -110,9 +115,78 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
 fn build_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .redirects(MAX_REDIRECTS)
+        // Re-enforced on every redirect hop, not just the initial URL (F14/M-1):
+        // ureq checks this against each hop's URL before connecting.
+        .https_only(true)
+        // SSRF guard (F14): filters resolved addresses on every connection
+        // attempt, including redirect hops — see `safe_resolve`.
+        .resolver(safe_resolve)
         .timeout_connect(std::time::Duration::from_secs(30))
         .timeout_read(std::time::Duration::from_secs(60))
         .build()
+}
+
+// ── SSRF-safe DNS resolution ─────────────────────────────────────────────────
+
+/// Resolves a `host:port` netloc and rejects any address that isn't globally
+/// routable, closing the SSRF gap where a DNS-controlled hostname presents a
+/// valid TLS certificate while resolving to an internal target (security
+/// register F14). `ureq` calls this for every connection attempt it makes,
+/// including each redirect hop, so a redirect can't be used to retarget an
+/// already-approved request at an internal address either (M-1). Because
+/// filtering happens on the already-resolved `SocketAddr`s that `ureq` then
+/// connects to directly, there's no re-resolution window for a DNS-rebinding
+/// attack to exploit between this check and the actual connection.
+fn safe_resolve(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+    let filtered: Vec<SocketAddr> = netloc
+        .to_socket_addrs()?
+        .filter(|addr| is_globally_routable(addr.ip()))
+        .collect();
+
+    if filtered.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "'{}' did not resolve to a permitted public address",
+            netloc
+        )));
+    }
+    Ok(filtered)
+}
+
+/// True if `ip` is not loopback, private, link-local, multicast, broadcast,
+/// documentation, unspecified, or RFC 6598 carrier-grade-NAT shared space —
+/// i.e. an address a public URL fetch should be allowed to reach.
+fn is_globally_routable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local() // covers 169.254.0.0/16, incl. cloud metadata
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || is_shared_address_space(v4))
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_multicast() || v6.is_unspecified() {
+                return false;
+            }
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_globally_routable(IpAddr::V4(mapped));
+            }
+            let leading = v6.segments()[0];
+            let is_unique_local = leading & 0xfe00 == 0xfc00; // fc00::/7
+            let is_link_local = leading & 0xffc0 == 0xfe80; // fe80::/10
+            !(is_unique_local || is_link_local)
+        }
+    }
+}
+
+/// RFC 6598 shared address space (100.64.0.0/10), used for carrier-grade NAT —
+/// not covered by `Ipv4Addr::is_private`, but not publicly reachable either.
+fn is_shared_address_space(v4: Ipv4Addr) -> bool {
+    let [a, b, ..] = v4.octets();
+    a == 100 && (64..=127).contains(&b)
 }
 
 // ── Body streaming ────────────────────────────────────────────────────────────
@@ -413,6 +487,82 @@ mod tests {
         );
         // /public-block is disallowed by * as well.
         assert!(is_path_disallowed(robots, "/public-block/x"));
+    }
+
+    // ── SSRF resolver guard (F14) ────────────────────────────────────────
+
+    #[test]
+    fn test_blocks_loopback() {
+        assert!(!is_globally_routable("127.0.0.1".parse().unwrap()));
+        assert!(!is_globally_routable("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_blocks_cloud_metadata_link_local() {
+        // 169.254.169.254 — AWS/GCP/Azure metadata endpoint.
+        assert!(!is_globally_routable("169.254.169.254".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_blocks_rfc1918_private_ranges() {
+        assert!(!is_globally_routable("10.0.0.5".parse().unwrap()));
+        assert!(!is_globally_routable("172.16.0.5".parse().unwrap()));
+        assert!(!is_globally_routable("192.168.1.5".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_blocks_carrier_grade_nat() {
+        assert!(!is_globally_routable("100.64.0.1".parse().unwrap()));
+        // Just outside the 100.64.0.0/10 range — publicly routable.
+        assert!(is_globally_routable("100.63.255.255".parse().unwrap()));
+        assert!(is_globally_routable("100.128.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_blocks_ipv6_unique_local_and_link_local() {
+        assert!(!is_globally_routable("fc00::1".parse().unwrap()));
+        assert!(!is_globally_routable("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_blocks_ipv4_mapped_ipv6_private() {
+        // ::ffff:10.0.0.1 — IPv4-mapped IPv6 wrapping a private address.
+        assert!(!is_globally_routable("::ffff:10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_allows_public_addresses() {
+        assert!(is_globally_routable("8.8.8.8".parse().unwrap()));
+        assert!(is_globally_routable(
+            "2001:4860:4860::8888".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_safe_resolve_rejects_loopback_literal() {
+        let result = safe_resolve("127.0.0.1:443");
+        assert!(
+            result.is_err(),
+            "loopback address should be rejected by safe_resolve"
+        );
+    }
+
+    #[test]
+    fn test_safe_resolve_rejects_metadata_literal() {
+        let result = safe_resolve("169.254.169.254:443");
+        assert!(
+            result.is_err(),
+            "link-local/metadata address should be rejected by safe_resolve"
+        );
+    }
+
+    #[test]
+    fn test_safe_resolve_allows_public_literal() {
+        let result = safe_resolve("93.184.216.34:443");
+        assert!(
+            result.is_ok(),
+            "public address should be allowed by safe_resolve"
+        );
     }
 
     // ── Size limit ────────────────────────────────────────────────────────

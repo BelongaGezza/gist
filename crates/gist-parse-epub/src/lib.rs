@@ -1,5 +1,14 @@
 use gist_model::{Block, Document, Metadata, Section, TextRun};
 
+/// Cap on decompressed bytes for the three container/metadata entries
+/// (`META-INF/container.xml`, the OPF manifest, `META-INF/encryption.xml`).
+/// These are never legitimately more than a few hundred KB even for the
+/// largest real ePubs — capped independently of `ParseLimits.max_expanded_bytes`
+/// (which budgets spine *content*) so a compression bomb targeting these three
+/// files can't exhaust memory before any other limit engages (security
+/// register F15). Applied per-file, not cumulatively across the three.
+const MAX_METADATA_EXPANDED_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("io: {0}")]
@@ -27,13 +36,13 @@ fn check_drm(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Result<
         Err(e) => return Err(ParseError::Zip(e)),
     };
 
-    // Read the encryption.xml
-    let mut content = String::new();
-    use std::io::Read;
-    let mut enc_file = enc_file;
-    enc_file
-        .read_to_string(&mut content)
-        .map_err(ParseError::Io)?;
+    // Read encryption.xml with an expansion cap (F15) — this file is never
+    // read via read_zip_entry_limited since by_name() already borrowed the
+    // archive here, so we cap it directly with the same accumulator logic.
+    let mut accumulated = 0usize;
+    let buf = read_capped(enc_file, MAX_METADATA_EXPANDED_BYTES, &mut accumulated)?;
+    let content = String::from_utf8(buf)
+        .map_err(|_| ParseError::Malformed("non-UTF-8 encryption.xml".into()))?;
 
     // Parse with roxmltree and check EncryptionMethod Algorithm attributes
     let doc = roxmltree::Document::parse(&content).map_err(|e| ParseError::Xml(e.to_string()))?;
@@ -208,6 +217,36 @@ fn parse_spine(
     Ok(sections)
 }
 
+/// Read `reader` fully into a `Vec<u8>`, enforcing `max_bytes` incrementally
+/// (not after full decompression) so a compression bomb is caught mid-read
+/// rather than after it has already been fully expanded into memory.
+/// `accumulated` lets callers share one running budget across multiple reads
+/// (e.g. spine content, per `parse_spine`) or track a single read in
+/// isolation by passing a fresh `0`.
+fn read_capped(
+    mut reader: impl std::io::Read,
+    max_bytes: usize,
+    accumulated: &mut usize,
+) -> Result<Vec<u8>, ParseError> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut chunk).map_err(ParseError::Io)?;
+        if n == 0 {
+            break;
+        }
+        *accumulated += n;
+        if *accumulated > max_bytes {
+            return Err(ParseError::ResourceLimitExceeded {
+                limit: format!("max_expanded_bytes={}", max_bytes),
+                attempted: *accumulated,
+            });
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    Ok(buf)
+}
+
 /// Read a zip entry as a String, enforcing the cumulative expanded-bytes limit.
 fn read_zip_entry_limited(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
@@ -215,36 +254,23 @@ fn read_zip_entry_limited(
     max_expanded_bytes: usize,
     accumulated: &mut usize,
 ) -> Result<String, ParseError> {
-    let mut entry = archive
+    let entry = archive
         .by_name(path)
         .map_err(|_| ParseError::Malformed(format!("spine item not found in archive: {}", path)))?;
-
-    use std::io::Read;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = entry.read(&mut chunk).map_err(ParseError::Io)?;
-        if n == 0 {
-            break;
-        }
-        *accumulated += n;
-        if *accumulated > max_expanded_bytes {
-            return Err(ParseError::ResourceLimitExceeded {
-                limit: format!("max_expanded_bytes={}", max_expanded_bytes),
-                attempted: *accumulated,
-            });
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
+    let buf = read_capped(entry, max_expanded_bytes, accumulated)?;
     String::from_utf8(buf).map_err(|_| ParseError::Malformed("non-UTF-8 XHTML".into()))
 }
 
+/// Read a container/metadata zip entry (container.xml, OPF) as a String,
+/// capped at `MAX_METADATA_EXPANDED_BYTES` (F15) — independent of
+/// `ParseLimits.max_expanded_bytes`, which budgets spine content, not
+/// metadata read before the spine is even known.
 fn read_zip_entry_string(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     path: &str,
 ) -> Result<String, ParseError> {
-    let mut dummy = 0usize;
-    read_zip_entry_limited(archive, path, usize::MAX, &mut dummy)
+    let mut accumulated = 0usize;
+    read_zip_entry_limited(archive, path, MAX_METADATA_EXPANDED_BYTES, &mut accumulated)
 }
 
 /// Map XHTML content to a Vec<Block>.
@@ -473,6 +499,56 @@ mod tests {
         assert!(blocks
             .iter()
             .any(|b| matches!(b, Block::Heading { level: 1, text } if text == "Title")));
+    }
+
+    /// Builds a minimal zip with a single, highly compressible entry at
+    /// `path` that expands to `expanded_size` bytes — a stand-in for a
+    /// zip-bomb targeting one of the container/metadata reads (F15).
+    fn build_zip_bomb(path: &str, expanded_size: usize) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let content = vec![b'A'; expanded_size]; // trivially compressible
+        let mut zip_bytes = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut zip_bytes);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file(path, options).unwrap();
+            writer.write_all(&content).unwrap();
+            writer.finish().unwrap();
+        }
+        zip_bytes
+    }
+
+    #[test]
+    fn test_container_xml_zip_bomb_is_capped() {
+        let bomb = build_zip_bomb("META-INF/container.xml", MAX_METADATA_EXPANDED_BYTES + 1024);
+        let limits = ParseLimits::default();
+        let result = parse(&bomb, "test", &limits);
+        assert!(
+            matches!(result, Err(ParseError::ResourceLimitExceeded { .. })),
+            "expected ResourceLimitExceeded for oversized container.xml, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_encryption_xml_zip_bomb_is_capped() {
+        // check_drm runs before container.xml is even read, so a bomb here
+        // must be caught without needing a valid rootfile/OPF at all.
+        let bomb = build_zip_bomb(
+            "META-INF/encryption.xml",
+            MAX_METADATA_EXPANDED_BYTES + 1024,
+        );
+        let limits = ParseLimits::default();
+        let result = parse(&bomb, "test", &limits);
+        assert!(
+            matches!(result, Err(ParseError::ResourceLimitExceeded { .. })),
+            "expected ResourceLimitExceeded for oversized encryption.xml, got {:?}",
+            result
+        );
     }
 
     #[test]

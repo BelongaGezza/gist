@@ -5,6 +5,8 @@
 **Codebase state:** Milestone 0 (M0) — core scaffolding; most parsers were stubs at review time  
 **Current status:** All High/Medium findings closed in M1. Three items remain open (F10, A3, A4).
 
+**⚠️ Superseded/partial as of 2026-09-12:** this document predates the collections/search/URL-import/removal/copy-on-import work, the `[A5]` copy-on-import fix, and an independent second security audit (also 2026-09-12) that found 12 new findings (`F14`–`F25`) and 2 new architecture items (`A6`, `A7`) not reflected below. Spot-checks of this doc's closed findings (F1/F2/F3/F6/F9/F11) still hold — this is a coverage gap, not a regression. `CLAUDE.md`'s security register and `docs/development-plan-v2.md` §8 are the current sources of truth; a `security-review-v2.md` pass to properly supersede this file is tracked as future work, not done here.
+
 ---
 
 ## Executive Summary
@@ -42,7 +44,7 @@ All third-party actions pinned to immutable commit SHAs across all three workflo
 
 ### F5 — Medium: `deny.toml` Missing Critical Sections ✅ Closed (commit 10b1c1e)
 
-Added `[advisories]` (vulnerability = "deny"), `[bans]`, and `[sources]` (unknown-registry = "deny") sections.
+Added `[advisories]`, `[bans]`, and `[sources]` (unknown-registry = "deny") sections. **Correction (2026-09-12 audit, finding L-8):** this entry originally claimed `[advisories]` set an explicit `vulnerability = "deny"` key; the live `deny.toml` does not have that key — it has only `version = 2` and `ignore = []`. This is harmless under current `cargo-deny` defaults (advisories are denied by default), but the original claim was inaccurate and is corrected here rather than left standing.
 
 ### F6 — Medium: Document IDs Were Predictable Nanosecond Timestamps ✅ Closed (commit 10b1c1e)
 
