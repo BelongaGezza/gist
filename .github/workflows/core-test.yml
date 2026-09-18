@@ -13,6 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+        with:
+          components: clippy, rustfmt
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo fmt --check
