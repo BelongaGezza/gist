@@ -12,7 +12,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - uses: dtolnay/rust-toolchain@4305c38b25d97ef35a8ad1f985ccf33d0b9d0787  # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo fmt --check
