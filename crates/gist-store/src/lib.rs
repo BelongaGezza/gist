@@ -34,6 +34,17 @@ pub enum StoreError {
     /// since doing so can leak information useful to an attacker).
     #[error("decryption failed (wrong key or corrupted data) for {0}")]
     DecryptionFailed(String),
+    /// The BLAKE3 checksum recorded for a file at write time (ADR-013 /
+    /// security register `A4`) no longer matches the bytes read back from
+    /// disk — the file has been corrupted (bit rot, disk fault, manual
+    /// tampering) since it was written. Deliberately a hard error rather
+    /// than a silent pass-through: this app has no way to tell "corrupted"
+    /// from "tampered", and returning corrupted content to the RSVP engine
+    /// or FTS indexer silently is worse than surfacing a clear failure. Only
+    /// raised when a checksum sidecar file actually exists for `path` — see
+    /// ADR-013's backfill policy for what happens when one doesn't.
+    #[error("checksum mismatch for {path}: file appears corrupted on disk")]
+    ChecksumMismatch { path: String },
 }
 
 // ── Encryption at rest (ADR-011) ─────────────────────────────────────────────
@@ -127,9 +138,83 @@ fn decrypt_at_rest(key: &[u8; 32], data: &[u8], context: &str) -> Result<Vec<u8>
         .map_err(|_| StoreError::DecryptionFailed(context.to_string()))
 }
 
+// ── At-rest integrity checksums (ADR-013 / security register `A4`) ──────────
+
+/// Extension appended to a checksummed file's path to name its checksum
+/// sidecar file (e.g. `<id>.json` → `<id>.json.blake3`).
+const CHECKSUM_EXT: &str = "blake3";
+
+/// BLAKE3 hex digest of `bytes`. BLAKE3 (not a second cryptographic-integrity
+/// scheme, chosen deliberately — see ADR-013): this is a corruption-detection
+/// checksum, not a security boundary, and BLAKE3 is fast and already
+/// license-compatible with `deny.toml`'s allow-list without any change to it
+/// (`CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception` — the
+/// `Apache-2.0` arm alone already satisfies the allow-list).
+fn checksum_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+/// The checksum sidecar path for `path` — a plain text file, alongside
+/// `path`, containing just that file's BLAKE3 hex digest. A sidecar file
+/// (not a new `library_items` DB column) was chosen because: (1) it applies
+/// uniformly to `<id>.json`/`<id>.tokens.json` (ADR-007) *and*
+/// `originals/<hash>.<ext>` (ADR-006) without needing a separate scheme for
+/// the latter's content-addressed, potentially-multiply-referenced files;
+/// (2) it needs no schema migration/version bump — nothing about this is
+/// queried or filtered in SQL, it's purely "does this exact file's content
+/// still match what was written"; (3) it keeps with ADR-007's existing
+/// ethos of small, independently inspectable plain-text files alongside the
+/// content they describe. See ADR-013 for the full reasoning.
+fn checksum_sidecar_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".");
+    s.push(CHECKSUM_EXT);
+    PathBuf::from(s)
+}
+
+/// Write (or overwrite) the checksum sidecar for `path`, recording the
+/// BLAKE3 digest of `bytes` — the exact bytes being written to `path` (i.e.
+/// post-encryption ciphertext when this `Store` is encrypted, ADR-011;
+/// plaintext otherwise). Checksumming on-disk bytes rather than plaintext
+/// means this catches corruption regardless of encryption status, and
+/// verification (below) never needs a key.
+fn write_checksum_sidecar(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    std::fs::write(checksum_sidecar_path(path), checksum_hex(bytes))?;
+    Ok(())
+}
+
+/// Verify `bytes` (freshly read from `path`) against `path`'s checksum
+/// sidecar, if one exists.
+///
+/// **Backfill/legacy policy (ADR-013):** a missing sidecar is *not* an
+/// error — it means `path` was written before this feature existed (or,
+/// for an `originals/` copy, was deduplicated against a pre-existing file
+/// that predates it), and this function has no basis to assert anything
+/// about its integrity either way. Only a *present-but-disagreeing* sidecar
+/// produces [`StoreError::ChecksumMismatch`]. This means old data is never
+/// spuriously flagged as corrupt, but also never silently credited with an
+/// integrity guarantee it doesn't have.
+fn verify_checksum(path: &str, bytes: &[u8]) -> Result<(), StoreError> {
+    let sidecar = checksum_sidecar_path(Path::new(path));
+    let expected = match std::fs::read_to_string(&sidecar) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(StoreError::Io(e)),
+    };
+    if expected.trim() != checksum_hex(bytes) {
+        return Err(StoreError::ChecksumMismatch {
+            path: path.to_string(),
+        });
+    }
+    Ok(())
+}
+
 // ── Schema version ────────────────────────────────────────────────────────
 
 // v5 added `content_encrypted` (ADR-011) — see Store::open's migration block.
+// No schema change accompanies the at-rest checksums added in the same
+// release as this comment (ADR-013 / `A4`) — see that ADR for why a sidecar
+// file, not a column, was chosen; `SCHEMA_VERSION` is unaffected.
 const SCHEMA_VERSION: i64 = 5;
 
 // ── LibraryItem (lightweight row, not the full Document) ──────────────────
@@ -382,6 +467,11 @@ impl Store {
     /// `content_encrypted` flag is set to 1, so [`Store::get_item`]/
     /// [`Store::get_tokens`] know to decrypt them later. A [`Store::open`]
     /// (no key provider) writes plaintext exactly as before, flag 0.
+    ///
+    /// Each blob also gets a BLAKE3 checksum sidecar file (ADR-013 / `A4`),
+    /// covering the exact bytes written (ciphertext when encrypted,
+    /// plaintext otherwise) — [`Store::get_item`]/[`Store::get_tokens`]
+    /// verify against it on every read.
     pub fn insert_item(&self, doc: &gist_model::Document) -> Result<(), StoreError> {
         let key = self.encryption_key();
 
@@ -393,6 +483,7 @@ impl Store {
             None => doc_json.into_bytes(),
         };
         std::fs::write(&doc_path, &doc_bytes)?;
+        write_checksum_sidecar(&doc_path, &doc_bytes)?;
 
         // Write the token stream as a separate file for RSVP / FTS fast path.
         let token_path = self.storage_dir.join(format!("{}.tokens.json", doc.id));
@@ -402,6 +493,7 @@ impl Store {
             None => tokens_json.into_bytes(),
         };
         std::fs::write(&token_path, &tokens_bytes)?;
+        write_checksum_sidecar(&token_path, &tokens_bytes)?;
 
         let content_encrypted = key.is_some() as i64;
 
@@ -491,6 +583,16 @@ impl Store {
     /// always written in the same call as the `insert_item` that stamps the
     /// owning row's flag, so that row's flag already describes this file's
     /// encryption state too.
+    ///
+    /// **Checksums (ADR-013 / `A4`):** a fresh write also gets a BLAKE3
+    /// checksum sidecar (same mechanism as [`Store::insert_item`]'s document
+    /// blobs), covering the on-disk bytes. A dedup hit (the file already
+    /// exists) leaves the existing file *and* its sidecar untouched, exactly
+    /// like the content itself — a copy written before this feature existed
+    /// stays without a sidecar until it's naturally rewritten, per this
+    /// function's existing "never rewrite an existing file" contract; no
+    /// separate backfill pass runs here. [`Store::verify_original_copy`]
+    /// checks the result later.
     pub fn store_original_copy(&self, bytes: &[u8], ext: &str) -> Result<String, StoreError> {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
@@ -518,9 +620,32 @@ impl Store {
                 None => bytes.to_vec(),
             };
             std::fs::write(&copy_path, &on_disk)?;
+            write_checksum_sidecar(&copy_path, &on_disk)?;
         }
 
         Ok(copy_path.to_string_lossy().into_owned())
+    }
+
+    /// Verify the on-disk integrity of a copy-on-import original at `path`
+    /// (ADR-006) against its BLAKE3 checksum sidecar (ADR-013 / `A4`), if one
+    /// exists — see [`verify_checksum`]'s backfill policy for what happens
+    /// when one doesn't (not an error). Checks the bytes exactly as stored on
+    /// disk — ciphertext if this `Store` is encrypted (ADR-011), plaintext
+    /// otherwise — so this never needs to decrypt or know this store's key.
+    ///
+    /// **Not currently called by anything in `gist-core`/`gist-ffi`.** Per
+    /// ADR-006, nothing in the app reads content from an original copy's
+    /// path today (reads always go through the separate serialised IR at
+    /// `doc_path`), so there's no existing "read this original" call site to
+    /// hook verification into automatically the way [`Store::get_item`]/
+    /// [`Store::get_tokens`] do for the document blobs. This method is the
+    /// primitive a future "verify library integrity" maintenance action
+    /// would call; it's implemented and tested now so the write side (every
+    /// [`Store::store_original_copy`] call already produces a checksum)
+    /// isn't left with no way to ever be checked.
+    pub fn verify_original_copy(&self, path: &str) -> Result<(), StoreError> {
+        let bytes = std::fs::read(path)?;
+        verify_checksum(path, &bytes)
     }
 
     /// Remove a single item. Thin wrapper around [`Store::remove_items`] so
@@ -701,18 +826,27 @@ impl Store {
         ))
     }
 
-    /// Reads `path` and, if `content_encrypted` is set, decrypts it (ADR-011)
-    /// under this `Store`'s configured key before returning. Returns
+    /// Reads `path`, verifies it against its checksum sidecar if one exists
+    /// (ADR-013 / `A4` — [`StoreError::ChecksumMismatch`] if it disagrees)
+    /// and, if `content_encrypted` is set, decrypts it (ADR-011) under this
+    /// `Store`'s configured key before returning. Returns
     /// [`StoreError::MissingKeyProvider`] if the content is flagged encrypted
     /// but this `Store` was opened via [`Store::open`] (no key available) —
     /// this is the per-row migration check described on
     /// [`Store::open_encrypted`].
+    ///
+    /// Checksum verification runs against the raw on-disk bytes, *before*
+    /// any decryption attempt — corruption is reported as
+    /// `ChecksumMismatch`, not conflated with `DecryptionFailed` (a wrong
+    /// key or corrupted ciphertext that has no checksum sidecar to catch it
+    /// early).
     fn read_maybe_encrypted(
         &self,
         path: &str,
         content_encrypted: bool,
     ) -> Result<Vec<u8>, StoreError> {
         let raw = std::fs::read(path)?;
+        verify_checksum(path, &raw)?;
         if !content_encrypted {
             return Ok(raw);
         }
@@ -1711,6 +1845,198 @@ mod tests {
         assert_eq!(
             content_encrypted, 0,
             "items inserted via a plain Store::open must default to unencrypted"
+        );
+    }
+
+    // ── At-rest integrity checksums (ADR-013 / `A4`) ─────────────────────
+
+    /// Flips a byte roughly in the middle of `path`'s content — enough to
+    /// invalidate a BLAKE3 checksum (or an AES-GCM auth tag) without
+    /// depending on exactly which byte gets hit.
+    fn corrupt_file(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        assert!(!bytes.is_empty(), "cannot corrupt an empty file");
+        let idx = bytes.len() / 2;
+        bytes[idx] ^= 0xFF;
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn insert_item_writes_matching_checksum_sidecars_for_doc_and_tokens() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("epsilon");
+        store.insert_item(&doc).unwrap();
+
+        let storage = dir.path().join("storage");
+        let doc_path = storage.join(format!("{}.json", doc.id));
+        let tokens_path = storage.join(format!("{}.tokens.json", doc.id));
+
+        for path in [&doc_path, &tokens_path] {
+            let sidecar = checksum_sidecar_path(path);
+            assert!(
+                sidecar.exists(),
+                "expected a checksum sidecar at {sidecar:?}"
+            );
+            let recorded = std::fs::read_to_string(&sidecar).unwrap();
+            let actual = checksum_hex(&std::fs::read(path).unwrap());
+            assert_eq!(
+                recorded, actual,
+                "sidecar checksum must match the file's actual on-disk content"
+            );
+        }
+
+        // And a normal read still succeeds — the round trip this all exists
+        // to not break.
+        assert!(store.get_item(&doc.id).unwrap().is_some());
+        assert!(store.get_tokens(&doc.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn corrupted_doc_blob_fails_checksum_verification_on_read() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("zeta");
+        store.insert_item(&doc).unwrap();
+
+        let doc_path = dir.path().join("storage").join(format!("{}.json", doc.id));
+        corrupt_file(&doc_path);
+
+        let result = store.get_item(&doc.id);
+        assert!(
+            matches!(result, Err(StoreError::ChecksumMismatch { .. })),
+            "expected ChecksumMismatch for a corrupted doc blob, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn corrupted_tokens_blob_fails_checksum_verification_on_read() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("eta");
+        store.insert_item(&doc).unwrap();
+
+        let tokens_path = dir
+            .path()
+            .join("storage")
+            .join(format!("{}.tokens.json", doc.id));
+        corrupt_file(&tokens_path);
+
+        let result = store.get_tokens(&doc.id);
+        assert!(
+            matches!(result, Err(StoreError::ChecksumMismatch { .. })),
+            "expected ChecksumMismatch for a corrupted tokens blob, got {:?}",
+            result
+        );
+    }
+
+    /// A row/file written before this feature existed has no checksum
+    /// sidecar at all — simulated here by deleting it after the fact.
+    /// Reads must succeed normally, per ADR-013's backfill policy: a
+    /// missing sidecar is "unverified," never treated as corruption.
+    #[test]
+    fn missing_checksum_sidecar_is_treated_as_legacy_and_skipped_not_an_error() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("theta");
+        store.insert_item(&doc).unwrap();
+
+        let storage = dir.path().join("storage");
+        let doc_path = storage.join(format!("{}.json", doc.id));
+        let tokens_path = storage.join(format!("{}.tokens.json", doc.id));
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&tokens_path)).unwrap();
+
+        let loaded = store.get_item(&doc.id).unwrap();
+        assert!(
+            loaded.is_some(),
+            "a legacy item with no checksum sidecar must still read successfully"
+        );
+        assert!(store.get_tokens(&doc.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn store_original_copy_writes_verifiable_checksum_sidecar() {
+        let (_dir, store) = open_test_store();
+        let path = store.store_original_copy(b"iota content", "txt").unwrap();
+
+        let sidecar = checksum_sidecar_path(std::path::Path::new(&path));
+        assert!(sidecar.exists());
+
+        store
+            .verify_original_copy(&path)
+            .expect("freshly written original copy must verify cleanly");
+    }
+
+    #[test]
+    fn corrupted_original_copy_fails_verification() {
+        let (_dir, store) = open_test_store();
+        let path = store.store_original_copy(b"kappa content", "txt").unwrap();
+        corrupt_file(std::path::Path::new(&path));
+
+        let result = store.verify_original_copy(&path);
+        assert!(
+            matches!(result, Err(StoreError::ChecksumMismatch { .. })),
+            "expected ChecksumMismatch for a corrupted original copy, got {:?}",
+            result
+        );
+    }
+
+    /// Same backfill policy as document blobs: an original copy with no
+    /// checksum sidecar (simulating one written before this feature, or —
+    /// per `store_original_copy`'s documented dedup behaviour — one that was
+    /// never rewritten because identical content already existed) verifies
+    /// as Ok, not as corrupted.
+    #[test]
+    fn verify_original_copy_without_sidecar_is_not_an_error() {
+        let (_dir, store) = open_test_store();
+        let path = store.store_original_copy(b"lambda content", "txt").unwrap();
+        std::fs::remove_file(checksum_sidecar_path(std::path::Path::new(&path))).unwrap();
+
+        store
+            .verify_original_copy(&path)
+            .expect("a missing sidecar must be treated as unverified, not an error");
+    }
+
+    /// `store_original_copy`'s content-addressed dedup means a second import
+    /// of byte-identical content reuses the existing file untouched — this
+    /// checks that a sidecar deliberately absent from that first write (a
+    /// stand-in for "written before checksums existed") stays absent after a
+    /// dedup hit, rather than being silently backfilled. Locks in the
+    /// documented "no backfill pass" decision (ADR-013) rather than letting
+    /// it drift.
+    #[test]
+    fn dedup_hit_does_not_backfill_a_missing_sidecar() {
+        let (_dir, store) = open_test_store();
+        let path = store.store_original_copy(b"mu content", "txt").unwrap();
+        let sidecar = checksum_sidecar_path(std::path::Path::new(&path));
+        std::fs::remove_file(&sidecar).unwrap();
+
+        // Re-import the exact same bytes — a dedup hit, since the file
+        // already exists at the content-addressed path.
+        let path2 = store.store_original_copy(b"mu content", "txt").unwrap();
+        assert_eq!(path, path2);
+        assert!(
+            !sidecar.exists(),
+            "a dedup hit must not backfill a checksum sidecar for a pre-existing file"
+        );
+    }
+
+    /// Checksum verification runs on the raw on-disk bytes *before* any
+    /// decryption attempt, so corruption of encrypted content is reported as
+    /// `ChecksumMismatch`, not conflated with a decryption failure.
+    #[test]
+    fn checksum_mismatch_detected_before_decryption_is_attempted() {
+        let (dir, store) = open_test_store_encrypted(42);
+        let doc = doc_with_title("nu-encrypted");
+        store.insert_item(&doc).unwrap();
+
+        let doc_path = dir.path().join("storage").join(format!("{}.json", doc.id));
+        corrupt_file(&doc_path);
+
+        let result = store.get_item(&doc.id);
+        assert!(
+            matches!(result, Err(StoreError::ChecksumMismatch { .. })),
+            "expected ChecksumMismatch (checked before decryption) for corrupted \
+             encrypted content, got {:?}",
+            result
         );
     }
 }
