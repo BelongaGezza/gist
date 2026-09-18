@@ -57,7 +57,9 @@ jobs:
       # is current on the day the job happens to run — same SHA-pinning
       # rationale this repo already applies to GitHub Actions themselves.
       - name: Install XcodeGen (pinned 2.46.0)
-        run: brew install https://raw.githubusercontent.com/Homebrew/homebrew-core/a33c03507920c04766b647fdd33fdb9701c07566/Formula/x/xcodegen.rb
+        run: |
+          curl -fsSL -o /tmp/xcodegen.rb https://raw.githubusercontent.com/Homebrew/homebrew-core/a33c03507920c04766b647fdd33fdb9701c07566/Formula/x/xcodegen.rb
+          brew install /tmp/xcodegen.rb
 
       # uniffi 0.28+ no longer ships a standalone uniffi-bindgen on
       # crates.io; gist-ffi builds its own via the uniffi-bindgen-bin
