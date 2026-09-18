@@ -22,14 +22,29 @@ final class KeychainKeyProvider: KeyProvider {
     /// service/account pair otherwise); `account` names which key this is,
     /// in case a future ADR needs more than one (e.g. per-library-profile
     /// keys) without colliding with this one.
-    private let service = "com.gist.macos.encryption-at-rest"
-    private let account = "document-content-key"
+    ///
+    /// Injectable via `init(service:account:)` — an additive test seam
+    /// (same pattern as `CoreClient(dbPath:storageDir:)` and
+    /// `ThemeManager`'s `initialSystemIsDark`) so tests can point this at an
+    /// obviously test-scoped Keychain item instead of the real production
+    /// one. The defaults are exactly the previous hardcoded values, so
+    /// `KeychainKeyProvider()` behaves identically to before this change.
+    private let service: String
+    private let account: String
 
     /// Key length in bytes for AES-256 — must match `gist_store`'s
     /// `KeyProvider::get_or_create_key`'s `[u8; 32]` exactly, or the Rust
     /// side panics (caught by `ffi_catch!`, surfacing as
     /// `GistError.InternalPanic`) rather than silently truncating/padding.
     private let keyLengthBytes = 32
+
+    init(
+        service: String = "com.gist.macos.encryption-at-rest",
+        account: String = "document-content-key"
+    ) {
+        self.service = service
+        self.account = account
+    }
 
     func getOrCreateKey() -> Data {
         if let existing = readKey() {
