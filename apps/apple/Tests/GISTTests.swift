@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import Security
 @testable import GIST
 
 /// Real (not mocked) integration tests for `CoreClient`, run against a real
@@ -16,6 +17,11 @@ final class GISTTests: XCTestCase {
     private var tempDir: URL!
     private var storageDir: String!
     private var client: CoreClient!
+    /// (service, account) pairs of test-scoped Keychain items created via
+    /// `testKeyProvider()` -- deleted in `tearDownWithError` so nothing
+    /// test-related is left behind in the real Keychain, mirroring
+    /// `KeychainKeyProviderIntegrationTests`'s cleanup.
+    private var createdKeychainItems: [(service: String, account: String)] = []
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -35,6 +41,15 @@ final class GISTTests: XCTestCase {
         }
         tempDir = nil
         storageDir = nil
+        for item in createdKeychainItems {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: item.service,
+                kSecAttrAccount as String: item.account,
+            ]
+            SecItemDelete(query as CFDictionary)
+        }
+        createdKeychainItems = []
         try super.tearDownWithError()
     }
 
@@ -165,6 +180,118 @@ final class GISTTests: XCTestCase {
             "deleteSourceFiles: false should leave GIST's sandboxed copy in place"
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.path))
+    }
+
+    // MARK: - Per-item encryption (ADR-014)
+
+    /// Reuses `KeychainKeyProvider`'s `init(service:account:)` test seam
+    /// (added for `KeychainKeyProviderIntegrationTests`) so this test never
+    /// touches the real production Keychain item -- a UUID-suffixed service
+    /// name can never collide with `"com.gist.macos.encryption-at-rest"`.
+    private func testKeyProvider() -> KeychainKeyProvider {
+        let service = "com.gist.macos.encryption-at-rest.TEST-\(UUID().uuidString)"
+        let account = "document-content-key-TEST"
+        createdKeychainItems.append((service: service, account: account))
+        return KeychainKeyProvider(service: service, account: account)
+    }
+
+    /// Uses `client`, the suite's default `CoreClient(dbPath:storageDir:)`
+    /// -- deliberately genuinely keyless, NOT the shape `.shared` actually
+    /// uses in production (see `testEncryptItemsThenReadBackSucceedsOnAReadCapableClient`
+    /// below for that). This still correctly documents that a genuinely
+    /// keyless `GistCore` can't decrypt content it encrypts.
+    func testEncryptItemsEncryptsThenSecondCallIsIdempotentNoOp() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+        XCTAssertFalse(item.contentEncrypted, "freshly imported item must start unencrypted")
+
+        let keyProvider = testKeyProvider()
+
+        let summary = await client.encryptItems(ids: [item.id], keyProvider: keyProvider)
+        XCTAssertNil(client.error)
+        XCTAssertEqual(summary.encryptedCount, 1)
+        XCTAssertEqual(summary.alreadyEncryptedCount, 0)
+        XCTAssertEqual(summary.failedCount, 0)
+
+        // `refresh()` (called internally by `encryptItems`) must reflect the
+        // new flag -- this is SQL metadata, readable even though this
+        // client's own GistCore has no key provider of its own (see
+        // `CoreClient.encryptItems`'s doc comment on that consequence).
+        XCTAssertEqual(client.items.count, 1)
+        XCTAssertTrue(client.items.first?.contentEncrypted ?? false)
+
+        // Second call with the same key provider: safe, idempotent no-op.
+        let summary2 = await client.encryptItems(ids: [item.id], keyProvider: keyProvider)
+        XCTAssertNil(client.error)
+        XCTAssertEqual(summary2.encryptedCount, 0)
+        XCTAssertEqual(summary2.alreadyEncryptedCount, 1)
+        XCTAssertEqual(summary2.failedCount, 0)
+    }
+
+    /// **Closes the read-after-encrypt gap (ADR-014) -- this is the test
+    /// that matches `CoreClient.shared`'s actual real-world configuration.**
+    /// Builds a `CoreClient` via `init(dbPath:storageDir:keyProvider:)`
+    /// (the `newWithReadKey`-backed constructor `.shared`'s production
+    /// `init()` itself now uses), encrypts a freshly-imported item through
+    /// it, and confirms `loadDocument`/`startRsvp` -- the two real
+    /// content-reading call sites the app's Flow View and RSVP screens use
+    /// -- both succeed afterward through that SAME `CoreClient` instance,
+    /// with no `client.error` set and the decoded content intact. Before
+    /// the fix this documents, both calls failed with `MissingKeyProvider`.
+    func testEncryptItemsThenReadBackSucceedsOnAReadCapableClient() async throws {
+        let keyProvider = testKeyProvider()
+        let readCapableClient = CoreClient(
+            dbPath: tempDir.appendingPathComponent("read-capable.sqlite3").path,
+            storageDir: tempDir.appendingPathComponent("read-capable-storage", isDirectory: true).path,
+            keyProvider: keyProvider
+        )
+
+        let fixture = try importableFixtureURL()
+        await readCapableClient.importFile(url: fixture)
+        guard let item = readCapableClient.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+        XCTAssertFalse(item.contentEncrypted, "a read-capable client must still import as plaintext by default")
+
+        let summary = await readCapableClient.encryptItems(ids: [item.id], keyProvider: keyProvider)
+        XCTAssertNil(readCapableClient.error)
+        XCTAssertEqual(summary.encryptedCount, 1)
+        XCTAssertTrue(readCapableClient.items.first?.contentEncrypted ?? false)
+
+        // The gap this test closes: reading the just-encrypted item's
+        // actual content back through the SAME client instance.
+        let document = await readCapableClient.loadDocument(itemId: item.id)
+        XCTAssertNil(readCapableClient.error, "loadDocument must succeed after encrypt on a read-capable client")
+        XCTAssertNotNil(document, "document content must be decodable after encrypt-then-read")
+
+        let session = await readCapableClient.startRsvp(itemId: item.id, wpm: 300)
+        XCTAssertNil(readCapableClient.error, "startRsvp must succeed after encrypt on a read-capable client")
+        XCTAssertNotNil(session, "RSVP session must be buildable after encrypt-then-read")
+    }
+
+    /// Security-relevant: the ADR-006 sandboxed original-file copy is
+    /// explicitly out of scope for this feature (see ADR-014) -- it must be
+    /// byte-for-byte untouched by `encryptItems`.
+    func testEncryptItemsNeverTouchesTheSandboxedOriginalCopy() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        let copyPath = try predictedSandboxedCopyPath(forContentAt: fixture)
+        let beforeBytes = try Data(contentsOf: copyPath)
+
+        _ = await client.encryptItems(ids: [item.id], keyProvider: testKeyProvider())
+
+        let afterBytes = try Data(contentsOf: copyPath)
+        XCTAssertEqual(beforeBytes, afterBytes, "encryptItems must never touch the ADR-006 sandboxed copy")
     }
 
     // MARK: - Collections
