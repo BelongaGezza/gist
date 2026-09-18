@@ -119,6 +119,49 @@ impl gist_core::OcrEngine for CoreOcrAdapter<'_> {
     }
 }
 
+// ── Key provider (ADR-011) ────────────────────────────────────────────────────
+
+/// Callback interface: implemented in Swift/Kotlin (Keychain-backed on
+/// Apple), called from Rust whenever `gist-store` needs the AES-256 key it
+/// encrypts document content at rest with. Mirrors `OcrEngine` above exactly
+/// — same reason (uniffi callback interfaces must be defined where
+/// `#[uniffi::export]` runs, i.e. here, not in `gist-core`) and same adapter
+/// pattern below.
+///
+/// Returns raw bytes rather than a fixed-size array — uniffi's supported
+/// scalar/collection types don't include const-generic arrays — so
+/// `CoreKeyProviderAdapter` validates the length is exactly 32 before
+/// handing it to `gist_store::KeyProvider`, which does use `[u8; 32]` since
+/// that side is plain Rust-to-Rust.
+#[uniffi::export(callback_interface)]
+pub trait KeyProvider: Send + Sync {
+    /// Return the 32-byte AES-256 key, creating and durably persisting one
+    /// (e.g. in the platform Keychain) on first call if none exists yet.
+    /// Must return the same key on every call for the life of the app's
+    /// data. Must be exactly 32 bytes — a different length is treated as a
+    /// fatal misconfiguration (panics, caught by `ffi_catch!` like any other
+    /// panic at this boundary, surfacing as `GistError::InternalPanic`).
+    fn get_or_create_key(&self) -> Vec<u8>;
+}
+
+/// Adapter that makes a uniffi `KeyProvider` callback object usable as a
+/// `gist_store::KeyProvider` (re-exported as `gist_core::KeyProvider`) —
+/// same circular-dependency-avoidance role as `CoreOcrAdapter` above, and
+/// owns the boxed callback object (rather than borrowing it, as
+/// `CoreOcrAdapter` does for a single call) because a `Store` holds its
+/// `KeyProvider` for its entire lifetime, not just one operation.
+struct CoreKeyProviderAdapter(Box<dyn KeyProvider>);
+
+impl gist_core::KeyProvider for CoreKeyProviderAdapter {
+    fn get_or_create_key(&self) -> [u8; 32] {
+        let bytes = self.0.get_or_create_key();
+        let len = bytes.len();
+        bytes.try_into().unwrap_or_else(|_| {
+            panic!("KeyProvider.get_or_create_key() must return exactly 32 bytes, got {len}")
+        })
+    }
+}
+
 // ── Record types ─────────────────────────────────────────────────────────────
 
 #[derive(uniffi::Record)]
@@ -152,6 +195,32 @@ impl GistCore {
             let core =
                 gist_core::Core::init(&PathBuf::from(&db_path), &PathBuf::from(&storage_dir))
                     .map_err(GistError::from)?;
+            Ok(Arc::new(Self { inner: core }))
+        })
+    }
+
+    /// Encrypted counterpart to `new` (ADR-011): document content, token
+    /// streams, and original-file copies are encrypted at rest under a key
+    /// supplied by `key_provider` (Keychain-backed on Apple). See
+    /// `gist_core::Core::init_encrypted`/`gist_store::Store::open_encrypted`
+    /// for the migration story — an existing store opened this way keeps its
+    /// pre-existing plaintext rows readable; only content written after this
+    /// call is encrypted.
+    #[uniffi::constructor]
+    pub fn new_encrypted(
+        db_path: String,
+        storage_dir: String,
+        key_provider: Box<dyn KeyProvider>,
+    ) -> Result<Arc<Self>, GistError> {
+        ffi_catch!({
+            let adapter: Arc<dyn gist_core::KeyProvider> =
+                Arc::new(CoreKeyProviderAdapter(key_provider));
+            let core = gist_core::Core::init_encrypted(
+                &PathBuf::from(&db_path),
+                &PathBuf::from(&storage_dir),
+                adapter,
+            )
+            .map_err(GistError::from)?;
             Ok(Arc::new(Self { inner: core }))
         })
     }

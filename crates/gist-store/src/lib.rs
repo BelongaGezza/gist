@@ -1,8 +1,10 @@
+use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 // ── Error ──────────────────────────────────────────────────────────────────
@@ -19,11 +21,116 @@ pub enum StoreError {
     NotFound(String),
     #[error("database schema version {found} is newer than this app's known version {expected}; upgrade the app")]
     SchemaTooNew { found: i64, expected: i64 },
+    /// A row/file is marked `content_encrypted` but this `Store` was opened
+    /// via [`Store::open`] (no [`KeyProvider`]), so there's no key to decrypt
+    /// it with. Opening the same on-disk store via [`Store::open_encrypted`]
+    /// with the same key resolves this.
+    #[error("encrypted content found but no KeyProvider is configured for this Store")]
+    MissingKeyProvider,
+    /// Decryption failed — either the wrong key, or the ciphertext/nonce was
+    /// corrupted or truncated. Deliberately doesn't wrap the underlying
+    /// `aes_gcm::Error`, which carries no useful detail by design (AEAD
+    /// implementations intentionally avoid distinguishing failure reasons,
+    /// since doing so can leak information useful to an attacker).
+    #[error("decryption failed (wrong key or corrupted data) for {0}")]
+    DecryptionFailed(String),
+}
+
+// ── Encryption at rest (ADR-011) ─────────────────────────────────────────────
+
+/// Supplies the AES-256 key used to encrypt/decrypt document blobs and
+/// original-file copies at rest (ADR-011). Defined here, not in `gist-core`,
+/// because `gist-store` — not `gist-core` — owns the actual file read/write
+/// boundary this key is used at, and `gist-core` already depends on
+/// `gist-store` (not the reverse), so the trait must live at or below the
+/// point of use. `gist-core` re-exports this the same way it already
+/// re-exports `gist_model::ParseLimits` — a lower-level crate's type,
+/// surfaced for convenience at the facade layer without creating a cycle.
+///
+/// Real key custody lives outside Rust entirely: the platform layer (Swift
+/// on Apple, backed by Keychain) implements this trait and is threaded in via
+/// [`Store::open_encrypted`], mirroring how `OcrEngine` is threaded through
+/// `gist-ffi` as a uniffi callback interface (see `gist-ffi`'s
+/// `CoreOcrAdapter` for the adapter pattern this is expected to follow on the
+/// FFI side — a `gist-ffi`-side `KeyProvider` callback interface + adapter,
+/// not this trait exported directly over FFI, since uniffi callback
+/// interfaces must be defined where the `#[uniffi::export]` macro runs).
+pub trait KeyProvider: Send + Sync {
+    /// Return the 32-byte AES-256 key for this store, creating and durably
+    /// persisting one (in the platform keychain/equivalent) on first call if
+    /// none exists yet. Must return the *same* key on every subsequent call
+    /// for the life of the app's data — losing this key makes all encrypted
+    /// content permanently unreadable, by design (there is no recovery path
+    /// other than the platform's own keychain backup/sync, which is outside
+    /// this trait's concern).
+    fn get_or_create_key(&self) -> [u8; 32];
+}
+
+/// Fixed in-memory key for tests. Never use outside `#[cfg(test)]` —
+/// there is no persistence and no secrecy; every instance with the same
+/// `key` byte returns identical key material.
+#[derive(Clone)]
+pub struct FakeKeyProvider {
+    key: [u8; 32],
+}
+
+impl FakeKeyProvider {
+    /// Builds a fixed key by repeating `seed` to fill 32 bytes — convenient
+    /// for tests that need two provably-different keys (e.g. a
+    /// "wrong key" test), not for anything resembling real key derivation.
+    pub fn new(seed: u8) -> Self {
+        Self { key: [seed; 32] }
+    }
+}
+
+impl KeyProvider for FakeKeyProvider {
+    fn get_or_create_key(&self) -> [u8; 32] {
+        self.key
+    }
+}
+
+/// Encrypts `plaintext` with AES-256-GCM under `key`, returning
+/// `nonce || ciphertext` (12-byte random nonce prepended to the AEAD output,
+/// which already includes the authentication tag) — the whole thing is what
+/// gets written to disk, and `decrypt_at_rest` expects exactly this layout.
+/// A fresh random nonce is generated per call (`Aes256Gcm::generate_nonce`),
+/// never reused, which AES-GCM requires for its security guarantees to hold.
+fn encrypt_at_rest(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    // Only fails on absurd (>~64 GiB) plaintext sizes for this cipher, which
+    // none of this app's document/original-file content can ever reach —
+    // ParseLimits caps every import path well below that.
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
+        .expect("AES-256-GCM encryption failed (plaintext far exceeds any realistic size)");
+    let mut out = Vec::with_capacity(nonce.len() + ciphertext.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+    out
+}
+
+/// Reverses [`encrypt_at_rest`]: splits the leading 12-byte nonce from
+/// `data`, then decrypts the remainder under `key`. `context` is used only
+/// to name what failed in the returned error, not for any cryptographic
+/// purpose.
+fn decrypt_at_rest(key: &[u8; 32], data: &[u8], context: &str) -> Result<Vec<u8>, StoreError> {
+    const NONCE_LEN: usize = 12;
+    if data.len() < NONCE_LEN {
+        return Err(StoreError::DecryptionFailed(context.to_string()));
+    }
+    let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| StoreError::DecryptionFailed(context.to_string()))
 }
 
 // ── Schema version ────────────────────────────────────────────────────────
 
-const SCHEMA_VERSION: i64 = 4;
+// v5 added `content_encrypted` (ADR-011) — see Store::open's migration block.
+const SCHEMA_VERSION: i64 = 5;
 
 // ── LibraryItem (lightweight row, not the full Document) ──────────────────
 
@@ -76,12 +183,53 @@ pub struct Collection {
 pub struct Store {
     conn: Mutex<Connection>,
     storage_dir: PathBuf,
+    /// `Some` for a `Store` opened via [`Store::open_encrypted`] — governs
+    /// whether newly written content is encrypted (ADR-011). `None` (the
+    /// [`Store::open`] path) preserves the pre-ADR-011 plaintext behavior
+    /// exactly, unchanged, which is also how an already-plaintext store
+    /// stays readable without any migration step: nothing about opening it
+    /// via `Store::open` ever changes.
+    key_provider: Option<Arc<dyn KeyProvider>>,
 }
 
 impl Store {
-    /// Open (or create) the SQLite database at `db_path`.
+    /// Open (or create) the SQLite database at `db_path`, with document
+    /// content stored **unencrypted** — the pre-ADR-011 behavior, unchanged.
     /// Document JSON blobs are stored under `storage_dir`.
     pub fn open(db_path: &Path, storage_dir: &Path) -> Result<Self, StoreError> {
+        Self::open_internal(db_path, storage_dir, None)
+    }
+
+    /// Open (or create) the SQLite database at `db_path`, encrypting newly
+    /// written document blobs, token streams, and original-file copies at
+    /// rest under a key from `key_provider` (ADR-011, AES-256-GCM).
+    ///
+    /// **Migration:** a store that already has rows from before this existed
+    /// (or from a plain [`Store::open`] session) keeps working unchanged —
+    /// each `library_items` row carries its own `content_encrypted` flag,
+    /// set at insert time, so `get_item`/`get_tokens` know per-row whether to
+    /// decrypt or read as plaintext. Existing rows are never rewritten or
+    /// force-migrated by opening this way; only content inserted *after*
+    /// this call is encrypted. This was chosen over an eager bulk
+    /// re-encryption pass at open time because a library can be large, import
+    /// is otherwise this app's only write path to document content (nothing
+    /// currently updates a document in place), and a partial bulk migration
+    /// interrupted mid-way is a materially worse failure mode than "old items
+    /// stay as they were until re-imported" — see ADR-011 for the full
+    /// reasoning.
+    pub fn open_encrypted(
+        db_path: &Path,
+        storage_dir: &Path,
+        key_provider: Arc<dyn KeyProvider>,
+    ) -> Result<Self, StoreError> {
+        Self::open_internal(db_path, storage_dir, Some(key_provider))
+    }
+
+    fn open_internal(
+        db_path: &Path,
+        storage_dir: &Path,
+        key_provider: Option<Arc<dyn KeyProvider>>,
+    ) -> Result<Self, StoreError> {
         std::fs::create_dir_all(storage_dir)?;
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -198,24 +346,64 @@ impl Store {
             tracing::info!("gist-store: migrated schema to version 4 (source_copy_path)");
         }
 
+        // v4 → v5: per-item encrypted-at-rest flag (ADR-011). Defaults to 0
+        // (unencrypted) for every pre-existing row, which is exactly correct
+        // for rows written before this column existed — see
+        // `Store::open_encrypted`'s doc comment for why that's sufficient
+        // and no bulk re-encryption pass runs here.
+        if version < 5 {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE library_items ADD COLUMN content_encrypted INTEGER NOT NULL DEFAULT 0;
+                 PRAGMA user_version = 5;
+                 COMMIT;",
+            )?;
+            tracing::info!("gist-store: migrated schema to version 5 (content_encrypted)");
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
             storage_dir: storage_dir.to_owned(),
+            key_provider,
         })
+    }
+
+    /// `Some(32-byte key)` if this `Store` was opened via
+    /// [`Store::open_encrypted`]; `None` for [`Store::open`].
+    fn encryption_key(&self) -> Option<[u8; 32]> {
+        self.key_provider.as_ref().map(|kp| kp.get_or_create_key())
     }
 
     /// Persist a [`gist_model::Document`] to disk (JSON blob + token file) and
     /// index its metadata and Word tokens in SQLite.
+    ///
+    /// When this `Store` was opened via [`Store::open_encrypted`] (ADR-011),
+    /// both files are written AES-256-GCM-encrypted and the row's
+    /// `content_encrypted` flag is set to 1, so [`Store::get_item`]/
+    /// [`Store::get_tokens`] know to decrypt them later. A [`Store::open`]
+    /// (no key provider) writes plaintext exactly as before, flag 0.
     pub fn insert_item(&self, doc: &gist_model::Document) -> Result<(), StoreError> {
+        let key = self.encryption_key();
+
         // Write the full document blob.
         let doc_path = self.storage_dir.join(format!("{}.json", doc.id));
         let doc_json = serde_json::to_string(doc)?;
-        std::fs::write(&doc_path, &doc_json)?;
+        let doc_bytes = match &key {
+            Some(k) => encrypt_at_rest(k, doc_json.as_bytes()),
+            None => doc_json.into_bytes(),
+        };
+        std::fs::write(&doc_path, &doc_bytes)?;
 
         // Write the token stream as a separate file for RSVP / FTS fast path.
         let token_path = self.storage_dir.join(format!("{}.tokens.json", doc.id));
         let tokens_json = serde_json::to_string(&doc.token_stream)?;
-        std::fs::write(&token_path, &tokens_json)?;
+        let tokens_bytes = match &key {
+            Some(k) => encrypt_at_rest(k, tokens_json.as_bytes()),
+            None => tokens_json.into_bytes(),
+        };
+        std::fs::write(&token_path, &tokens_bytes)?;
+
+        let content_encrypted = key.is_some() as i64;
 
         let meta = &doc.metadata;
         // gist_model::Metadata has `author: Option<String>` — normalise to a list.
@@ -235,8 +423,8 @@ impl Store {
         tx.execute(
             "INSERT OR REPLACE INTO library_items
              (id, title, authors, source_path, source_url, doc_path, cover_path,
-              created_at, updated_at, metadata_json, source_copy_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              created_at, updated_at, metadata_json, source_copy_path, content_encrypted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 doc.id,
                 meta.title,
@@ -249,6 +437,7 @@ impl Store {
                 now_ms,
                 meta_json,
                 source_copy_path,
+                content_encrypted,
             ],
         )?;
 
@@ -288,6 +477,20 @@ impl Store {
     /// would need reference counting (e.g. only delete when no other
     /// `library_items` row still references the same `source_copy_path`) if
     /// this ever needs to be exposed as a per-item guarantee.
+    ///
+    /// **Encryption (ADR-011):** when this `Store` was opened via
+    /// [`Store::open_encrypted`], the bytes written to disk are
+    /// AES-256-GCM-encrypted — but the content-addressed filename is still
+    /// the hash of the *plaintext* `bytes`, so byte-identical re-imports keep
+    /// deduplicating exactly as before (a fresh random nonce per write means
+    /// re-encrypting identical plaintext would produce different ciphertext
+    /// anyway, which is exactly why an existing file is left untouched rather
+    /// than rewritten — there'd be nothing gained and it would needlessly
+    /// invalidate nothing, since nothing keys off the ciphertext itself).
+    /// There's no separate `content_encrypted` flag for this file: it's
+    /// always written in the same call as the `insert_item` that stamps the
+    /// owning row's flag, so that row's flag already describes this file's
+    /// encryption state too.
     pub fn store_original_copy(&self, bytes: &[u8], ext: &str) -> Result<String, StoreError> {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
@@ -310,7 +513,11 @@ impl Store {
         let copy_path = originals_dir.join(filename);
 
         if !copy_path.exists() {
-            std::fs::write(&copy_path, bytes)?;
+            let on_disk = match self.encryption_key() {
+                Some(key) => encrypt_at_rest(&key, bytes),
+                None => bytes.to_vec(),
+            };
+            std::fs::write(&copy_path, &on_disk)?;
         }
 
         Ok(copy_path.to_string_lossy().into_owned())
@@ -494,22 +701,43 @@ impl Store {
         ))
     }
 
+    /// Reads `path` and, if `content_encrypted` is set, decrypts it (ADR-011)
+    /// under this `Store`'s configured key before returning. Returns
+    /// [`StoreError::MissingKeyProvider`] if the content is flagged encrypted
+    /// but this `Store` was opened via [`Store::open`] (no key available) —
+    /// this is the per-row migration check described on
+    /// [`Store::open_encrypted`].
+    fn read_maybe_encrypted(
+        &self,
+        path: &str,
+        content_encrypted: bool,
+    ) -> Result<Vec<u8>, StoreError> {
+        let raw = std::fs::read(path)?;
+        if !content_encrypted {
+            return Ok(raw);
+        }
+        let key = self
+            .encryption_key()
+            .ok_or(StoreError::MissingKeyProvider)?;
+        decrypt_at_rest(&key, &raw, path)
+    }
+
     /// Load and deserialise the full [`gist_model::Document`] for `id`.
     pub fn get_item(&self, id: &str) -> Result<Option<gist_model::Document>, StoreError> {
-        let doc_path: Option<String> = {
+        let row: Option<(String, bool)> = {
             let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
             conn.query_row(
-                "SELECT doc_path FROM library_items WHERE id = ?1",
+                "SELECT doc_path, content_encrypted FROM library_items WHERE id = ?1",
                 params![id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
         };
 
-        match doc_path {
+        match row {
             None => Ok(None),
-            Some(path) => {
-                let bytes = std::fs::read(&path)?;
+            Some((path, content_encrypted)) => {
+                let bytes = self.read_maybe_encrypted(&path, content_encrypted)?;
                 let doc: gist_model::Document = serde_json::from_slice(&bytes)?;
                 Ok(Some(doc))
             }
@@ -519,31 +747,31 @@ impl Store {
     /// Load only the token stream for an item (for RSVP / TTS).
     /// Loads from `<id>.tokens.json`; falls back to loading the full document.
     pub fn get_tokens(&self, id: &str) -> Result<Option<Vec<gist_model::Token>>, StoreError> {
-        let doc_path: Option<String> = {
+        let row: Option<(String, bool)> = {
             let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
             conn.query_row(
-                "SELECT doc_path FROM library_items WHERE id = ?1",
+                "SELECT doc_path, content_encrypted FROM library_items WHERE id = ?1",
                 params![id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
         };
 
-        match doc_path {
+        match row {
             None => Ok(None),
-            Some(path) => {
+            Some((path, content_encrypted)) => {
                 let token_path = path
                     .strip_suffix(".json")
                     .map(|s| format!("{}.tokens.json", s))
                     .unwrap_or_else(|| format!("{}.tokens.json", path));
 
                 if std::path::Path::new(&token_path).exists() {
-                    let bytes = std::fs::read(&token_path)?;
+                    let bytes = self.read_maybe_encrypted(&token_path, content_encrypted)?;
                     let tokens: Vec<gist_model::Token> = serde_json::from_slice(&bytes)?;
                     Ok(Some(tokens))
                 } else {
                     // Fallback: load full document and extract token stream.
-                    let bytes = std::fs::read(&path)?;
+                    let bytes = self.read_maybe_encrypted(&path, content_encrypted)?;
                     let doc: gist_model::Document = serde_json::from_slice(&bytes)?;
                     Ok(Some(doc.token_stream))
                 }
@@ -1260,5 +1488,229 @@ mod tests {
                 results
             );
         }
+    }
+
+    // ── Encryption at rest (ADR-011) ─────────────────────────────────────
+
+    fn open_test_store_encrypted(seed: u8) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        let store =
+            Store::open_encrypted(&db, &storage, Arc::new(FakeKeyProvider::new(seed))).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn encrypted_store_round_trips_item_and_tokens() {
+        let (_dir, store) = open_test_store_encrypted(1);
+        let doc = doc_with_title("ciphertext-roundtrip");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let loaded = store.get_item(&id).unwrap().expect("item must be found");
+        assert_eq!(loaded.metadata.title, "ciphertext-roundtrip");
+
+        let tokens = store
+            .get_tokens(&id)
+            .unwrap()
+            .expect("tokens must be found");
+        assert_eq!(tokens.len(), doc.token_stream.len());
+    }
+
+    /// The whole point of ADR-011: the bytes actually on disk must not be
+    /// readable as plaintext. Encrypts a document containing a distinctive
+    /// string and asserts that string does not appear anywhere in the raw
+    /// file bytes — proving this isn't just "round-trips through the API"
+    /// but that the on-disk representation is genuinely not plaintext.
+    #[test]
+    fn encrypted_content_is_not_plaintext_on_disk() {
+        let (dir, store) = open_test_store_encrypted(2);
+        let needle = "MARSUPIAL_CANARY_STRING_0xB33F";
+        let doc = doc_with_title(needle);
+        store.insert_item(&doc).unwrap();
+
+        let storage_dir = dir.path().join("storage");
+        let doc_path = storage_dir.join(format!("{}.json", doc.id));
+        let tokens_path = storage_dir.join(format!("{}.tokens.json", doc.id));
+
+        let doc_bytes = std::fs::read(&doc_path).unwrap();
+        let tokens_bytes = std::fs::read(&tokens_path).unwrap();
+
+        assert!(
+            !doc_bytes
+                .windows(needle.len())
+                .any(|w| w == needle.as_bytes()),
+            "canary string must not appear in the encrypted document blob on disk"
+        );
+        assert!(
+            !tokens_bytes
+                .windows(needle.len())
+                .any(|w| w == needle.as_bytes()),
+            "canary string must not appear in the encrypted tokens blob on disk"
+        );
+    }
+
+    /// `store_original_copy`'s output must also be ciphertext, not plaintext,
+    /// when a key provider is configured.
+    #[test]
+    fn encrypted_original_copy_is_not_plaintext_on_disk() {
+        let (_dir, store) = open_test_store_encrypted(3);
+        let needle = b"MARSUPIAL_ORIGINAL_FILE_CONTENTS";
+        let copy_path = store.store_original_copy(needle, "txt").unwrap();
+
+        let on_disk = std::fs::read(&copy_path).unwrap();
+        assert!(
+            !on_disk
+                .windows(needle.len())
+                .any(|w| w == needle.as_slice()),
+            "original bytes must not appear in the encrypted copy on disk"
+        );
+
+        // And it must still decrypt back to exactly the original bytes,
+        // proving this isn't just "different bytes" but genuinely the same
+        // plaintext recoverable under the right key.
+        let key = store.encryption_key().unwrap();
+        let recovered = decrypt_at_rest(&key, &on_disk, "test").unwrap();
+        assert_eq!(recovered, needle);
+    }
+
+    /// Decrypting with the wrong key must fail cleanly (an `Err`), never
+    /// panic and never silently return garbage that happens to parse.
+    #[test]
+    fn wrong_key_fails_to_decrypt_without_panicking() {
+        let key_a = FakeKeyProvider::new(0xAA).get_or_create_key();
+        let key_b = FakeKeyProvider::new(0xBB).get_or_create_key();
+
+        let ciphertext = encrypt_at_rest(&key_a, b"hello from key A");
+        let result = decrypt_at_rest(&key_b, &ciphertext, "test");
+
+        assert!(
+            matches!(result, Err(StoreError::DecryptionFailed(_))),
+            "expected DecryptionFailed for the wrong key, got {:?}",
+            result
+        );
+    }
+
+    /// Truncated/corrupted ciphertext (shorter than a nonce) must also fail
+    /// cleanly rather than panicking on an out-of-bounds slice.
+    #[test]
+    fn corrupted_short_ciphertext_fails_to_decrypt_without_panicking() {
+        let key = FakeKeyProvider::new(0xCC).get_or_create_key();
+        let result = decrypt_at_rest(&key, b"short", "test");
+        assert!(matches!(result, Err(StoreError::DecryptionFailed(_))));
+    }
+
+    /// Migration: a store opened without encryption (existing behavior) then
+    /// re-opened *with* encryption must still be able to read the old,
+    /// plaintext row — and any newly inserted item after that point is
+    /// encrypted. This is `Store::open_encrypted`'s documented migration
+    /// model: no bulk re-encryption, per-row `content_encrypted` flag.
+    #[test]
+    fn migration_old_plaintext_item_readable_after_switching_to_encrypted_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+
+        // Phase 1: plain, unencrypted store — as if from before ADR-011.
+        let legacy_id = {
+            let store = Store::open(&db, &storage).unwrap();
+            let doc = doc_with_title("legacy-plaintext-item");
+            let id = doc.id.clone();
+            store.insert_item(&doc).unwrap();
+            id
+        };
+
+        // Phase 2: same on-disk store, now reopened with encryption enabled.
+        let store =
+            Store::open_encrypted(&db, &storage, Arc::new(FakeKeyProvider::new(9))).unwrap();
+
+        // The old plaintext row must still be readable, unmodified.
+        let legacy = store
+            .get_item(&legacy_id)
+            .unwrap()
+            .expect("legacy plaintext item must still be readable");
+        assert_eq!(legacy.metadata.title, "legacy-plaintext-item");
+        let legacy_doc_path = storage.join(format!("{}.json", legacy_id));
+        let legacy_bytes = std::fs::read(&legacy_doc_path).unwrap();
+        assert!(
+            serde_json::from_slice::<gist_model::Document>(&legacy_bytes).is_ok(),
+            "legacy item's on-disk blob must still be plain, un-re-encrypted JSON"
+        );
+
+        // A newly inserted item, after switching to open_encrypted, must be
+        // encrypted (its content_encrypted flag set, its bytes not plaintext).
+        let new_doc = doc_with_title("new-encrypted-item");
+        let new_id = new_doc.id.clone();
+        store.insert_item(&new_doc).unwrap();
+
+        let new_doc_path = storage.join(format!("{}.json", new_id));
+        let new_bytes = std::fs::read(&new_doc_path).unwrap();
+        assert!(
+            serde_json::from_slice::<gist_model::Document>(&new_bytes).is_err(),
+            "newly inserted item's on-disk blob must be ciphertext, not plain JSON"
+        );
+
+        let loaded_new = store
+            .get_item(&new_id)
+            .unwrap()
+            .expect("new encrypted item must be readable through the API");
+        assert_eq!(loaded_new.metadata.title, "new-encrypted-item");
+    }
+
+    /// Reading encrypted content back through a plain (no key provider)
+    /// `Store::open` must fail with `MissingKeyProvider`, not silently
+    /// return garbage or panic.
+    #[test]
+    fn reading_encrypted_item_without_key_provider_fails_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+
+        let id = {
+            let store =
+                Store::open_encrypted(&db, &storage, Arc::new(FakeKeyProvider::new(5))).unwrap();
+            let doc = doc_with_title("encrypted-item");
+            let id = doc.id.clone();
+            store.insert_item(&doc).unwrap();
+            id
+        };
+
+        // Reopen the same on-disk store without a key provider.
+        let plain_store = Store::open(&db, &storage).unwrap();
+        let result = plain_store.get_item(&id);
+        assert!(
+            matches!(result, Err(StoreError::MissingKeyProvider)),
+            "expected MissingKeyProvider, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn schema_migration_adds_content_encrypted_column_defaulting_to_unencrypted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+
+        // Simulate a pre-ADR-011 v4 database: open at v4 by calling
+        // Store::open before content_encrypted existed isn't possible
+        // directly since the code always migrates to SCHEMA_VERSION, so
+        // instead this test just confirms a fresh store's rows default to
+        // unencrypted and the column exists and is queryable.
+        let store = Store::open(&db, &storage).unwrap();
+        let id = insert_test_item(&store);
+
+        let conn = Connection::open(&db).unwrap();
+        let content_encrypted: i64 = conn
+            .query_row(
+                "SELECT content_encrypted FROM library_items WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            content_encrypted, 0,
+            "items inserted via a plain Store::open must default to unencrypted"
+        );
     }
 }

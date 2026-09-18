@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox (A3): GIST previously shipped with zero sandbox
+         configuration at all. Turning this on is the actual architectural
+         decision this entitlement file makes, not just a review note. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Import flow (LibraryView's "Import File" toolbar action) drives an
+         NSOpenPanel, then gist-core reads the chosen file and immediately
+         copies it into GIST's own sandboxed storage (ADR-006's
+         copy-on-import). Nothing re-reads the original path in a later
+         session, so the standard per-launch user-selected-file grant this
+         entitlement provides is sufficient -- no security-scoped bookmark
+         persistence is needed. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- URL-paste import (LibraryView's "Import URL" action) calls
+         gist-web::fetch_url over HTTPS. Outbound-only; GIST runs no server
+         and accepts no inbound connections, so the broader
+         network.server entitlement is deliberately not requested. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

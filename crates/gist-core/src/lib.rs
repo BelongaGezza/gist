@@ -106,6 +106,34 @@ impl ImportObserver for NullObserver {
 /// crates need it and must not depend back on `gist-core`.
 pub use gist_model::ParseLimits;
 
+// ── Encryption at rest (ADR-011) ─────────────────────────────────────────────
+
+/// Re-exported from `gist-store` for the same reason `ParseLimits` is
+/// re-exported from `gist-model` above: the trait must live where it's
+/// actually consumed (`gist-store`'s file read/write boundary), and
+/// `gist-core` already depends on `gist-store` (not the reverse), so
+/// defining it here instead would make `gist-store` depend back on
+/// `gist-core` — a cycle. Callers that only ever see `gist-core`'s facade
+/// (like `gist-ffi`) can still refer to `gist_core::KeyProvider` without
+/// caring which crate it's actually defined in.
+pub use gist_store::{FakeKeyProvider, KeyProvider};
+
+/// Initialise `Core` with document/original-file content encrypted at rest
+/// (ADR-011, AES-256-GCM) using a key from `key_provider` — the encrypted
+/// counterpart to [`Core::init`]. See [`gist_store::Store::open_encrypted`]
+/// for the full migration story (existing plaintext rows keep working
+/// unchanged; only content inserted after this call is encrypted).
+impl Core {
+    pub fn init_encrypted(
+        db_path: &Path,
+        storage_dir: &Path,
+        key_provider: std::sync::Arc<dyn KeyProvider>,
+    ) -> Result<Self, CoreError> {
+        let store = gist_store::Store::open_encrypted(db_path, storage_dir, key_provider)?;
+        Ok(Self { store })
+    }
+}
+
 // ── Error ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -624,6 +652,43 @@ mod tests {
 
         let no_match = core.search_items("nonexistentxyzzy", 10).unwrap();
         assert!(no_match.is_empty());
+    }
+
+    /// End-to-end check that `Core::init_encrypted` (ADR-011) actually wires
+    /// through to `gist-store`'s encryption: import a file, confirm it's
+    /// readable/searchable through the normal `Core` API, and confirm its
+    /// on-disk blob is not plaintext. The crypto correctness itself
+    /// (round-trip, wrong-key, migration) is covered exhaustively in
+    /// `gist-store`'s own test suite — this test only proves the wiring
+    /// from `gist-core`'s facade down to it is intact.
+    #[test]
+    fn init_encrypted_imports_and_searches_with_ciphertext_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let key_provider = std::sync::Arc::new(FakeKeyProvider::new(42));
+        let core = Core::init_encrypted(&db, &storage, key_provider).unwrap();
+
+        let txt = dir.path().join("wombat.txt");
+        let needle = "WOMBAT_CANARY_STRING_ADR011";
+        std::fs::write(&txt, format!("A story about a {needle} wombat.")).unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        // Readable and searchable through the normal API, same as an
+        // unencrypted Core.
+        let results = core.search_items("wombat", 10).unwrap();
+        assert!(results.iter().any(|item| item.id == id));
+
+        // But the on-disk blob must not contain the plaintext.
+        let doc_path = storage.join(format!("{id}.json"));
+        let on_disk = std::fs::read(&doc_path).unwrap();
+        assert!(
+            !on_disk
+                .windows(needle.len())
+                .any(|w| w == needle.as_bytes()),
+            "canary string must not appear in the encrypted document blob on disk"
+        );
     }
 
     #[test]

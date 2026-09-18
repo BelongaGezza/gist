@@ -29,6 +29,12 @@ targets:
         PRODUCT_NAME: GIST
         MACOSX_DEPLOYMENT_TARGET: "26.5"
         INFOPLIST_FILE: macOS/Info.plist
+        # App Sandbox entitlements (A3) — see GISTmacOS.entitlements for what
+        # each entitlement is for. Applies regardless of whether CI's
+        # CODE_SIGNING_ALLOWED=NO/CODE_SIGNING_REQUIRED=NO flags are in play:
+        # the sandbox is a runtime property of the built app, not something
+        # that requires a real signing identity to take effect locally.
+        CODE_SIGN_ENTITLEMENTS: macOS/GISTmacOS.entitlements
         # Disable Xcode 14+ script sandboxing so the pre-build script can
         # read the Generated/ directory and check for cached bindings.
         ENABLE_USER_SCRIPT_SANDBOXING: NO

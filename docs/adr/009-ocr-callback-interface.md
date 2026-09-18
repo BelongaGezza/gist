@@ -119,3 +119,61 @@ No changes to the trait or the FFI layer are required.
 - Confidence scores (`f32` 0.0–1.0) are passed through from the platform engine
   as-is; GIST does not apply a rejection threshold at the FFI layer — callers
   may filter low-confidence blocks in the UI layer.
+
+> **Note (2026-09-18):** the interface actually shipped in
+> `gist-core`/`gist-ffi` diverges from the example above — it's simpler:
+> `fn recognize_page(&self, page_index: u32, image_bytes: Vec<u8>) -> Option<OcrPageResult>`
+> with `OcrPageResult { page_index, text, confidence }` (no `OcrBlock`
+> bounding-box list, no separate `is_cancelled()` — cancellation is signaled
+> by returning `None`), and no `OcrError` type (recognition failure also
+> returns `None`). This note doesn't change the decision above, just flags
+> that the code sample has drifted from what shipped; the addendum below
+> describes the interface as it actually exists today.
+
+## Addendum: image-size policy at the OCR boundary (2026-09-18, closes `A7`)
+
+Security register item `A7` flagged that this callback interface passes raw
+image bytes across FFI (from user photos/scans) with no `ParseLimits`-style
+size/dimension cap, unlike every other importer in the codebase. Investigating
+this found the concrete gap already existed one layer down, in
+`gist-imageprep::prepare_image` — see security review `N4` — and that finding
+is what settles this item, not a separate decision made here.
+
+**The policy:** `gist-imageprep::prepare_image` is the single choke point
+between raw, untrusted image bytes and everything downstream. It:
+
+1. Peeks the image header for declared width/height (`ImageReader::into_dimensions`,
+   no pixel data touched) and rejects with `ParseError::ResourceLimitExceeded`
+   if `width * height > limits.max_expanded_bytes / 4` — the same pixel-budget
+   formula the OCR pipeline's doc comment (`gist_core::Core::import_image_with_ocr`)
+   already named — **before** attempting a full decode (fixed by `N4`; previously
+   this check ran only after `image::load_from_memory` had already fully
+   decoded the image, which is the exact decode-before-check pattern `F15`/`F16`
+   fixed for zip-based formats).
+2. Only once that check passes: decodes, converts to greyscale, and resizes to
+   fit within 2048×2048.
+3. Re-encodes as PNG and returns that — never the original bytes.
+
+**The invariant this interface must preserve:** `OcrEngine::recognize_page`'s
+`image_bytes` parameter must always be `prepare_image`'s output — already
+pre-processed, size-capped, ≤2048×2048, greyscale PNG — and never the raw
+bytes a user's photo/scan arrived as. As long as that holds, the FFI callback
+boundary itself doesn't need its own separate size cap: by the time bytes
+reach Swift/Kotlin, they've already passed through the one choke point that
+enforces the budget, and 2048×2048 greyscale PNG output has a small, predictable
+worst-case size regardless of what the original file claimed.
+
+This is currently unverified against a real call path, not because the
+invariant doesn't hold today but because there isn't one yet:
+`Core::import_image_with_ocr` (`crates/gist-core/src/lib.rs`) is still
+`todo!("OCR import pipeline — Phase M3")`. Its doc comment already states the
+intended pipeline order (pre-process with `prepare_image`, then call
+`engine.recognize_page` per page) matching this addendum, but that's a stated
+intent, not yet enforced by any code. **When M3 implements this function, the
+implementation must call `prepare_image` on every page before ever passing
+bytes to `recognize_page` — no code path may hand raw, un-preprocessed bytes to
+the callback.** Treat this as an invariant to test for explicitly (e.g., a
+`gist-core` test asserting `recognize_page` never observes bytes larger than
+what a capped, resized PNG could produce, or asserting it's simply never
+called with the original input bytes) once that implementation lands, not
+just as a comment to trust.
