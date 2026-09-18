@@ -9,6 +9,7 @@ fn fuzz_limits() -> ParseLimits {
         max_pages: 20,
         max_nesting_depth: 50,
         max_expanded_bytes: 4 * 1024 * 1024,
+        ..ParseLimits::default()
     }
 }
 

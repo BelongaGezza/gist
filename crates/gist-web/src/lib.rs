@@ -361,10 +361,13 @@ pub(crate) fn build_document(
 }
 
 /// Extract `(title, blocks)` from an HTML string.
-pub(crate) fn extract_content(
-    html: &str,
-    max_depth: usize,
-) -> Result<(String, Vec<Block>), ParseError> {
+///
+/// `pub` (not `pub(crate)`) specifically so `fuzz_web_extract` can fuzz this
+/// directly with raw HTML bytes rather than routing fuzzer input through
+/// `fetch_url` as a URL string, which never reaches this code (N2) — this
+/// crate isn't published, so widening visibility here has no external
+/// API-stability cost.
+pub fn extract_content(html: &str, max_depth: usize) -> Result<(String, Vec<Block>), ParseError> {
     let document = Html::parse_document(html);
 
     // Title from <title>.

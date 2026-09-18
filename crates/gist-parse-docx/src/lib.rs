@@ -52,14 +52,27 @@ pub fn parse(
         });
     }
 
+    // 3-5. Parse styles.xml, numbering.xml, and word/document.xml, all
+    // sharing one running `total_expanded` budget (N3) — mirrors
+    // gist-parse-epub::parse_spine's cumulative accumulator, so a DOCX with
+    // three maximally-compressible parts can't expand to ~3x
+    // `max_expanded_bytes` by each part individually staying under the cap.
+    let mut total_expanded: usize = 0;
+
     // 3. Parse styles.xml (needed for heading detection)
-    let styles = parse_styles(&mut archive, limits)?;
+    let styles = parse_styles(&mut archive, limits, &mut total_expanded)?;
 
     // 4. Parse numbering.xml (needed for list detection)
-    let numbering = parse_numbering(&mut archive, limits)?;
+    let numbering = parse_numbering(&mut archive, limits, &mut total_expanded)?;
 
     // 5. Parse word/document.xml (main content)
-    let (blocks, has_tracked_changes) = parse_document(&mut archive, &styles, &numbering, limits)?;
+    let (blocks, has_tracked_changes) = parse_document(
+        &mut archive,
+        &styles,
+        &numbering,
+        limits,
+        &mut total_expanded,
+    )?;
 
     let mut metadata = gist_model::Metadata {
         title: stem.to_string(),
@@ -102,8 +115,9 @@ struct StyleEntry {
 fn parse_styles(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     limits: &gist_model::ParseLimits,
+    total_expanded: &mut usize,
 ) -> Result<StyleMap, ParseError> {
-    let xml = read_zip_entry_limited(archive, "word/styles.xml", limits)?;
+    let xml = read_zip_entry_limited(archive, "word/styles.xml", limits, total_expanded)?;
 
     // Build a raw map: styleId -> (w:name val, basedOn styleId)
     // Then walk basedOn chains to resolve heading levels.
@@ -258,12 +272,14 @@ type NumberingMap = HashMap<(String, usize), NumberingEntry>;
 fn parse_numbering(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     limits: &gist_model::ParseLimits,
+    total_expanded: &mut usize,
 ) -> Result<NumberingMap, ParseError> {
     // numbering.xml may not exist in simple DOCX files
-    let xml = match read_zip_entry_limited_opt(archive, "word/numbering.xml", limits)? {
-        Some(s) => s,
-        None => return Ok(NumberingMap::new()),
-    };
+    let xml =
+        match read_zip_entry_limited_opt(archive, "word/numbering.xml", limits, total_expanded)? {
+            Some(s) => s,
+            None => return Ok(NumberingMap::new()),
+        };
 
     // For M1: simplified heuristic.
     // A proper implementation would walk abstractNum -> numFmt chains.
@@ -342,8 +358,9 @@ fn parse_document(
     styles: &StyleMap,
     numbering: &NumberingMap,
     limits: &gist_model::ParseLimits,
+    total_expanded: &mut usize,
 ) -> Result<(Vec<gist_model::Block>, bool), ParseError> {
-    let xml = read_zip_entry_limited(archive, "word/document.xml", limits)?;
+    let xml = read_zip_entry_limited(archive, "word/document.xml", limits, total_expanded)?;
 
     let mut reader = Reader::from_str(&xml);
     reader.config_mut().trim_text(false);
@@ -631,10 +648,19 @@ fn flush_para(
 
 // ── Zip helpers ────────────────────────────────────────────────────────────
 
+/// Reads `path` from `archive`, enforcing `limits.max_expanded_bytes` against
+/// `total_expanded` — a running total the caller shares across every part it
+/// reads (styles.xml, numbering.xml, document.xml), not a fresh counter per
+/// call (N3). Without a shared accumulator, each of those three parts could
+/// independently expand up to the full budget, letting a crafted DOCX reach
+/// roughly 3x the intended per-document decompression ceiling before any
+/// single read trips the cap — this mirrors
+/// `gist_parse_epub::parse_spine`'s cumulative `total_expanded` pattern.
 fn read_zip_entry_limited(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     path: &str,
     limits: &gist_model::ParseLimits,
+    total_expanded: &mut usize,
 ) -> Result<String, ParseError> {
     let mut entry = archive.by_name(path).map_err(|e| match e {
         zip::result::ZipError::FileNotFound => {
@@ -645,18 +671,17 @@ fn read_zip_entry_limited(
 
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
-    let mut total = 0usize;
 
     loop {
         let n = entry.read(&mut chunk).map_err(ParseError::Io)?;
         if n == 0 {
             break;
         }
-        total += n;
-        if total > limits.max_expanded_bytes {
+        *total_expanded += n;
+        if *total_expanded > limits.max_expanded_bytes {
             return Err(ParseError::ResourceLimitExceeded {
                 limit: format!("max_expanded_bytes={}", limits.max_expanded_bytes),
-                attempted: total,
+                attempted: *total_expanded,
             });
         }
         buf.extend_from_slice(&chunk[..n]);
@@ -670,6 +695,7 @@ fn read_zip_entry_limited_opt(
     archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     path: &str,
     limits: &gist_model::ParseLimits,
+    total_expanded: &mut usize,
 ) -> Result<Option<String>, ParseError> {
     let exists = match archive.by_name(path) {
         Err(zip::result::ZipError::FileNotFound) => false,
@@ -679,7 +705,12 @@ fn read_zip_entry_limited_opt(
     if !exists {
         return Ok(None);
     }
-    Ok(Some(read_zip_entry_limited(archive, path, limits)?))
+    Ok(Some(read_zip_entry_limited(
+        archive,
+        path,
+        limits,
+        total_expanded,
+    )?))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -740,6 +771,109 @@ mod tests {
         let limits = ParseLimits::default();
         let result = parse(b"not a zip file", "test", &limits);
         assert!(result.is_err());
+    }
+
+    /// N3 regression test: styles.xml, numbering.xml, and document.xml are
+    /// each individually well under `max_expanded_bytes`, but their combined
+    /// size exceeds it — this must be rejected. Before N3, each part reset
+    /// its own counter to zero, so three parts each just under the cap could
+    /// together reach ~3x the intended per-document budget without ever
+    /// tripping it.
+    #[test]
+    fn test_cumulative_expansion_across_parts_is_enforced() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        // Comments are always well-formed XML regardless of size, so padding
+        // with them reaches a target byte count without affecting parsing.
+        fn padded_xml(root: &str, target_len: usize) -> Vec<u8> {
+            let open = format!("<{root}>");
+            let close = format!("</{root}>");
+            let overhead = open.len() + close.len() + "<!---->".len();
+            let pad_len = target_len.saturating_sub(overhead);
+            format!("{open}<!--{}-->{close}", "x".repeat(pad_len)).into_bytes()
+        }
+
+        // Each part is ~400 bytes (well under a 1000-byte cap individually),
+        // but three of them sum to ~1200 > 1000.
+        let styles = padded_xml("w:styles", 400);
+        let numbering = padded_xml("w:numbering", 400);
+        let document = padded_xml("w:document", 400);
+        assert!(styles.len() < 1000 && numbering.len() < 1000 && document.len() < 1000);
+        assert!(styles.len() + numbering.len() + document.len() > 1000);
+
+        let mut zip_bytes = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut zip_bytes);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default();
+            writer.start_file("word/styles.xml", options).unwrap();
+            writer.write_all(&styles).unwrap();
+            writer.start_file("word/numbering.xml", options).unwrap();
+            writer.write_all(&numbering).unwrap();
+            writer.start_file("word/document.xml", options).unwrap();
+            writer.write_all(&document).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let limits = ParseLimits {
+            max_expanded_bytes: 1000,
+            ..ParseLimits::default()
+        };
+        let result = parse(&zip_bytes, "test", &limits);
+        assert!(
+            matches!(result, Err(ParseError::ResourceLimitExceeded { .. })),
+            "expected ResourceLimitExceeded for parts cumulatively over the cap \
+             even though each individually stays under it, got {:?}",
+            result
+        );
+    }
+
+    /// Sanity check that the cumulative accounting in the test above isn't
+    /// simply over-eager: three parts that are each small AND cumulatively
+    /// under the cap must still parse successfully.
+    #[test]
+    fn test_cumulative_expansion_within_cap_succeeds() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        fn padded_xml(root: &str, target_len: usize) -> Vec<u8> {
+            let open = format!("<{root}>");
+            let close = format!("</{root}>");
+            let overhead = open.len() + close.len() + "<!---->".len();
+            let pad_len = target_len.saturating_sub(overhead);
+            format!("{open}<!--{}-->{close}", "x".repeat(pad_len)).into_bytes()
+        }
+
+        let styles = padded_xml("w:styles", 100);
+        let numbering = padded_xml("w:numbering", 100);
+        let document = padded_xml("w:document", 100);
+        assert!(styles.len() + numbering.len() + document.len() < 1000);
+
+        let mut zip_bytes = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut zip_bytes);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default();
+            writer.start_file("word/styles.xml", options).unwrap();
+            writer.write_all(&styles).unwrap();
+            writer.start_file("word/numbering.xml", options).unwrap();
+            writer.write_all(&numbering).unwrap();
+            writer.start_file("word/document.xml", options).unwrap();
+            writer.write_all(&document).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let limits = ParseLimits {
+            max_expanded_bytes: 1000,
+            ..ParseLimits::default()
+        };
+        let result = parse(&zip_bytes, "test", &limits);
+        assert!(
+            result.is_ok(),
+            "expected Ok when parts are cumulatively under the cap, got {:?}",
+            result
+        );
     }
 
     #[test]
