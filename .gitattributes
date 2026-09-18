@@ -1,0 +1,24 @@
+# Normalize line endings for text files; let git decide binary vs text otherwise.
+* text=auto eol=lf
+
+*.rs      text diff=rust
+*.swift   text diff=swift
+*.md      text
+*.toml    text
+*.json    text
+*.yml     text
+*.yaml    text
+
+# Lockfiles are intentionally tracked (reproducible builds) — treat as text
+# for diffing, but they're generated and not meant for manual editing.
+Cargo.lock       text -diff linguist-generated
+fuzz/Cargo.lock  text -diff linguist-generated
+
+# Binary fixtures and test corpora should never be line-ending-normalized.
+fixtures/**/*.epub  binary
+fixtures/**/*.docx  binary
+fixtures/**/*.pdf   binary
+fuzz/corpus/**      binary
+
+# Vendor/generated content excluded from GitHub's language stats and diffs.
+apps/apple/Generated/**  linguist-generated
