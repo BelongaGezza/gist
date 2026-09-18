@@ -36,7 +36,7 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - uses: dtolnay/rust-toolchain@4305c38b25d97ef35a8ad1f985ccf33d0b9d0787  # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
