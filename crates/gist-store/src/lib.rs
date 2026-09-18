@@ -229,6 +229,14 @@ pub struct LibraryItem {
     pub created_at: i64,
     // TODO M2: populate from tokens table
     pub token_count: Option<usize>,
+    /// Mirrors the row's `content_encrypted` column (ADR-011) — `true` once
+    /// [`Store::encrypt_item`]/`insert_item` (under [`Store::open_encrypted`])
+    /// has encrypted this item's `.json`/`.tokens.json` blobs at rest. Reads
+    /// straight from SQL metadata, so this is populated correctly even by a
+    /// plain [`Store::open`] instance that cannot itself decrypt the item's
+    /// content — see [`Store::encrypt_item`]'s doc comment for why those are
+    /// different things.
+    pub content_encrypted: bool,
 }
 
 // ── RemovedItem (returned by remove_items so callers can clean up files) ──
@@ -269,20 +277,46 @@ pub struct Store {
     conn: Mutex<Connection>,
     storage_dir: PathBuf,
     /// `Some` for a `Store` opened via [`Store::open_encrypted`] — governs
-    /// whether newly written content is encrypted (ADR-011). `None` (the
-    /// [`Store::open`] path) preserves the pre-ADR-011 plaintext behavior
-    /// exactly, unchanged, which is also how an already-plaintext store
-    /// stays readable without any migration step: nothing about opening it
-    /// via `Store::open` ever changes.
+    /// whether *newly written* content is encrypted (ADR-011): consulted
+    /// only by `insert_item`/`store_original_copy` to decide whether a new
+    /// write gets encrypted. `None` (the [`Store::open`] and
+    /// [`Store::open_with_read_key`] paths) preserves the pre-ADR-011
+    /// plaintext-write behavior exactly, unchanged.
+    ///
+    /// **Deliberately separate from `read_key_provider` below (ADR-014).**
+    /// Early per-item encryption (`Store::encrypt_item`) let a
+    /// `content_encrypted = 1` row exist on a `Store` instance with no key
+    /// provider at all — e.g. exactly `CoreClient.shared`'s production
+    /// instance — which then couldn't decrypt its own write back, a real
+    /// data-access bug: an item a user encrypted became permanently
+    /// unreadable in the running app. This field and `read_key_provider`
+    /// decouple "can this `Store` decrypt content on read" from "does this
+    /// `Store` auto-encrypt new writes" — two independent questions that
+    /// [`Store::open_encrypted`] happens to answer the same way (both
+    /// `Some`, same provider) but [`Store::open_with_read_key`] does not
+    /// (write stays `None`/plaintext-by-default; read gets a real key).
     key_provider: Option<Arc<dyn KeyProvider>>,
+    /// Consulted only by [`Store::read_maybe_encrypted`] to decrypt content
+    /// already flagged `content_encrypted = 1` — never consulted by
+    /// `insert_item`/`store_original_copy` to decide whether a *new* write
+    /// gets encrypted (that's `key_provider`'s job, above). `Some` for both
+    /// [`Store::open_encrypted`] (same provider as `key_provider`) and
+    /// [`Store::open_with_read_key`] (read-only capability, `key_provider`
+    /// stays `None`); `None` only for plain [`Store::open`], which
+    /// genuinely cannot decrypt anything (see
+    /// `reading_encrypted_item_without_key_provider_fails_cleanly`).
+    read_key_provider: Option<Arc<dyn KeyProvider>>,
 }
 
 impl Store {
     /// Open (or create) the SQLite database at `db_path`, with document
     /// content stored **unencrypted** — the pre-ADR-011 behavior, unchanged.
-    /// Document JSON blobs are stored under `storage_dir`.
+    /// Document JSON blobs are stored under `storage_dir`. No key provider
+    /// of any kind is configured — this `Store` can neither encrypt new
+    /// writes nor decrypt a row some other `Store` instance flagged
+    /// encrypted (see [`Store::open_with_read_key`] for that case).
     pub fn open(db_path: &Path, storage_dir: &Path) -> Result<Self, StoreError> {
-        Self::open_internal(db_path, storage_dir, None)
+        Self::open_internal(db_path, storage_dir, None, None)
     }
 
     /// Open (or create) the SQLite database at `db_path`, encrypting newly
@@ -307,13 +341,46 @@ impl Store {
         storage_dir: &Path,
         key_provider: Arc<dyn KeyProvider>,
     ) -> Result<Self, StoreError> {
-        Self::open_internal(db_path, storage_dir, Some(key_provider))
+        Self::open_internal(
+            db_path,
+            storage_dir,
+            Some(key_provider.clone()),
+            Some(key_provider),
+        )
+    }
+
+    /// Open (or create) the SQLite database at `db_path` with **read-only**
+    /// decryption capability (ADR-014): `key_provider` is used exclusively
+    /// by [`Store::read_maybe_encrypted`] to decrypt rows some `Store`
+    /// instance already flagged `content_encrypted = 1` (whether by
+    /// [`Store::open_encrypted`]'s auto-write path historically, or by
+    /// [`Store::encrypt_item`]'s on-demand per-item path) — it is never
+    /// consulted by `insert_item`/`store_original_copy`, so new imports
+    /// through this `Store` land plaintext by default, identically to
+    /// [`Store::open`].
+    ///
+    /// This is the fix for the gap [`Store::encrypt_item`] originally
+    /// documented as a known consequence: a `Store` with no key provider at
+    /// all (e.g. `CoreClient.shared`'s production instance, pre-ADR-014-fix)
+    /// could encrypt an item via `encrypt_item` and then never read that
+    /// same item's content back through itself. A `Store` opened this way
+    /// can do both — encrypt an item on demand (still by passing an
+    /// explicit key to `encrypt_item`, unchanged) and then immediately read
+    /// it back via `get_item`/`get_tokens` — while every *other* new item it
+    /// imports stays plaintext unless separately encrypted the same way.
+    pub fn open_with_read_key(
+        db_path: &Path,
+        storage_dir: &Path,
+        key_provider: Arc<dyn KeyProvider>,
+    ) -> Result<Self, StoreError> {
+        Self::open_internal(db_path, storage_dir, None, Some(key_provider))
     }
 
     fn open_internal(
         db_path: &Path,
         storage_dir: &Path,
         key_provider: Option<Arc<dyn KeyProvider>>,
+        read_key_provider: Option<Arc<dyn KeyProvider>>,
     ) -> Result<Self, StoreError> {
         std::fs::create_dir_all(storage_dir)?;
         if let Some(parent) = db_path.parent() {
@@ -450,13 +517,29 @@ impl Store {
             conn: Mutex::new(conn),
             storage_dir: storage_dir.to_owned(),
             key_provider,
+            read_key_provider,
         })
     }
 
     /// `Some(32-byte key)` if this `Store` was opened via
-    /// [`Store::open_encrypted`]; `None` for [`Store::open`].
+    /// [`Store::open_encrypted`]; `None` otherwise (including
+    /// [`Store::open_with_read_key`] — this key governs auto-encryption of
+    /// *new* writes only, see `key_provider`'s field doc comment).
     fn encryption_key(&self) -> Option<[u8; 32]> {
         self.key_provider.as_ref().map(|kp| kp.get_or_create_key())
+    }
+
+    /// `Some(32-byte key)` if this `Store` can decrypt already-encrypted
+    /// content on read — true for [`Store::open_encrypted`] and
+    /// [`Store::open_with_read_key`], `None` only for plain [`Store::open`].
+    /// Falls back to `key_provider` so `open_encrypted` (which sets both
+    /// fields to the same provider) needs no special-casing here; the two
+    /// fields only actually diverge for `open_with_read_key`.
+    fn decryption_key(&self) -> Option<[u8; 32]> {
+        self.read_key_provider
+            .as_ref()
+            .or(self.key_provider.as_ref())
+            .map(|kp| kp.get_or_create_key())
     }
 
     /// Persist a [`gist_model::Document`] to disk (JSON blob + token file) and
@@ -752,7 +835,7 @@ impl Store {
     pub fn list_items(&self, offset: usize, limit: usize) -> Result<Vec<LibraryItem>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT id, title, authors, source_path, cover_path, created_at
+            "SELECT id, title, authors, source_path, cover_path, created_at, content_encrypted
              FROM library_items
              ORDER BY created_at DESC
              LIMIT ?1 OFFSET ?2",
@@ -767,12 +850,14 @@ impl Store {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, bool>(6)?,
             ))
         })?;
 
         let mut items = Vec::new();
         for row in rows {
-            let (id, title, authors_json, source_path, cover_path, created_at) = row?;
+            let (id, title, authors_json, source_path, cover_path, created_at, content_encrypted) =
+                row?;
             let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
             items.push(LibraryItem {
                 id,
@@ -782,6 +867,7 @@ impl Store {
                 cover_path,
                 created_at,
                 token_count: None, // TODO M2: populate from tokens table
+                content_encrypted,
             });
         }
         Ok(items)
@@ -793,7 +879,7 @@ impl Store {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let row = conn
             .query_row(
-                "SELECT id, title, authors, source_path, cover_path, created_at
+                "SELECT id, title, authors, source_path, cover_path, created_at, content_encrypted
                  FROM library_items
                  WHERE id = ?1",
                 params![id],
@@ -805,13 +891,14 @@ impl Store {
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, i64>(5)?,
+                        row.get::<_, bool>(6)?,
                     ))
                 },
             )
             .optional()?;
 
         Ok(row.map(
-            |(id, title, authors_json, source_path, cover_path, created_at)| {
+            |(id, title, authors_json, source_path, cover_path, created_at, content_encrypted)| {
                 let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
                 LibraryItem {
                     id,
@@ -821,6 +908,7 @@ impl Store {
                     cover_path,
                     created_at,
                     token_count: None, // TODO M2: populate from tokens table
+                    content_encrypted,
                 }
             },
         ))
@@ -829,11 +917,12 @@ impl Store {
     /// Reads `path`, verifies it against its checksum sidecar if one exists
     /// (ADR-013 / `A4` — [`StoreError::ChecksumMismatch`] if it disagrees)
     /// and, if `content_encrypted` is set, decrypts it (ADR-011) under this
-    /// `Store`'s configured key before returning. Returns
-    /// [`StoreError::MissingKeyProvider`] if the content is flagged encrypted
-    /// but this `Store` was opened via [`Store::open`] (no key available) —
-    /// this is the per-row migration check described on
-    /// [`Store::open_encrypted`].
+    /// `Store`'s configured *read* key ([`Store::decryption_key`] — ADR-014:
+    /// deliberately independent of whether this `Store` auto-encrypts new
+    /// writes) before returning. Returns [`StoreError::MissingKeyProvider`]
+    /// if the content is flagged encrypted but this `Store` was opened via
+    /// plain [`Store::open`] (no key available at all) — this is the
+    /// per-row migration check described on [`Store::open_encrypted`].
     ///
     /// Checksum verification runs against the raw on-disk bytes, *before*
     /// any decryption attempt — corruption is reported as
@@ -851,7 +940,7 @@ impl Store {
             return Ok(raw);
         }
         let key = self
-            .encryption_key()
+            .decryption_key()
             .ok_or(StoreError::MissingKeyProvider)?;
         decrypt_at_rest(&key, &raw, path)
     }
@@ -1009,7 +1098,8 @@ impl Store {
     ) -> Result<Vec<LibraryItem>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT li.id, li.title, li.authors, li.source_path, li.cover_path, li.created_at
+            "SELECT li.id, li.title, li.authors, li.source_path, li.cover_path, li.created_at,
+                    li.content_encrypted
              FROM library_items li
              JOIN item_collections ic ON ic.item_id = li.id
              WHERE ic.collection_id = ?1
@@ -1025,12 +1115,14 @@ impl Store {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, bool>(6)?,
             ))
         })?;
 
         let mut items = Vec::new();
         for row in rows {
-            let (id, title, authors_json, source_path, cover_path, created_at) = row?;
+            let (id, title, authors_json, source_path, cover_path, created_at, content_encrypted) =
+                row?;
             let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
             items.push(LibraryItem {
                 id,
@@ -1040,6 +1132,7 @@ impl Store {
                 cover_path,
                 created_at,
                 token_count: None, // TODO M2: populate from tokens table
+                content_encrypted,
             });
         }
         Ok(items)
@@ -1131,7 +1224,8 @@ impl Store {
     pub fn list_items_by_tag(&self, tag_name: &str) -> Result<Vec<LibraryItem>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT li.id, li.title, li.authors, li.source_path, li.cover_path, li.created_at
+            "SELECT li.id, li.title, li.authors, li.source_path, li.cover_path, li.created_at,
+                    li.content_encrypted
              FROM library_items li
              JOIN item_tags it ON it.item_id = li.id
              JOIN tags t ON t.id = it.tag_id
@@ -1148,12 +1242,14 @@ impl Store {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, bool>(6)?,
             ))
         })?;
 
         let mut items = Vec::new();
         for row in rows {
-            let (id, title, authors_json, source_path, cover_path, created_at) = row?;
+            let (id, title, authors_json, source_path, cover_path, created_at, content_encrypted) =
+                row?;
             let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
             items.push(LibraryItem {
                 id,
@@ -1163,10 +1259,152 @@ impl Store {
                 cover_path,
                 created_at,
                 token_count: None, // TODO M2: populate from tokens table
+                content_encrypted,
             });
         }
         Ok(items)
     }
+
+    // ── Per-item encryption (ADR-014) ───────────────────────────────────
+
+    /// Retroactively encrypts one already-imported item's `.json`/
+    /// `.tokens.json` blobs at rest — a per-item, opt-in follow-up to
+    /// ADR-011's whole-store `Store::open_encrypted` (see ADR-014 for the
+    /// product decision this implements: no global "encrypt my library"
+    /// toggle, just an explicit per-item action).
+    ///
+    /// **`key` is supplied explicitly by the caller, not read from
+    /// `self.key_provider`.** This is the core design choice that lets a
+    /// `Store` opened via plain [`Store::open`] (no key provider at all)
+    /// still encrypt a specific item on demand, without requiring the whole
+    /// `Store` to have been opened via [`Store::open_encrypted`]. It works
+    /// identically regardless of which constructor `self` came from.
+    ///
+    /// **Read-after-encrypt (ADR-014, fixed):** encrypting doesn't require
+    /// `self.key_provider`, so it's possible to produce a
+    /// `content_encrypted = 1` row on a `Store` instance with no
+    /// *decryption* capability at all — reading that row's content back
+    /// (`get_item`/`get_tokens`, and anything built on them, e.g. RSVP or
+    /// flow view) through such an instance still fails with
+    /// [`StoreError::MissingKeyProvider`]. This used to be true even for
+    /// `CoreClient.shared`'s production instance, which made "Encrypt" a
+    /// data-access bug in practice — a user could permanently lock
+    /// themselves out of a book through the running app. Fixed by
+    /// decoupling read-decrypt capability from write-auto-encrypt behavior:
+    /// [`Store::open_with_read_key`] gives a `Store` a real decryption key
+    /// (checked by [`Store::read_maybe_encrypted`] via
+    /// [`Store::decryption_key`]) without making it auto-encrypt new writes,
+    /// so a production instance opened that way can call `encrypt_item` and
+    /// then immediately read the same item back through itself — see that
+    /// constructor's doc comment. Only a `Store` opened via plain
+    /// [`Store::open`] (truly no key of any kind — not what
+    /// `CoreClient.shared` uses since this fix) still hits
+    /// `MissingKeyProvider` here, and that remains correct: it genuinely has
+    /// no key to decrypt with. The item's SQL-backed metadata
+    /// (title/authors/tags, used by `list_items`/`search_items`/etc.) was
+    /// always readable regardless — those never touch the encrypted blob.
+    ///
+    /// **Scope — `originals/` is deliberately untouched.** Only the two IR
+    /// blobs (`<id>.json`/`<id>.tokens.json`, ADR-007) are encrypted here.
+    /// `source_copy_path` (ADR-006's sandboxed `originals/` copy) is never
+    /// read or written by this method: that file is content-addressed by a
+    /// hash of its *plaintext* bytes and may be shared by more than one
+    /// `library_items` row (the same dedup limitation already documented on
+    /// [`Store::store_original_copy`] and tracked as security register
+    /// `A5`) — encrypting it in place would silently corrupt whatever other
+    /// item still expects to find plaintext at that shared path. Nothing in
+    /// the app currently reads document *content* from an original copy's
+    /// path (only its existence, for deletion), so leaving it alone is
+    /// safe, but it is a real, tracked gap: an item "encrypted" through this
+    /// method can still have a plaintext copy of its original file on disk.
+    ///
+    /// **Idempotency:** a row whose `content_encrypted` is already `1`
+    /// returns [`EncryptOutcome::AlreadyEncrypted`] immediately — no file
+    /// I/O, no DB write — so callers driving a bulk selection of mixed
+    /// already-encrypted/not-yet-encrypted items can call this once per id
+    /// without checking first.
+    ///
+    /// **Integrity (ADR-013):** the current bytes are read back through
+    /// [`Store::read_maybe_encrypted`] (with `content_encrypted = false`,
+    /// since that's confirmed by the row lookup above), which verifies each
+    /// blob against its existing checksum sidecar before anything is
+    /// encrypted — this never silently encrypts over already-corrupted
+    /// data. Once written, each new ciphertext blob gets its checksum
+    /// sidecar recomputed and rewritten; the old sidecar (covering the
+    /// prior plaintext bytes) would otherwise mismatch every future read.
+    ///
+    /// **Ordering / crash-window note:** like [`Store::insert_item`], the
+    /// file rewrites happen before the DB row's `content_encrypted` flag is
+    /// committed — there's no filesystem transaction to join the DB write
+    /// to. An interruption between the file rewrite and the DB commit would
+    /// leave the row still flagged unencrypted while the on-disk bytes are
+    /// already ciphertext, which would then surface as a
+    /// `ChecksumMismatch`/deserialisation failure on the next read rather
+    /// than silently wrong content. A narrow window, accepted under this
+    /// codebase's existing local-single-user threat model (see `F13`'s
+    /// similarly-accepted TOCTOU window), not eliminated here.
+    pub fn encrypt_item(&self, id: &str, key: &[u8; 32]) -> Result<EncryptOutcome, StoreError> {
+        let row: Option<(String, bool)> = {
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.query_row(
+                "SELECT doc_path, content_encrypted FROM library_items WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+        };
+
+        let (doc_path, content_encrypted) = match row {
+            None => return Err(StoreError::NotFound(id.to_string())),
+            Some(row) => row,
+        };
+
+        if content_encrypted {
+            return Ok(EncryptOutcome::AlreadyEncrypted);
+        }
+
+        let token_path = doc_path
+            .strip_suffix(".json")
+            .map(|s| format!("{s}.tokens.json"))
+            .unwrap_or_else(|| format!("{doc_path}.tokens.json"));
+
+        // Read + verify (ADR-013) the current plaintext bytes for both
+        // blobs before touching either. `content_encrypted` is known false
+        // here (checked above), so this never attempts decryption.
+        let doc_plaintext = self.read_maybe_encrypted(&doc_path, false)?;
+        let tokens_plaintext = self.read_maybe_encrypted(&token_path, false)?;
+
+        let doc_ciphertext = encrypt_at_rest(key, &doc_plaintext);
+        let tokens_ciphertext = encrypt_at_rest(key, &tokens_plaintext);
+
+        std::fs::write(&doc_path, &doc_ciphertext)?;
+        write_checksum_sidecar(Path::new(&doc_path), &doc_ciphertext)?;
+        std::fs::write(&token_path, &tokens_ciphertext)?;
+        write_checksum_sidecar(Path::new(&token_path), &tokens_ciphertext)?;
+
+        // A single UPDATE statement is already atomic at the SQLite level —
+        // no explicit `unchecked_transaction` needed here, unlike
+        // `add_tag`/`remove_items`, which combine multiple statements.
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "UPDATE library_items SET content_encrypted = 1 WHERE id = ?1",
+            params![id],
+        )?;
+
+        tracing::debug!("gist-store: encrypted item {} at rest", id);
+        Ok(EncryptOutcome::Encrypted)
+    }
+}
+
+/// Outcome of a single [`Store::encrypt_item`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptOutcome {
+    /// The item was plaintext; its blobs have now been rewritten as
+    /// AES-256-GCM ciphertext and its row's `content_encrypted` set to 1.
+    Encrypted,
+    /// The item's row already had `content_encrypted = 1` — no-op, no files
+    /// or DB rows were touched.
+    AlreadyEncrypted,
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -2038,5 +2276,315 @@ mod tests {
              encrypted content, got {:?}",
             result
         );
+    }
+
+    // ── Per-item encryption (ADR-014) ────────────────────────────────────
+
+    /// The core round trip: a plain `Store::open` instance encrypts an item
+    /// via `encrypt_item`; a *separately opened* `Store::open_encrypted`
+    /// instance pointed at the same on-disk files (same db, same storage
+    /// dir, and — crucially — the same key) can then read it back correctly
+    /// via the normal `get_item`/`get_tokens` API. This is what "is this
+    /// item now really encrypted" has to mean here: the originating `Store`
+    /// (no key provider at all) structurally cannot decrypt its own write
+    /// back (see `encrypt_item`'s doc comment), so verifying the write
+    /// requires a second, keyed instance.
+    #[test]
+    fn encrypt_item_round_trips_through_a_separately_opened_encrypted_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+
+        let plain_store = Store::open(&db, &storage).unwrap();
+        let doc = doc_with_title("xi-plaintext-then-encrypted");
+        let id = doc.id.clone();
+        plain_store.insert_item(&doc).unwrap();
+
+        let key = FakeKeyProvider::new(0x77).get_or_create_key();
+        let outcome = plain_store.encrypt_item(&id, &key).unwrap();
+        assert_eq!(outcome, EncryptOutcome::Encrypted);
+
+        // The on-disk blob must now genuinely be ciphertext, not plain JSON.
+        let doc_path = storage.join(format!("{id}.json"));
+        let on_disk = std::fs::read(&doc_path).unwrap();
+        assert!(
+            serde_json::from_slice::<gist_model::Document>(&on_disk).is_err(),
+            "encrypt_item must leave ciphertext on disk, not plain JSON"
+        );
+
+        // The originating (unkeyed) Store can no longer read the content.
+        assert!(matches!(
+            plain_store.get_item(&id),
+            Err(StoreError::MissingKeyProvider)
+        ));
+
+        // A separately opened, same-key encrypted Store CAN read it back.
+        let encrypted_store =
+            Store::open_encrypted(&db, &storage, Arc::new(FakeKeyProvider::new(0x77))).unwrap();
+        let loaded = encrypted_store
+            .get_item(&id)
+            .unwrap()
+            .expect("item must be readable through a same-key encrypted Store");
+        assert_eq!(loaded.metadata.title, "xi-plaintext-then-encrypted");
+
+        let tokens = encrypted_store
+            .get_tokens(&id)
+            .unwrap()
+            .expect("tokens must be readable through a same-key encrypted Store");
+        assert_eq!(tokens.len(), doc.token_stream.len());
+    }
+
+    /// **Closes the read-after-encrypt gap (ADR-014).** A `Store` opened via
+    /// `Store::open_with_read_key` — the constructor `CoreClient.shared`'s
+    /// production instance now uses — can encrypt an item via `encrypt_item`
+    /// and then immediately read that same item's actual content back
+    /// through *itself*, unlike the plain-`Store::open` instance in
+    /// `encrypt_item_round_trips_through_a_separately_opened_encrypted_store`
+    /// above, which structurally cannot (and correctly still can't — see
+    /// the second half of this test). This is the concrete scenario the bug
+    /// report described: a user selects a book, clicks "Encrypt," and must
+    /// still be able to open it afterward in the same running app.
+    #[test]
+    fn encrypt_item_then_read_through_same_read_capable_store_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        let key_provider = Arc::new(FakeKeyProvider::new(0x42));
+
+        let store =
+            Store::open_with_read_key(&db, &storage, key_provider.clone() as Arc<dyn KeyProvider>)
+                .unwrap();
+
+        // New writes through this Store stay plaintext by default —
+        // read-only key capability must never flip on auto-encryption.
+        let plain_doc = doc_with_title("upsilon-still-plaintext-on-import");
+        let plain_id = plain_doc.id.clone();
+        store.insert_item(&plain_doc).unwrap();
+        let plain_on_disk = std::fs::read(storage.join(format!("{plain_id}.json"))).unwrap();
+        assert!(
+            serde_json::from_slice::<gist_model::Document>(&plain_on_disk).is_ok(),
+            "a Store opened via open_with_read_key must still write NEW imports as plaintext"
+        );
+
+        // Encrypt a separate item on demand, then read it back through the
+        // SAME Store instance — this is the gap that used to fail with
+        // MissingKeyProvider.
+        let doc = doc_with_title("phi-encrypted-then-read-back");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let key = key_provider.get_or_create_key();
+        let outcome = store.encrypt_item(&id, &key).unwrap();
+        assert_eq!(outcome, EncryptOutcome::Encrypted);
+
+        let loaded = store
+            .get_item(&id)
+            .expect("read-after-encrypt must succeed through a read-capable Store, not MissingKeyProvider")
+            .expect("item must be found");
+        assert_eq!(loaded.metadata.title, "phi-encrypted-then-read-back");
+
+        let tokens = store
+            .get_tokens(&id)
+            .expect("token read-after-encrypt must also succeed")
+            .expect("tokens must be found");
+        assert_eq!(tokens.len(), doc.token_stream.len());
+
+        // The untouched plaintext item is still readable too — read
+        // capability doesn't disturb the plaintext path.
+        let plain_loaded = store.get_item(&plain_id).unwrap().expect("found");
+        assert_eq!(
+            plain_loaded.metadata.title,
+            "upsilon-still-plaintext-on-import"
+        );
+    }
+
+    /// A `Store` opened via `open_with_read_key` with the WRONG key cannot
+    /// decrypt content encrypted under a different key — read capability
+    /// doesn't bypass the actual cryptography, it just makes the right key
+    /// reachable.
+    #[test]
+    fn encrypt_item_then_read_through_read_capable_store_with_wrong_key_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+
+        let writer = Store::open(&db, &storage).unwrap();
+        let doc = doc_with_title("chi-wrong-key-test");
+        let id = doc.id.clone();
+        writer.insert_item(&doc).unwrap();
+        let right_key = FakeKeyProvider::new(0x51).get_or_create_key();
+        writer.encrypt_item(&id, &right_key).unwrap();
+
+        let reader = Store::open_with_read_key(
+            &db,
+            &storage,
+            Arc::new(FakeKeyProvider::new(0x52)) as Arc<dyn KeyProvider>,
+        )
+        .unwrap();
+        assert!(matches!(
+            reader.get_item(&id),
+            Err(StoreError::DecryptionFailed(_))
+        ));
+    }
+
+    /// Calling `encrypt_item` on an already-encrypted item is a safe,
+    /// cheap no-op: no error, and neither the doc/tokens blobs nor their
+    /// checksum sidecars are rewritten (mtimes unchanged).
+    #[test]
+    fn encrypt_item_on_already_encrypted_item_is_a_no_op() {
+        let (dir, store) = open_test_store_encrypted(0x99);
+        let doc = doc_with_title("omicron-already-encrypted");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let doc_path = dir.path().join("storage").join(format!("{id}.json"));
+        let sidecar = checksum_sidecar_path(&doc_path);
+        let before_bytes = std::fs::read(&doc_path).unwrap();
+        let before_mtime = std::fs::metadata(&doc_path).unwrap().modified().unwrap();
+
+        let key = store.encryption_key().unwrap();
+        let outcome = store.encrypt_item(&id, &key).unwrap();
+        assert_eq!(outcome, EncryptOutcome::AlreadyEncrypted);
+
+        let after_bytes = std::fs::read(&doc_path).unwrap();
+        let after_mtime = std::fs::metadata(&doc_path).unwrap().modified().unwrap();
+        assert_eq!(
+            before_bytes, after_bytes,
+            "already-encrypted blob must not be rewritten"
+        );
+        assert_eq!(
+            before_mtime, after_mtime,
+            "already-encrypted blob's mtime must be untouched"
+        );
+        assert!(sidecar.exists());
+
+        // Calling it a second time is equally a safe no-op.
+        let outcome2 = store.encrypt_item(&id, &key).unwrap();
+        assert_eq!(outcome2, EncryptOutcome::AlreadyEncrypted);
+    }
+
+    #[test]
+    fn encrypt_item_on_unknown_id_returns_not_found() {
+        let (_dir, store) = open_test_store();
+        let key = FakeKeyProvider::new(1).get_or_create_key();
+
+        let result = store.encrypt_item("does-not-exist", &key);
+        assert!(
+            matches!(result, Err(StoreError::NotFound(ref id)) if id == "does-not-exist"),
+            "expected NotFound for an unknown id, got {:?}",
+            result
+        );
+    }
+
+    /// The ADR-014 scope decision under test: `encrypt_item` must never
+    /// touch `source_copy_path` (the ADR-006 `originals/` copy) — its bytes
+    /// and checksum sidecar must be byte-for-byte identical before and
+    /// after.
+    #[test]
+    fn encrypt_item_never_touches_the_original_copy() {
+        let (dir, store) = open_test_store();
+
+        let copy_path = store
+            .store_original_copy(b"pi original file bytes", "txt")
+            .unwrap();
+        let mut doc = doc_with_title("pi-has-an-original-copy");
+        doc.metadata.source_copy_ref = Some(copy_path.clone());
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let copy_sidecar = checksum_sidecar_path(std::path::Path::new(&copy_path));
+        let copy_bytes_before = std::fs::read(&copy_path).unwrap();
+        let copy_sidecar_before = std::fs::read_to_string(&copy_sidecar).unwrap();
+
+        let key = FakeKeyProvider::new(2).get_or_create_key();
+        let outcome = store.encrypt_item(&id, &key).unwrap();
+        assert_eq!(outcome, EncryptOutcome::Encrypted);
+
+        let copy_bytes_after = std::fs::read(&copy_path).unwrap();
+        let copy_sidecar_after = std::fs::read_to_string(&copy_sidecar).unwrap();
+        assert_eq!(
+            copy_bytes_before, copy_bytes_after,
+            "encrypt_item must never touch the original copy's bytes"
+        );
+        assert_eq!(
+            copy_sidecar_before, copy_sidecar_after,
+            "encrypt_item must never touch the original copy's checksum sidecar"
+        );
+
+        let _ = dir; // keep TempDir alive for the duration of the test
+    }
+
+    /// `encrypt_item` must correctly rewrite the checksum sidecars to cover
+    /// the new ciphertext — this test would fail if that step were skipped,
+    /// since the *old* (plaintext-covering) sidecar would then mismatch the
+    /// new ciphertext bytes.
+    #[test]
+    fn encrypt_item_rewrites_checksum_sidecars_to_match_new_ciphertext() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+
+        let store = Store::open(&db, &storage).unwrap();
+        let doc = doc_with_title("rho-checksum-rewrite");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let doc_path = storage.join(format!("{id}.json"));
+        let tokens_path = storage.join(format!("{id}.tokens.json"));
+        let doc_sidecar_before = std::fs::read_to_string(checksum_sidecar_path(&doc_path)).unwrap();
+
+        let key = FakeKeyProvider::new(3).get_or_create_key();
+        store.encrypt_item(&id, &key).unwrap();
+
+        for path in [&doc_path, &tokens_path] {
+            let sidecar = checksum_sidecar_path(path);
+            let recorded = std::fs::read_to_string(&sidecar).unwrap();
+            let actual = checksum_hex(&std::fs::read(path).unwrap());
+            assert_eq!(
+                recorded, actual,
+                "checksum sidecar for {path:?} must match the new ciphertext, not the old plaintext"
+            );
+        }
+
+        let doc_sidecar_after = std::fs::read_to_string(checksum_sidecar_path(&doc_path)).unwrap();
+        assert_ne!(
+            doc_sidecar_before, doc_sidecar_after,
+            "the doc blob's checksum must actually change once its bytes change \
+             (sanity check that this isn't accidentally comparing two identical, unrewritten sidecars)"
+        );
+
+        // And a same-key encrypted Store confirms the ciphertext + sidecar
+        // together are genuinely valid and readable, not just self-consistent.
+        let encrypted_store =
+            Store::open_encrypted(&db, &storage, Arc::new(FakeKeyProvider::new(3))).unwrap();
+        assert!(encrypted_store.get_item(&id).unwrap().is_some());
+    }
+
+    /// `list_items`'s `content_encrypted` field must reflect an item's
+    /// current flag, before and after `encrypt_item` — this is SQL-only
+    /// metadata, so it stays correct even read through the unkeyed `Store`
+    /// that performed the encryption (see `encrypt_item`'s doc comment on
+    /// why that's different from reading the item's actual *content*).
+    #[test]
+    fn content_encrypted_flag_visible_in_list_items_after_encrypt_item() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("sigma-flag-visibility");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let before = store.list_items(0, 10).unwrap();
+        assert!(
+            !before
+                .iter()
+                .find(|i| i.id == id)
+                .unwrap()
+                .content_encrypted
+        );
+
+        let key = FakeKeyProvider::new(4).get_or_create_key();
+        store.encrypt_item(&id, &key).unwrap();
+
+        let after = store.list_items(0, 10).unwrap();
+        assert!(after.iter().find(|i| i.id == id).unwrap().content_encrypted);
     }
 }

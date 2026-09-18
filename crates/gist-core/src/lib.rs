@@ -137,7 +137,17 @@ pub use gist_model::ParseLimits;
 /// `gist-core` — a cycle. Callers that only ever see `gist-core`'s facade
 /// (like `gist-ffi`) can still refer to `gist_core::KeyProvider` without
 /// caring which crate it's actually defined in.
-pub use gist_store::{FakeKeyProvider, KeyProvider};
+pub use gist_store::{EncryptOutcome, FakeKeyProvider, KeyProvider};
+
+/// Per-id result of a bulk [`Core::encrypt_items`] call (ADR-014). A `Vec`
+/// of these — not a single aggregate `Result` — so a failure on one id in a
+/// bulk selection doesn't lose information about which of the *other* ids
+/// succeeded or were already encrypted.
+#[derive(Debug)]
+pub struct EncryptItemOutcome {
+    pub id: String,
+    pub result: Result<EncryptOutcome, gist_store::StoreError>,
+}
 
 /// Initialise `Core` with document/original-file content encrypted at rest
 /// (ADR-011, AES-256-GCM) using a key from `key_provider` — the encrypted
@@ -151,6 +161,25 @@ impl Core {
         key_provider: std::sync::Arc<dyn KeyProvider>,
     ) -> Result<Self, CoreError> {
         let store = gist_store::Store::open_encrypted(db_path, storage_dir, key_provider)?;
+        Ok(Self { store })
+    }
+
+    /// Initialise `Core` with **read-only** decryption capability (ADR-014):
+    /// `key_provider` lets already-encrypted items (written via
+    /// [`Core::encrypt_items`], or historically via [`Core::init_encrypted`])
+    /// be read back — `get_document`/`start_rsvp` and anything else that
+    /// loads document content — but new imports through this `Core` still
+    /// land plaintext by default, exactly like [`Core::init`]. See
+    /// [`gist_store::Store::open_with_read_key`] for the full rationale:
+    /// this is the fix for the bug where an item encrypted through
+    /// `CoreClient.shared`'s production (previously keyless) instance
+    /// became permanently unreadable in the running app.
+    pub fn init_with_read_key(
+        db_path: &Path,
+        storage_dir: &Path,
+        key_provider: std::sync::Arc<dyn KeyProvider>,
+    ) -> Result<Self, CoreError> {
+        let store = gist_store::Store::open_with_read_key(db_path, storage_dir, key_provider)?;
         Ok(Self { store })
     }
 }
@@ -581,6 +610,50 @@ impl Core {
         Ok(self.store.list_items_by_tag(tag_name)?)
     }
 
+    // ── Per-item encryption (ADR-014) ──────────────────────────────────────
+
+    /// Retroactively encrypt one or more already-imported items at rest, on
+    /// demand — the per-item, opt-in follow-up to ADR-011's whole-store
+    /// [`Core::init_encrypted`] (see ADR-014). Calls
+    /// `key_provider.get_or_create_key()` exactly once (not once per item —
+    /// `KeyProvider::get_or_create_key` must always return the same key
+    /// anyway, so this just avoids redundant calls into what may be a
+    /// Keychain round trip on the platform side) and then
+    /// [`gist_store::Store::encrypt_item`] once per id.
+    ///
+    /// Returns one [`EncryptItemOutcome`] per id in `ids`, in the same
+    /// order, rather than failing the whole call on the first error — a
+    /// bulk selection from the UI (e.g. "select all" in the library) can
+    /// contain a mix of ids that succeed, are already encrypted, or fail
+    /// (most plausibly [`gist_store::StoreError::NotFound`] if an item was
+    /// removed concurrently), and the caller needs to know which is which
+    /// to show an accurate summary rather than losing that information
+    /// behind one aggregate `Result`.
+    ///
+    /// See [`gist_store::Store::encrypt_item`]'s doc comment for the full
+    /// design (why `key` bypasses `self.store`'s own construction-time
+    /// key-provider state entirely, and the `originals/` scope exclusion).
+    /// Reading an item's content back after this call requires the `Core`
+    /// it's read through to have decryption capability — see
+    /// [`Core::init_with_read_key`] (ADR-014), which is what
+    /// `CoreClient.shared`'s production instance is now built with for
+    /// exactly this reason. A `Core`/`Store` with no key of any kind (plain
+    /// [`Core::init`]) still correctly cannot decrypt such an item, since it
+    /// genuinely has no key.
+    pub fn encrypt_items(
+        &self,
+        ids: &[String],
+        key_provider: std::sync::Arc<dyn KeyProvider>,
+    ) -> Vec<EncryptItemOutcome> {
+        let key = key_provider.get_or_create_key();
+        ids.iter()
+            .map(|id| EncryptItemOutcome {
+                id: id.clone(),
+                result: self.store.encrypt_item(id, &key),
+            })
+            .collect()
+    }
+
     /// Import a single image file and run OCR using the provided engine.
     ///
     /// Phase M3 stub — the full pipeline (multi-page PDF tiling, heuristic
@@ -998,5 +1071,145 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, tagged_id);
         assert!(items.iter().all(|i| i.id != untagged_id));
+    }
+
+    // ── Per-item encryption (ADR-014) ───────────────────────────────────
+
+    /// A genuinely keyless `Core::init` instance (no read or write key of
+    /// any kind) still correctly cannot decrypt content it encrypts via
+    /// `encrypt_items` — that's the right behavior for a truly keyless
+    /// instance, and this test still covers it. **This is no longer how
+    /// `CoreClient.shared`'s production instance is configured** — see
+    /// `encrypt_items_then_read_through_read_capable_core_succeeds` below
+    /// for the scenario that matches production today (`Core::
+    /// init_with_read_key`), which is the ADR-014 fix for the read-after-
+    /// encrypt gap this test used to (mis)represent as production behavior.
+    #[test]
+    fn encrypt_items_encrypts_unencrypted_and_reports_already_encrypted_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("tau.txt");
+        std::fs::write(&txt, b"A document that will be encrypted on demand.").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let key_provider: std::sync::Arc<dyn KeyProvider> =
+            std::sync::Arc::new(FakeKeyProvider::new(11));
+
+        // First call: item is plaintext -> Encrypted.
+        let results = core.encrypt_items(&[id.clone()], key_provider.clone());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id);
+        assert!(matches!(results[0].result, Ok(EncryptOutcome::Encrypted)));
+
+        // Flag is visible through the normal list_items metadata query, even
+        // though this Core's own Store has no key and can no longer read
+        // the item's actual content (see encrypt_item's doc comment).
+        let items = core.list_items(0, 10).unwrap();
+        assert!(items.iter().find(|i| i.id == id).unwrap().content_encrypted);
+        assert!(matches!(
+            core.get_document(&id),
+            Err(CoreError::Store(gist_store::StoreError::MissingKeyProvider))
+        ));
+
+        // Second call: idempotent no-op -> AlreadyEncrypted, not an error.
+        let results2 = core.encrypt_items(&[id.clone()], key_provider);
+        assert_eq!(results2.len(), 1);
+        assert!(matches!(
+            results2[0].result,
+            Ok(EncryptOutcome::AlreadyEncrypted)
+        ));
+    }
+
+    /// **Closes the read-after-encrypt gap (ADR-014) for `gist-core`'s
+    /// facade** — the same scenario as `gist-store`'s
+    /// `encrypt_item_then_read_through_same_read_capable_store_succeeds`,
+    /// but through `Core::init_with_read_key`, the constructor
+    /// `CoreClient.shared`'s production instance now actually uses. A book
+    /// a user encrypts must stay readable through the same running app.
+    #[test]
+    fn encrypt_items_then_read_through_read_capable_core_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+
+        let key_provider: std::sync::Arc<dyn KeyProvider> =
+            std::sync::Arc::new(FakeKeyProvider::new(0x64));
+        let core = Core::init_with_read_key(&db, &storage, key_provider.clone()).unwrap();
+
+        // A new import through this Core must still land plaintext by
+        // default -- read capability must never flip on auto-encryption.
+        let plain_txt = dir.path().join("chi.txt");
+        std::fs::write(&plain_txt, b"Stays plaintext unless explicitly encrypted.").unwrap();
+        let plain_id = core.import_file(&plain_txt, &NullObserver).unwrap();
+        assert!(
+            !core
+                .list_items(0, 10)
+                .unwrap()
+                .into_iter()
+                .find(|i| i.id == plain_id)
+                .unwrap()
+                .content_encrypted
+        );
+        assert!(
+            core.get_document(&plain_id).is_ok(),
+            "a plaintext import must remain trivially readable"
+        );
+
+        let txt = dir.path().join("psi.txt");
+        std::fs::write(&txt, b"A document encrypted on demand, then reopened.").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let results = core.encrypt_items(&[id.clone()], key_provider);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].result, Ok(EncryptOutcome::Encrypted)));
+
+        // This is the assertion that used to fail with MissingKeyProvider:
+        // the SAME Core instance that just encrypted the item can read its
+        // actual content straight back.
+        let doc_json = core
+            .get_document(&id)
+            .expect("read-after-encrypt must succeed through a read-capable Core");
+        assert!(doc_json.contains("psi"));
+
+        // The RSVP path (the other real content-reading call site) must
+        // also work -- start_rsvp internally calls store.get_item too.
+        let rsvp_json = core
+            .start_rsvp(&id, gist_rsvp::Config::default())
+            .expect("start_rsvp must also succeed after encrypt through a read-capable Core");
+        assert!(!rsvp_json.is_empty());
+    }
+
+    /// A bulk call spanning a real id and an unknown one must report both
+    /// outcomes individually rather than losing the real id's success
+    /// behind one aggregate failure.
+    #[test]
+    fn encrypt_items_reports_per_id_outcomes_for_a_mixed_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("upsilon.txt");
+        std::fs::write(&txt, b"Bulk encrypt candidate.").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let key_provider: std::sync::Arc<dyn KeyProvider> =
+            std::sync::Arc::new(FakeKeyProvider::new(12));
+        let results = core.encrypt_items(&[id.clone(), "not-a-real-id".to_string()], key_provider);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, id);
+        assert!(matches!(results[0].result, Ok(EncryptOutcome::Encrypted)));
+        assert_eq!(results[1].id, "not-a-real-id");
+        assert!(matches!(
+            results[1].result,
+            Err(gist_store::StoreError::NotFound(_))
+        ));
     }
 }

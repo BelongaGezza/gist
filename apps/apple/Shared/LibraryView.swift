@@ -81,6 +81,8 @@ struct LibraryView: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var selection = Set<String>()
     @State private var showRemoveConfirm = false
+    @State private var showEncryptConfirm = false
+    @State private var encryptSummary: EncryptItemsSummary?
     @State private var showUrlImportAlert = false
     @State private var urlToImport = ""
     @State private var showNewCollectionAlert = false
@@ -247,6 +249,12 @@ struct LibraryView: View {
                 .disabled(selection.isEmpty)
             }
             ToolbarItem(placement: .primaryAction) {
+                Button { showEncryptConfirm = true } label: {
+                    Label("Encrypt", systemImage: "lock")
+                }
+                .disabled(selection.isEmpty)
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Button(role: .destructive) { showRemoveConfirm = true } label: {
                     Label("Remove", systemImage: "trash")
                 }
@@ -349,6 +357,31 @@ struct LibraryView: View {
                 "\"Remove from Library\" only removes GIST's record and its sandboxed copy — your original file, wherever it lives, is never touched. \"Also Delete Original File\" additionally deletes GIST's own imported copy (see ADR-006); it never deletes the original either."
             )
         }
+        .alert(
+            selection.count == 1 ? "Encrypt 1 item?" : "Encrypt \(selection.count) items?",
+            isPresented: $showEncryptConfirm
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Encrypt") {
+                let ids = Array(selection)
+                Task { encryptSummary = await core.encryptItems(ids: ids) }
+            }
+        } message: {
+            Text(
+                "Encrypts the selected item's content at rest (ADR-011/014). It stays fully readable afterward — RSVP and Flow View both continue to work — this only protects the file on disk. Only GIST's internal document data is affected, never your original file."
+            )
+        }
+        .alert(
+            "Encryption Result",
+            isPresented: Binding(
+                get: { encryptSummary != nil },
+                set: { if !$0 { encryptSummary = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { encryptSummary = nil }
+        } message: {
+            Text(encryptSummary?.message ?? "")
+        }
     }
 
     private var emptyState: some View {
@@ -423,6 +456,12 @@ struct LibraryView: View {
                     }
                     Button("Manage Tags…") {
                         tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)
+                    }
+                    if !item.contentEncrypted {
+                        Button("Encrypt…") {
+                            selection = [item.id]
+                            showEncryptConfirm = true
+                        }
                     }
                     Divider()
                     Button("Remove…", role: .destructive) {
