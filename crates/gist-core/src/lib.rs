@@ -10,6 +10,27 @@ fn file_ext(path: &Path) -> String {
         .to_lowercase()
 }
 
+/// Best-effort delete `path` and its BLAKE3 checksum sidecar (`<path>.blake3`,
+/// ADR-013 / `A4`), if either exists. Mirrors `Core::remove_items`'s existing
+/// file-cleanup policy exactly: a missing or unremovable file is logged at
+/// `debug!` and never fails the overall call, since by the time this runs the
+/// owning `library_items` row is already gone. A checksum sidecar with no
+/// corresponding blob (or vice versa) is harmless either way — this just
+/// avoids leaving one behind after its blob is gone.
+fn remove_file_and_checksum_sidecar(path: &str) {
+    if let Err(e) = std::fs::remove_file(path) {
+        tracing::debug!("gist-core: failed to delete file {}: {}", path, e);
+    }
+    let sidecar = format!("{path}.blake3");
+    if let Err(e) = std::fs::remove_file(&sidecar) {
+        tracing::debug!(
+            "gist-core: failed to delete checksum sidecar {}: {}",
+            sidecar,
+            e
+        );
+    }
+}
+
 // ── Parse error (shared across image/doc parsers) ──────────────────────────
 
 /// Errors returned by format-specific parsers and pre-processors.
@@ -456,36 +477,18 @@ impl Core {
         let removed = self.store.remove_items(ids)?;
 
         for item in removed {
-            if let Err(e) = std::fs::remove_file(&item.doc_path) {
-                tracing::debug!(
-                    "gist-core: failed to delete document blob {}: {}",
-                    item.doc_path,
-                    e
-                );
-            }
+            remove_file_and_checksum_sidecar(&item.doc_path);
 
             let tokens_path = item
                 .doc_path
                 .strip_suffix(".json")
                 .map(|s| format!("{s}.tokens.json"))
                 .unwrap_or_else(|| format!("{}.tokens.json", item.doc_path));
-            if let Err(e) = std::fs::remove_file(&tokens_path) {
-                tracing::debug!(
-                    "gist-core: failed to delete tokens blob {}: {}",
-                    tokens_path,
-                    e
-                );
-            }
+            remove_file_and_checksum_sidecar(&tokens_path);
 
             if delete_source_files {
                 if let Some(source_copy_path) = &item.source_copy_path {
-                    if let Err(e) = std::fs::remove_file(source_copy_path) {
-                        tracing::debug!(
-                            "gist-core: failed to delete source copy {}: {}",
-                            source_copy_path,
-                            e
-                        );
-                    }
+                    remove_file_and_checksum_sidecar(source_copy_path);
                 }
                 // else: no sandboxed copy exists for this item (URL import,
                 // or imported before ADR-006 landed) — nothing to delete.
@@ -772,12 +775,15 @@ mod tests {
 
     /// Finds the single file under `<storage>/originals/`, asserting there's
     /// exactly one (the sandboxed copy ADR-006 requires `import_file` to
-    /// make).
+    /// make). Ignores `.blake3` checksum sidecar files (ADR-013 / `A4`) —
+    /// every fresh copy gets one alongside it, but this helper is about the
+    /// content file itself, not its checksum.
     fn the_one_sandboxed_copy(storage: &std::path::Path) -> std::path::PathBuf {
         let originals_dir = storage.join("originals");
         let copies: Vec<_> = std::fs::read_dir(&originals_dir)
             .unwrap()
             .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) != Some("blake3"))
             .collect();
         assert_eq!(
             copies.len(),
@@ -804,11 +810,21 @@ mod tests {
 
         let copy_path = the_one_sandboxed_copy(&storage);
 
+        let copy_sidecar = format!("{}.blake3", copy_path.display());
+        assert!(
+            std::path::Path::new(&copy_sidecar).exists(),
+            "a fresh sandboxed copy must have a checksum sidecar (ADR-013 / A4)"
+        );
+
         core.remove_items(&[id], true).unwrap();
 
         assert!(
             !copy_path.exists(),
             "the sandboxed copy should be deleted when delete_source_files=true"
+        );
+        assert!(
+            !std::path::Path::new(&copy_sidecar).exists(),
+            "the sandboxed copy's checksum sidecar should be cleaned up alongside it"
         );
         assert!(
             txt.exists(),
