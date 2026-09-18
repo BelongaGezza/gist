@@ -11,13 +11,21 @@ struct LibraryRowContent: View {
     let item: LibraryItemVM
 
     var body: some View {
-        VStack(alignment: .leading) {
-            Text(item.title)
-                .font(.headline)
-            if !item.authors.isEmpty {
-                Text(item.authors.joined(separator: ", "))
-                    .font(.caption)
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading) {
+                Text(item.title)
+                    .font(.headline)
+                if !item.authors.isEmpty {
+                    Text(item.authors.joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if item.contentEncrypted {
+                Spacer()
+                Image(systemName: "lock.fill")
                     .foregroundStyle(.secondary)
+                    .help("Encrypted at rest (ADR-011/014)")
             }
         }
     }

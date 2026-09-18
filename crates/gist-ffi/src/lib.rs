@@ -171,6 +171,11 @@ pub struct FfiLibraryItem {
     pub authors: Vec<String>,
     pub source_path: Option<String>,
     pub cover_path: Option<String>,
+    /// Mirrors `gist_store::LibraryItem::content_encrypted` (ADR-011/014) —
+    /// SQL-metadata-only, so it's populated correctly even for an item
+    /// whose actual content this `GistCore` instance can no longer decrypt
+    /// (see `GistCore::encrypt_items`'s doc comment).
+    pub content_encrypted: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -178,6 +183,53 @@ pub struct FfiCollection {
     pub id: String,
     pub name: String,
     pub created_at: i64,
+}
+
+// ── Per-item encryption (ADR-014) ──────────────────────────────────────────
+
+/// Mirrors `gist_store::EncryptOutcome` as a uniffi-exportable enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiEncryptOutcome {
+    Encrypted,
+    AlreadyEncrypted,
+}
+
+impl From<gist_core::EncryptOutcome> for FfiEncryptOutcome {
+    fn from(o: gist_core::EncryptOutcome) -> Self {
+        match o {
+            gist_core::EncryptOutcome::Encrypted => FfiEncryptOutcome::Encrypted,
+            gist_core::EncryptOutcome::AlreadyEncrypted => FfiEncryptOutcome::AlreadyEncrypted,
+        }
+    }
+}
+
+/// Per-id result of a bulk `GistCore::encrypt_items` call. Exactly one of
+/// `outcome`/`error` is set — a uniffi `Record` has no native tagged-union
+/// support for "one of two shapes," so this mirrors `gist_core::
+/// EncryptItemOutcome`'s `Result` as two `Option` fields instead, which
+/// Swift can switch on the same way.
+#[derive(uniffi::Record)]
+pub struct FfiEncryptItemResult {
+    pub id: String,
+    pub outcome: Option<FfiEncryptOutcome>,
+    pub error: Option<String>,
+}
+
+impl From<gist_core::EncryptItemOutcome> for FfiEncryptItemResult {
+    fn from(o: gist_core::EncryptItemOutcome) -> Self {
+        match o.result {
+            Ok(outcome) => FfiEncryptItemResult {
+                id: o.id,
+                outcome: Some(outcome.into()),
+                error: None,
+            },
+            Err(e) => FfiEncryptItemResult {
+                id: o.id,
+                outcome: None,
+                error: Some(e.to_string()),
+            },
+        }
+    }
 }
 
 // ── GistCore object ──────────────────────────────────────────────────────────
@@ -216,6 +268,35 @@ impl GistCore {
             let adapter: Arc<dyn gist_core::KeyProvider> =
                 Arc::new(CoreKeyProviderAdapter(key_provider));
             let core = gist_core::Core::init_encrypted(
+                &PathBuf::from(&db_path),
+                &PathBuf::from(&storage_dir),
+                adapter,
+            )
+            .map_err(GistError::from)?;
+            Ok(Arc::new(Self { inner: core }))
+        })
+    }
+
+    /// Read-only-decryption counterpart to `new` (ADR-014): new imports
+    /// through this `GistCore` still land plaintext by default, exactly
+    /// like plain `new` — but `key_provider` lets already-encrypted items
+    /// (written via `encrypt_items`, or historically via `new_encrypted`)
+    /// be read back through this instance instead of failing with
+    /// `MissingKeyProvider`. See `gist_core::Core::init_with_read_key`/
+    /// `gist_store::Store::open_with_read_key` for the full rationale —
+    /// this is the constructor `CoreClient.shared`'s production instance
+    /// now uses, so per-item "Encrypt" (`encrypt_items`) no longer locks a
+    /// user out of reading the item they just encrypted.
+    #[uniffi::constructor]
+    pub fn new_with_read_key(
+        db_path: String,
+        storage_dir: String,
+        key_provider: Box<dyn KeyProvider>,
+    ) -> Result<Arc<Self>, GistError> {
+        ffi_catch!({
+            let adapter: Arc<dyn gist_core::KeyProvider> =
+                Arc::new(CoreKeyProviderAdapter(key_provider));
+            let core = gist_core::Core::init_with_read_key(
                 &PathBuf::from(&db_path),
                 &PathBuf::from(&storage_dir),
                 adapter,
@@ -270,6 +351,7 @@ impl GistCore {
                     authors: i.authors,
                     source_path: i.source_path,
                     cover_path: i.cover_path,
+                    content_encrypted: i.content_encrypted,
                 })
                 .collect())
         })
@@ -295,6 +377,7 @@ impl GistCore {
                     authors: i.authors,
                     source_path: i.source_path,
                     cover_path: i.cover_path,
+                    content_encrypted: i.content_encrypted,
                 })
                 .collect())
         })
@@ -415,6 +498,7 @@ impl GistCore {
                     authors: i.authors,
                     source_path: i.source_path,
                     cover_path: i.cover_path,
+                    content_encrypted: i.content_encrypted,
                 })
                 .collect())
         })
@@ -473,7 +557,38 @@ impl GistCore {
                     authors: i.authors,
                     source_path: i.source_path,
                     cover_path: i.cover_path,
+                    content_encrypted: i.content_encrypted,
                 })
+                .collect())
+        })
+    }
+
+    /// Retroactively encrypt one or more already-imported items at rest, on
+    /// demand (ADR-014) — reuses the same `KeyProvider` callback-interface
+    /// machinery `new_encrypted`/`new_with_read_key` use
+    /// (`CoreKeyProviderAdapter`), rather than inventing a second mechanism.
+    /// See `gist_core::Core::encrypt_items`/`gist_store::Store::
+    /// encrypt_item` for the full design. Reading an item's content back
+    /// after this call requires the `GistCore` it's read through to have
+    /// decryption capability — `new_with_read_key` (what production now
+    /// uses) or `new_encrypted` both qualify; a `GistCore` constructed via
+    /// plain `new` still correctly cannot decrypt such an item.
+    ///
+    /// Returns one [`FfiEncryptItemResult`] per id, in the same order as
+    /// `ids`, rather than failing the whole call on the first per-id error.
+    pub fn encrypt_items(
+        &self,
+        ids: Vec<String>,
+        key_provider: Box<dyn KeyProvider>,
+    ) -> Result<Vec<FfiEncryptItemResult>, GistError> {
+        ffi_catch!({
+            let adapter: Arc<dyn gist_core::KeyProvider> =
+                Arc::new(CoreKeyProviderAdapter(key_provider));
+            Ok(self
+                .inner
+                .encrypt_items(&ids, adapter)
+                .into_iter()
+                .map(FfiEncryptItemResult::from)
                 .collect())
         })
     }

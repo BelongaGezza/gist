@@ -20,6 +20,20 @@ final class CoreClient: ObservableObject {
 
     private let core: GistCore?
 
+    /// **ADR-014 fix:** `.shared` is built with real, read-only decryption
+    /// capability via `GistCore.newWithReadKey(dbPath:storageDir:keyProvider:)`
+    /// and a production `KeychainKeyProvider()` — not plain `GistCore.init`
+    /// (which this used to call) and not `newEncrypted` either. This is
+    /// deliberately the middle option: new imports through `.shared` still
+    /// land plaintext by default, exactly as before this change (nothing
+    /// about the default import path changes), but an item a user encrypts
+    /// via `encryptItems` (see below) is no longer permanently unreadable
+    /// through this same running app afterward — before this fix, `.shared`
+    /// had no key provider of any kind, so `loadDocument`/`startRsvp` on a
+    /// freshly-encrypted item failed with `MissingKeyProvider`, a real
+    /// data-access bug (a user could click "Encrypt" and permanently lock
+    /// themselves out of a book). See `gist_store::Store::open_with_read_key`
+    /// and `docs/adr/014-per-item-encryption.md` for the full rationale.
     private init() {
         do {
             let supportDir = try FileManager.default.url(
@@ -32,7 +46,11 @@ final class CoreClient: ObservableObject {
             let dbPath = supportDir.appendingPathComponent("gist.sqlite3").path
             let storageDir = supportDir.appendingPathComponent("storage", isDirectory: true).path
 
-            core = try GistCore(dbPath: dbPath, storageDir: storageDir)
+            core = try GistCore.newWithReadKey(
+                dbPath: dbPath,
+                storageDir: storageDir,
+                keyProvider: KeychainKeyProvider()
+            )
         } catch {
             self.core = nil
             self.error = "Failed to initialise GIST core: \(error)"
@@ -47,10 +65,31 @@ final class CoreClient: ObservableObject {
     /// depending on) a real user's Application Support state.
     ///
     /// Additive only: `.shared` still goes through `private init()` above,
-    /// unchanged, so no production call site is affected.
+    /// unchanged in shape (still no test-Keychain dependency here), so no
+    /// production call site is affected.
     init(dbPath: String, storageDir: String) {
         do {
             core = try GistCore(dbPath: dbPath, storageDir: storageDir)
+        } catch {
+            self.core = nil
+            self.error = "Failed to initialise GIST core: \(error)"
+        }
+    }
+
+    /// Test-only construction path mirroring `.shared`'s real production
+    /// shape (ADR-014): a `GistCore` built via `newWithReadKey`, so tests can
+    /// exercise the exact same "plaintext writes, read-capable-after-
+    /// encrypt" configuration `.shared` actually uses in the running app,
+    /// against a scratch temp directory and an injectable `KeyProvider`
+    /// (normally a test-scoped `KeychainKeyProvider`, never the real
+    /// production Keychain item).
+    init(dbPath: String, storageDir: String, keyProvider: KeyProvider) {
+        do {
+            core = try GistCore.newWithReadKey(
+                dbPath: dbPath,
+                storageDir: storageDir,
+                keyProvider: keyProvider
+            )
         } catch {
             self.core = nil
             self.error = "Failed to initialise GIST core: \(error)"
@@ -76,7 +115,8 @@ final class CoreClient: ObservableObject {
                 id: item.id,
                 title: item.title ?? "Untitled",
                 authors: item.authors,
-                sourcePath: item.sourcePath
+                sourcePath: item.sourcePath,
+                contentEncrypted: item.contentEncrypted
             )
         }
     }
@@ -319,6 +359,74 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    // MARK: - Per-item encryption (ADR-014)
+
+    /// Retroactively encrypts `ids` at rest, on demand -- the per-item,
+    /// opt-in follow-up to ADR-011's whole-store encryption. Constructs a
+    /// real, production `KeychainKeyProvider()` by default (the same key
+    /// `.shared`'s `init()` itself uses for its own read-only decryption
+    /// capability -- see that initializer's doc comment); a test can
+    /// override `keyProvider` via `KeychainKeyProvider`'s existing
+    /// `init(service:account:)` seam so it never touches the real
+    /// production Keychain item. This call reaches the SAME `GistCore`
+    /// instance `.shared` already has; only the specific items in `ids` are
+    /// affected -- items not in `ids` are untouched, and new imports
+    /// elsewhere in the app still land plaintext by default.
+    ///
+    /// **Fixed (ADR-014):** `.shared`'s `GistCore` now has genuine
+    /// read-only decryption capability (`GistCore.newWithReadKey`, see
+    /// `CoreClient.init()`), so an item this method encrypts *can* have its
+    /// actual content read back through this same running app --
+    /// `loadDocument`/`startRsvp` on that item's id succeed as long as the
+    /// key `keyProvider` returns matches the one `.shared` was opened with
+    /// (true by default, since both default to the same production
+    /// `KeychainKeyProvider()`). Before this fix, `.shared` had no key
+    /// provider of any kind and encrypting an item permanently locked it
+    /// out of being reopened in the running app -- a real data-access bug,
+    /// not just a documented limitation. See ADR-014 and this method's
+    /// Rust-side counterparts (`gist_store::Store::encrypt_item`,
+    /// `gist_store::Store::open_with_read_key`, `gist_core::Core::
+    /// encrypt_items`) for the full explanation.
+    ///
+    /// Always calls `refresh()` afterward so `items`' `contentEncrypted`
+    /// flags reflect the outcome, then returns a tallied summary for a
+    /// result alert.
+    @discardableResult
+    func encryptItems(
+        ids: [String],
+        keyProvider: KeyProvider = KeychainKeyProvider()
+    ) async -> EncryptItemsSummary {
+        guard let core else {
+            return EncryptItemsSummary(encryptedCount: 0, alreadyEncryptedCount: 0, failedCount: 0)
+        }
+        var encrypted = 0
+        var alreadyEncrypted = 0
+        var failed = 0
+        do {
+            let results = try core.encryptItems(ids: ids, keyProvider: keyProvider)
+            for result in results {
+                if let outcome = result.outcome {
+                    switch outcome {
+                    case .encrypted: encrypted += 1
+                    case .alreadyEncrypted: alreadyEncrypted += 1
+                    }
+                } else {
+                    failed += 1
+                }
+            }
+            error = nil
+        } catch {
+            self.error = "\(error)"
+            failed = ids.count
+        }
+        await refresh()
+        return EncryptItemsSummary(
+            encryptedCount: encrypted,
+            alreadyEncryptedCount: alreadyEncrypted,
+            failedCount: failed
+        )
+    }
+
     /// Persists the current token index so playback can resume later.
     func saveProgress(itemId: String, tokenIndex: Int) async {
         guard let core else { return }
@@ -335,6 +443,47 @@ struct LibraryItemVM: Identifiable {
     let title: String
     let authors: [String]
     let sourcePath: String?
+    /// Mirrors `FfiLibraryItem.contentEncrypted` (ADR-011/014) -- whether
+    /// this item's `.json`/`.tokens.json` blobs are encrypted at rest.
+    /// Defaulted so every existing call site (production mapping and the
+    /// many hand-built `LibraryItemVM(...)` literals in tests) keeps
+    /// compiling unchanged.
+    let contentEncrypted: Bool
+
+    init(id: String, title: String, authors: [String], sourcePath: String?, contentEncrypted: Bool = false) {
+        self.id = id
+        self.title = title
+        self.authors = authors
+        self.sourcePath = sourcePath
+        self.contentEncrypted = contentEncrypted
+    }
+}
+
+/// Summary of a bulk `CoreClient.encryptItems` call, for a result alert
+/// (e.g. "2 items encrypted, 1 was already encrypted") -- mirrors
+/// `FfiEncryptItemResult`'s per-id outcomes, tallied.
+struct EncryptItemsSummary {
+    let encryptedCount: Int
+    let alreadyEncryptedCount: Int
+    let failedCount: Int
+
+    var isEmpty: Bool { encryptedCount == 0 && alreadyEncryptedCount == 0 && failedCount == 0 }
+
+    /// A short, human-readable summary line, e.g. "2 items encrypted, 1 was
+    /// already encrypted, 1 failed." Only mentions the parts that happened.
+    var message: String {
+        var parts: [String] = []
+        if encryptedCount > 0 {
+            parts.append("\(encryptedCount) item\(encryptedCount == 1 ? "" : "s") encrypted")
+        }
+        if alreadyEncryptedCount > 0 {
+            parts.append("\(alreadyEncryptedCount) \(alreadyEncryptedCount == 1 ? "was" : "were") already encrypted")
+        }
+        if failedCount > 0 {
+            parts.append("\(failedCount) failed")
+        }
+        return parts.isEmpty ? "No items were selected." : parts.joined(separator: ", ") + "."
+    }
 }
 
 struct CollectionVM: Identifiable, Hashable {
