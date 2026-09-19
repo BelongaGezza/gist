@@ -13,8 +13,17 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
-        with:
-          components: clippy, rustfmt
+      # rust-toolchain.toml pins 1.87.0, so any plain `cargo` invocation in
+      # this repo auto-installs and switches to that exact toolchain
+      # (rustup's toolchain-file mechanism) — a different, separately-named
+      # rustup toolchain from whatever "stable" version the action step
+      # above installed (that one's only reachable via `cargo +stable`, per
+      # apple-build.yml's uniffi-bindgen step). Passing `components:` to
+      # the action attaches clippy/rustfmt to *its* toolchain, not the one
+      # rust-toolchain.toml actually selects, so `cargo clippy`/`cargo fmt`
+      # below still see a component-less toolchain. Attach components to
+      # the right toolchain directly instead.
+      - run: rustup component add clippy rustfmt
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo fmt --check
