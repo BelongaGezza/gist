@@ -12,6 +12,13 @@ allow = [
     # uniffi (ADR-001's mandated FFI layer) and by scraper (ADR-005 web
     # readability extraction). Accepted per architect decision 2026-09-10.
     "MPL-2.0",
+    # Permissive *data* license (Linux Foundation), not a code license — no
+    # share-alike, no field-of-use restriction, comparable in spirit to the
+    # permissive licenses above. Covers only webpki-roots' bundled Mozilla
+    # root-CA-certificate dataset, required transitively via ureq's `tls`
+    # feature (gist-web's HTTPS client). Accepted 2026-09-19 as part of the
+    # N7 dependency-upgrade pass (rustls-webpki RUSTSEC fixes).
+    "CDLA-Permissive-2.0",
 ]
 # Anything not in `allow` above is rejected by default — this is what keeps
 # GPL-2.0/GPL-3.0/AGPL-3.0/LGPL-2.0/LGPL-3.0 out (cargo-deny >=0.14 removed
