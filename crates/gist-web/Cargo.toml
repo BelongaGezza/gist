@@ -6,7 +6,11 @@ publish = false
 license = "MIT"
 
 [dependencies]
-ureq      = { version = "2", default-features = false, features = ["rustls"] }
+# ureq 2.10 renamed the "rustls" feature to "tls" (same backend: dep:rustls +
+# dep:webpki-roots + dep:rustls-pki-types) -- see N7's fix commit. Pinning
+# ">=2.10" (not just "2") since 2.8/2.9 still use the old rustls 0.21 line
+# with the RUSTSEC-2026-0098/-0099/-0104-affected rustls-webpki 0.101.7.
+ureq      = { version = ">=2.10, <3", default-features = false, features = ["tls"] }
 scraper   = "0.27"
 url       = "2"
 gist-model = { path = "../gist-model" }

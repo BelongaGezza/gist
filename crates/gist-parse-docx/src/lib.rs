@@ -133,7 +133,7 @@ fn parse_styles(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let tag_bytes = e.name();
-                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag = tag_bytes.as_ref();
                 let tag_local = tag.rsplit(':').next().unwrap_or(tag);
 
                 match tag_local {
@@ -150,34 +150,28 @@ fn parse_styles(
                         }
                         // Extract styleId attribute
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "styleId" {
-                                current_style_id = Some(
-                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
-                                );
+                                current_style_id = Some(attr.value.to_string());
                             }
                         }
                     }
                     "name" => {
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
-                                current_name = Some(
-                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
-                                );
+                                current_name = Some(attr.value.to_string());
                             }
                         }
                     }
                     "basedOn" => {
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
-                                current_based_on = Some(
-                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
-                                );
+                                current_based_on = Some(attr.value.to_string());
                             }
                         }
                     }
@@ -186,7 +180,7 @@ fn parse_styles(
             }
             Ok(Event::End(ref e)) => {
                 let tag_bytes = e.name();
-                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag = tag_bytes.as_ref();
                 let tag_local = tag.rsplit(':').next().unwrap_or(tag);
                 if tag_local == "style" {
                     if let Some(id) = current_style_id.take() {
@@ -295,37 +289,31 @@ fn parse_numbering(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let tag_bytes = e.name();
-                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag = tag_bytes.as_ref();
                 let tag_local = tag.rsplit(':').next().unwrap_or(tag);
 
                 match tag_local {
                     "num" => {
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             if k.ends_with("numId") {
-                                current_num_id = Some(
-                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
-                                );
+                                current_num_id = Some(attr.value.to_string());
                             }
                         }
                     }
                     "lvl" => {
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             if k.ends_with("ilvl") {
-                                current_level = std::str::from_utf8(&attr.value)
-                                    .unwrap_or("0")
-                                    .parse()
-                                    .unwrap_or(0);
+                                current_level = attr.value.parse().unwrap_or(0);
                             }
                         }
                     }
                     "numFmt" => {
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             if k.ends_with("val") {
-                                let fmt_val =
-                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string();
+                                let fmt_val = attr.value.to_string();
                                 if let Some(id) = &current_num_id {
                                     let is_ordered = fmt_val != "bullet";
                                     result.insert(
@@ -396,7 +384,7 @@ fn parse_document(
                 }
 
                 let tag_bytes = e.name();
-                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag = tag_bytes.as_ref();
                 let tag_local = tag.rsplit(':').next().unwrap_or(tag);
 
                 match tag_local {
@@ -437,28 +425,25 @@ fn parse_document(
             Ok(Event::Empty(ref e)) => {
                 // Self-closing elements: do not affect nesting_depth
                 let tag_bytes = e.name();
-                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag = tag_bytes.as_ref();
                 let tag_local = tag.rsplit(':').next().unwrap_or(tag);
 
                 match tag_local {
                     "pStyle" => {
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
-                                current_style_id = Some(
-                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
-                                );
+                                current_style_id = Some(attr.value.to_string());
                             }
                         }
                     }
                     "numId" => {
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
-                                let val =
-                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string();
+                                let val = attr.value.to_string();
                                 if val != "0" {
                                     current_num_id = Some(val);
                                 }
@@ -467,13 +452,10 @@ fn parse_document(
                     }
                     "ilvl" => {
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
-                                current_num_level = std::str::from_utf8(&attr.value)
-                                    .unwrap_or("0")
-                                    .parse()
-                                    .unwrap_or(0);
+                                current_num_level = attr.value.parse().unwrap_or(0);
                             }
                         }
                     }
@@ -489,12 +471,10 @@ fn parse_document(
                     }
                     "rStyle" => {
                         for attr in e.attributes().flatten() {
-                            let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let k = attr.key.as_ref();
                             let k_local = k.rsplit(':').next().unwrap_or(k);
                             if k_local == "val" {
-                                let val = std::str::from_utf8(&attr.value)
-                                    .unwrap_or("")
-                                    .to_lowercase();
+                                let val = attr.value.to_lowercase();
                                 if val.contains("code") {
                                     run_code = true;
                                 }
@@ -508,7 +488,7 @@ fn parse_document(
                 nesting_depth = nesting_depth.saturating_sub(1);
 
                 let tag_bytes = e.name();
-                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+                let tag = tag_bytes.as_ref();
                 let tag_local = tag.rsplit(':').next().unwrap_or(tag);
 
                 match tag_local {
@@ -555,7 +535,7 @@ fn parse_document(
                     continue;
                 }
 
-                let text = e.unescape().unwrap_or_default();
+                let text = quick_xml::escape::unescape(e).unwrap_or_default();
                 if !text.is_empty() {
                     current_runs.push(gist_model::TextRun {
                         text: text.into_owned(),
