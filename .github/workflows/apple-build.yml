@@ -51,15 +51,20 @@ jobs:
           restore-keys: ${{ runner.os }}-apple-build-
 
       # XcodeGen is not preinstalled on GitHub's macos-latest runner image
-      # (checked against the actions/runner-images manifest). Install a
-      # pinned version via a specific homebrew-core formula commit rather
-      # than a bare `brew install xcodegen`, which would resolve to whatever
-      # is current on the day the job happens to run — same SHA-pinning
-      # rationale this repo already applies to GitHub Actions themselves.
+      # (checked against the actions/runner-images manifest). Previously
+      # installed via a pinned homebrew-core formula commit, but current
+      # Homebrew rejects installing a bare formula file that isn't part of
+      # a registered tap ("Homebrew requires formulae to be in a tap") —
+      # discovered by an actual CI run, not documentation. Install the
+      # project's own pinned release archive instead (its bundled
+      # install.sh copies bin/ + share/ into PREFIX), which sidesteps
+      # Homebrew's tap policy entirely and pins by an immutable release
+      # tag+asset rather than a moving formula.
       - name: Install XcodeGen (pinned 2.46.0)
         run: |
-          curl -fsSL -o /tmp/xcodegen.rb https://raw.githubusercontent.com/Homebrew/homebrew-core/a33c03507920c04766b647fdd33fdb9701c07566/Formula/x/xcodegen.rb
-          brew install /tmp/xcodegen.rb
+          curl -fsSL -o /tmp/xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          unzip -q /tmp/xcodegen.zip -d /tmp
+          sudo /tmp/xcodegen/install.sh
 
       # uniffi 0.28+ no longer ships a standalone uniffi-bindgen on
       # crates.io; gist-ffi builds its own via the uniffi-bindgen-bin
