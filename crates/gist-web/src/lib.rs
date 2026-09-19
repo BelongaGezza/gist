@@ -49,7 +49,7 @@ pub enum ParseError {
 pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseError> {
     // 1. Parse URL.
     let parsed =
-        Url::parse(raw_url).map_err(|e| ParseError::InvalidInput(format!("URL parse: {}", e)))?;
+        Url::parse(raw_url).map_err(|e| ParseError::InvalidInput(format!("URL parse: {e}")))?;
 
     // 2. Enforce HTTPS.
     if parsed.scheme() != "https" {
@@ -87,7 +87,7 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
                 // Redirect limit exceeded — ureq surfaces it as a 3xx status error.
                 ParseError::ResourceLimitExceeded
             }
-            ureq::Error::Status(code, _) => ParseError::InvalidInput(format!("HTTP {}", code)),
+            ureq::Error::Status(code, _) => ParseError::InvalidInput(format!("HTTP {code}")),
             _ => ParseError::InvalidInput(e.to_string()),
         })?;
 
@@ -141,8 +141,7 @@ fn safe_resolve(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
 
     if filtered.is_empty() {
         return Err(std::io::Error::other(format!(
-            "'{}' did not resolve to a permitted public address",
-            netloc
+            "'{netloc}' did not resolve to a permitted public address"
         )));
     }
     Ok(filtered)
