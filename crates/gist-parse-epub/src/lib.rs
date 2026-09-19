@@ -323,9 +323,7 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
                         attempted: depth,
                     });
                 }
-                let name = std::str::from_utf8(e.name().as_ref())
-                    .unwrap_or("")
-                    .to_lowercase();
+                let name = e.name().as_ref().to_lowercase();
                 // Strip namespace prefix if present (e.g. "xhtml:p" → "p")
                 let name = name.rsplit(':').next().unwrap_or(&name).to_string();
 
@@ -363,9 +361,7 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
             }
             Ok(Event::End(ref e)) => {
                 depth = depth.saturating_sub(1);
-                let name = std::str::from_utf8(e.name().as_ref())
-                    .unwrap_or("")
-                    .to_lowercase();
+                let name = e.name().as_ref().to_lowercase();
                 let name = name.rsplit(':').next().unwrap_or(&name).to_string();
 
                 match name.as_str() {
@@ -412,7 +408,7 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
                 }
             }
             Ok(Event::Text(ref e)) => {
-                let text = e.unescape().unwrap_or_default();
+                let text = quick_xml::escape::unescape(e).unwrap_or_default();
                 let text = text.trim();
                 if text.is_empty() {
                     buf.clear();
