@@ -985,8 +985,8 @@ impl Store {
             Some((path, content_encrypted)) => {
                 let token_path = path
                     .strip_suffix(".json")
-                    .map(|s| format!("{}.tokens.json", s))
-                    .unwrap_or_else(|| format!("{}.tokens.json", path));
+                    .map(|s| format!("{s}.tokens.json"))
+                    .unwrap_or_else(|| format!("{path}.tokens.json"));
 
                 if std::path::Path::new(&token_path).exists() {
                     let bytes = self.read_maybe_encrypted(&token_path, content_encrypted)?;
