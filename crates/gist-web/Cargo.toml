@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 ureq      = { version = "2", default-features = false, features = ["rustls"] }
-scraper   = "0.20"
+scraper   = "0.27"
 url       = "2"
 gist-model = { path = "../gist-model" }
 thiserror = { workspace = true }
