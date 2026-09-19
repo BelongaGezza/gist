@@ -1,2 +1,2 @@
 [toolchain]
-channel = "1.87.0"   # update via PR when bumping; see dev plan §0.3
+channel = "1.88.0"   # update via PR when bumping; see dev plan §0.3

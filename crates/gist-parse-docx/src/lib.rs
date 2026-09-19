@@ -664,7 +664,7 @@ fn read_zip_entry_limited(
 ) -> Result<String, ParseError> {
     let mut entry = archive.by_name(path).map_err(|e| match e {
         zip::result::ZipError::FileNotFound => {
-            ParseError::Malformed(format!("required entry not found: {}", path))
+            ParseError::Malformed(format!("required entry not found: {path}"))
         }
         other => ParseError::Zip(other),
     })?;
@@ -688,7 +688,7 @@ fn read_zip_entry_limited(
     }
 
     String::from_utf8(buf)
-        .map_err(|_| ParseError::Malformed(format!("non-UTF-8 content in {}", path)))
+        .map_err(|_| ParseError::Malformed(format!("non-UTF-8 content in {path}")))
 }
 
 fn read_zip_entry_limited_opt(
