@@ -113,7 +113,38 @@ struct LibraryView: View {
         return LibraryFiltering.sorted(base, by: sortOrder)
     }
 
+    // `body` used to be one ~270-line expression chaining the content Group,
+    // ~9 view modifiers, an 8-item `.toolbar { }`, and 5 `.alert(...)`
+    // calls -- a single expression large enough that the Swift type checker
+    // timed out on it on GitHub's CI runner (though not, apparently, in
+    // every local Xcode run -- see CLAUDE.md's N6 note). Splitting it into
+    // `mainContent` + an extracted `@ToolbarContentBuilder` property +
+    // two grouped alert-applying methods gives the type checker several
+    // much smaller expressions to solve independently instead of one huge
+    // one. No behavioral change -- same modifiers, same bindings, same
+    // closures, just fewer of them chained in a single expression.
     var body: some View {
+        withItemActionAlerts(
+            withImportAlerts(
+                mainContent
+                    .toolbar { toolbarContent }
+                    .sheet(item: $tagEditorTarget) { target in
+                        TagEditorView(itemId: target.id, itemTitle: target.title)
+                    }
+                    .fileImporter(
+                        isPresented: $showImporter,
+                        allowedContentTypes: importableContentTypes,
+                        allowsMultipleSelection: false
+                    ) { result in
+                        if case .success(let urls) = result, let url = urls.first {
+                            Task { await core.importFile(url: url) }
+                        }
+                    }
+            )
+        )
+    }
+
+    private var mainContent: some View {
         Group {
             if displayedItems.isEmpty && !core.isLoading {
                 if tagFilter != nil {
@@ -171,217 +202,226 @@ struct LibraryView: View {
                 tagFilteredItems = []
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button { showImporter = true } label: {
-                    Label("Import File", systemImage: "plus")
-                }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button { showImporter = true } label: {
+                Label("Import File", systemImage: "plus")
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button { showUrlImportAlert = true } label: {
-                    Label("Import URL", systemImage: "link")
-                }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { showUrlImportAlert = true } label: {
+                Label("Import URL", systemImage: "link")
             }
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Picker("Sort By", selection: $sortOrder) {
-                        ForEach(LibrarySortOrder.allCases) { order in
-                            Text(order.label).tag(order)
-                        }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Picker("Sort By", selection: $sortOrder) {
+                    ForEach(LibrarySortOrder.allCases) { order in
+                        Text(order.label).tag(order)
                     }
+                }
+            } label: {
+                Label("Sort", systemImage: "arrow.up.arrow.down")
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Button {
+                    tagFilter = nil
                 } label: {
-                    Label("Sort", systemImage: "arrow.up.arrow.down")
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button {
-                        tagFilter = nil
-                    } label: {
-                        if tagFilter == nil {
-                            Label("All Tags", systemImage: "checkmark")
-                        } else {
-                            Text("All Tags")
-                        }
+                    if tagFilter == nil {
+                        Label("All Tags", systemImage: "checkmark")
+                    } else {
+                        Text("All Tags")
                     }
-                    if !core.allTags.isEmpty {
-                        Divider()
-                        ForEach(core.allTags, id: \.self) { tag in
-                            Button {
-                                tagFilter = tag
-                                searchText = ""
-                            } label: {
-                                if tagFilter == tag {
-                                    Label(tag, systemImage: "checkmark")
-                                } else {
-                                    Text(tag)
-                                }
+                }
+                if !core.allTags.isEmpty {
+                    Divider()
+                    ForEach(core.allTags, id: \.self) { tag in
+                        Button {
+                            tagFilter = tag
+                            searchText = ""
+                        } label: {
+                            if tagFilter == tag {
+                                Label(tag, systemImage: "checkmark")
+                            } else {
+                                Text(tag)
                             }
                         }
                     }
-                } label: {
-                    Label(
-                        "Filter",
-                        systemImage: tagFilter == nil
-                            ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill"
-                    )
                 }
+            } label: {
+                Label(
+                    "Filter",
+                    systemImage: tagFilter == nil
+                        ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill"
+                )
             }
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    ForEach(core.collections) { collection in
-                        Button(collection.name) {
-                            let ids = selection
-                            Task {
-                                for id in ids {
-                                    await core.addItemToCollection(itemId: id, collectionId: collection.id)
-                                }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                ForEach(core.collections) { collection in
+                    Button(collection.name) {
+                        let ids = selection
+                        Task {
+                            for id in ids {
+                                await core.addItemToCollection(itemId: id, collectionId: collection.id)
                             }
                         }
                     }
-                    if !core.collections.isEmpty {
-                        Divider()
-                    }
-                    Button("New Collection…") { showNewCollectionAlert = true }
-                } label: {
-                    Label("Add to Collection", systemImage: "folder.badge.plus")
                 }
-                .disabled(selection.isEmpty)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button { showEncryptConfirm = true } label: {
-                    Label("Encrypt", systemImage: "lock")
+                if !core.collections.isEmpty {
+                    Divider()
                 }
-                .disabled(selection.isEmpty)
+                Button("New Collection…") { showNewCollectionAlert = true }
+            } label: {
+                Label("Add to Collection", systemImage: "folder.badge.plus")
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button(role: .destructive) { showRemoveConfirm = true } label: {
-                    Label("Remove", systemImage: "trash")
+            .disabled(selection.isEmpty)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { showEncryptConfirm = true } label: {
+                Label("Encrypt", systemImage: "lock")
+            }
+            .disabled(selection.isEmpty)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button(role: .destructive) { showRemoveConfirm = true } label: {
+                Label("Remove", systemImage: "trash")
+            }
+            .disabled(selection.isEmpty)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                if let id = selection.first {
+                    navigationPath.append(.rsvp(itemId: id))
                 }
-                .disabled(selection.isEmpty)
+            } label: {
+                Label("Open", systemImage: "book")
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    if let id = selection.first {
-                        navigationPath.append(.rsvp(itemId: id))
-                    }
-                } label: {
-                    Label("Open", systemImage: "book")
+            .disabled(selection.count != 1)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                if let id = selection.first, let item = displayedItems.first(where: { $0.id == id }) {
+                    tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)
                 }
-                .disabled(selection.count != 1)
+            } label: {
+                Label("Tags", systemImage: "tag")
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    if let id = selection.first, let item = displayedItems.first(where: { $0.id == id }) {
-                        tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)
-                    }
-                } label: {
-                    Label("Tags", systemImage: "tag")
+            .disabled(selection.count != 1)
+        }
+    }
+
+    /// Alerts related to bringing new content into the library: DRM
+    /// rejection, a generic error surface, URL-paste import, and creating a
+    /// new collection. Grouped separately from `withItemActionAlerts` purely
+    /// to keep each modifier-chain expression small for the type checker --
+    /// there's no functional relationship between the two groupings beyond
+    /// "both are alerts this view presents."
+    @ViewBuilder
+    private func withImportAlerts<Content: View>(_ content: Content) -> some View {
+        content
+            .alert(
+                "DRM-Protected Document",
+                isPresented: Binding(
+                    get: { core.drmProtectedFile != nil },
+                    set: { if !$0 { core.drmProtectedFile = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { core.drmProtectedFile = nil }
+            } message: {
+                Text(
+                    "\(core.drmProtectedFile?.lastPathComponent ?? "This file") is protected by DRM and can't be imported. GIST never attempts to circumvent copy protection."
+                )
+            }
+            .alert(
+                "Error",
+                isPresented: Binding(
+                    get: { core.error != nil },
+                    set: { if !$0 { core.error = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { core.error = nil }
+            } message: {
+                Text(core.error ?? "")
+            }
+            .alert("Paste URL to Import", isPresented: $showUrlImportAlert) {
+                TextField("https://example.com/article", text: $urlToImport)
+                Button("Cancel", role: .cancel) { urlToImport = "" }
+                Button("Import") {
+                    let urlString = urlToImport
+                    urlToImport = ""
+                    Task { await core.importUrl(urlString: urlString) }
                 }
-                .disabled(selection.count != 1)
+            } message: {
+                Text("GIST fetches the page, extracts the readable content, and adds it to your library.")
             }
-        }
-        .sheet(item: $tagEditorTarget) { target in
-            TagEditorView(itemId: target.id, itemTitle: target.title)
-        }
-        .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: importableContentTypes,
-            allowsMultipleSelection: false
-        ) { result in
-            if case .success(let urls) = result, let url = urls.first {
-                Task { await core.importFile(url: url) }
+            .alert("New Collection", isPresented: $showNewCollectionAlert) {
+                TextField("Collection name", text: $newCollectionName)
+                Button("Cancel", role: .cancel) { newCollectionName = "" }
+                Button("Create") {
+                    let name = newCollectionName
+                    newCollectionName = ""
+                    Task { await core.createCollection(name: name) }
+                }
             }
-        }
-        .alert(
-            "DRM-Protected Document",
-            isPresented: Binding(
-                get: { core.drmProtectedFile != nil },
-                set: { if !$0 { core.drmProtectedFile = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) { core.drmProtectedFile = nil }
-        } message: {
-            Text(
-                "\(core.drmProtectedFile?.lastPathComponent ?? "This file") is protected by DRM and can't be imported. GIST never attempts to circumvent copy protection."
-            )
-        }
-        .alert(
-            "Error",
-            isPresented: Binding(
-                get: { core.error != nil },
-                set: { if !$0 { core.error = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) { core.error = nil }
-        } message: {
-            Text(core.error ?? "")
-        }
-        .alert("Paste URL to Import", isPresented: $showUrlImportAlert) {
-            TextField("https://example.com/article", text: $urlToImport)
-            Button("Cancel", role: .cancel) { urlToImport = "" }
-            Button("Import") {
-                let urlString = urlToImport
-                urlToImport = ""
-                Task { await core.importUrl(urlString: urlString) }
+    }
+
+    /// Alerts for actions taken on the current selection: remove, encrypt,
+    /// and the encrypt result summary. See `withImportAlerts`'s doc comment
+    /// for why these are split into a separate group.
+    @ViewBuilder
+    private func withItemActionAlerts<Content: View>(_ content: Content) -> some View {
+        content
+            .alert(
+                selection.count == 1 ? "Remove 1 item?" : "Remove \(selection.count) items?",
+                isPresented: $showRemoveConfirm
+            ) {
+                Button("Cancel", role: .cancel) {}
+                Button("Remove from Library") {
+                    let ids = Array(selection)
+                    selection.removeAll()
+                    Task { await core.removeItems(ids: ids, deleteSourceFiles: false) }
+                }
+                Button("Also Delete Original File", role: .destructive) {
+                    let ids = Array(selection)
+                    selection.removeAll()
+                    Task { await core.removeItems(ids: ids, deleteSourceFiles: true) }
+                }
+            } message: {
+                Text(
+                    "\"Remove from Library\" only removes GIST's record and its sandboxed copy — your original file, wherever it lives, is never touched. \"Also Delete Original File\" additionally deletes GIST's own imported copy (see ADR-006); it never deletes the original either."
+                )
             }
-        } message: {
-            Text("GIST fetches the page, extracts the readable content, and adds it to your library.")
-        }
-        .alert("New Collection", isPresented: $showNewCollectionAlert) {
-            TextField("Collection name", text: $newCollectionName)
-            Button("Cancel", role: .cancel) { newCollectionName = "" }
-            Button("Create") {
-                let name = newCollectionName
-                newCollectionName = ""
-                Task { await core.createCollection(name: name) }
+            .alert(
+                selection.count == 1 ? "Encrypt 1 item?" : "Encrypt \(selection.count) items?",
+                isPresented: $showEncryptConfirm
+            ) {
+                Button("Cancel", role: .cancel) {}
+                Button("Encrypt") {
+                    let ids = Array(selection)
+                    Task { encryptSummary = await core.encryptItems(ids: ids) }
+                }
+            } message: {
+                Text(
+                    "Encrypts the selected item's content at rest (ADR-011/014). It stays fully readable afterward — RSVP and Flow View both continue to work — this only protects the file on disk. Only GIST's internal document data is affected, never your original file."
+                )
             }
-        }
-        .alert(
-            selection.count == 1 ? "Remove 1 item?" : "Remove \(selection.count) items?",
-            isPresented: $showRemoveConfirm
-        ) {
-            Button("Cancel", role: .cancel) {}
-            Button("Remove from Library") {
-                let ids = Array(selection)
-                selection.removeAll()
-                Task { await core.removeItems(ids: ids, deleteSourceFiles: false) }
+            .alert(
+                "Encryption Result",
+                isPresented: Binding(
+                    get: { encryptSummary != nil },
+                    set: { if !$0 { encryptSummary = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { encryptSummary = nil }
+            } message: {
+                Text(encryptSummary?.message ?? "")
             }
-            Button("Also Delete Original File", role: .destructive) {
-                let ids = Array(selection)
-                selection.removeAll()
-                Task { await core.removeItems(ids: ids, deleteSourceFiles: true) }
-            }
-        } message: {
-            Text(
-                "\"Remove from Library\" only removes GIST's record and its sandboxed copy — your original file, wherever it lives, is never touched. \"Also Delete Original File\" additionally deletes GIST's own imported copy (see ADR-006); it never deletes the original either."
-            )
-        }
-        .alert(
-            selection.count == 1 ? "Encrypt 1 item?" : "Encrypt \(selection.count) items?",
-            isPresented: $showEncryptConfirm
-        ) {
-            Button("Cancel", role: .cancel) {}
-            Button("Encrypt") {
-                let ids = Array(selection)
-                Task { encryptSummary = await core.encryptItems(ids: ids) }
-            }
-        } message: {
-            Text(
-                "Encrypts the selected item's content at rest (ADR-011/014). It stays fully readable afterward — RSVP and Flow View both continue to work — this only protects the file on disk. Only GIST's internal document data is affected, never your original file."
-            )
-        }
-        .alert(
-            "Encryption Result",
-            isPresented: Binding(
-                get: { encryptSummary != nil },
-                set: { if !$0 { encryptSummary = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) { encryptSummary = nil }
-        } message: {
-            Text(encryptSummary?.message ?? "")
-        }
     }
 
     private var emptyState: some View {
