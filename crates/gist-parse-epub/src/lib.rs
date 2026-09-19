@@ -173,7 +173,7 @@ fn parse_opf(
                     let resolved = if opf_dir.is_empty() {
                         href.clone()
                     } else {
-                        format!("{}/{}", opf_dir, href)
+                        format!("{opf_dir}/{href}")
                     };
                     spine_items.push(SpineItem {
                         _id: idref.to_string(),
@@ -220,7 +220,7 @@ fn parse_spine(
             &mut total_expanded,
         )?;
 
-        let section_id = format!("s{}", si);
+        let section_id = format!("s{si}");
         let blocks = xhtml_to_blocks(&content, limits.max_nesting_depth)?;
 
         sections.push(Section {
@@ -254,7 +254,7 @@ fn read_capped(
         *accumulated += n;
         if *accumulated > max_bytes {
             return Err(ParseError::ResourceLimitExceeded {
-                limit: format!("max_expanded_bytes={}", max_bytes),
+                limit: format!("max_expanded_bytes={max_bytes}"),
                 attempted: *accumulated,
             });
         }
@@ -272,7 +272,7 @@ fn read_zip_entry_limited(
 ) -> Result<String, ParseError> {
     let entry = archive
         .by_name(path)
-        .map_err(|_| ParseError::Malformed(format!("spine item not found in archive: {}", path)))?;
+        .map_err(|_| ParseError::Malformed(format!("spine item not found in archive: {path}")))?;
     let buf = read_capped(entry, max_expanded_bytes, accumulated)?;
     String::from_utf8(buf).map_err(|_| ParseError::Malformed("non-UTF-8 XHTML".into()))
 }
@@ -319,7 +319,7 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
                 depth += 1;
                 if depth > max_depth {
                     return Err(ParseError::ResourceLimitExceeded {
-                        limit: format!("max_nesting_depth={}", max_depth),
+                        limit: format!("max_nesting_depth={max_depth}"),
                         attempted: depth,
                     });
                 }
