@@ -13,7 +13,14 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
-      - uses: EmbarkStudios/cargo-deny-action@3f4a782664881cf5725d0ffd23969fcce89fd868  # v1.6.3
+      # v2.1.1 bundles cargo-deny 0.20.2 in its own Docker image (independent
+      # of this job's host rustc) — the first version able to parse RUSTSEC's
+      # CVSS 4.0 advisory entries, which v1.6.3's bundled 0.18.3 could not
+      # (see CLAUDE.md's security register / docs/security-review-v2.md).
+      # `check advisories` now genuinely runs instead of erroring out before
+      # it can — and finds real, previously-invisible findings; see the
+      # commit that bumps this for the follow-up register entry.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - run: cargo audit
