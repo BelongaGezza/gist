@@ -14,5 +14,6 @@ out="${1:-$root/apps/windows/spikes/bindings/Generated}"
 cd "$root"
 cargo build -p gist-ffi
 mkdir -p "$out"
-uniffi-bindgen-cs --library target/debug/gist_ffi.dll --out-dir "$out"
+# --no-format: do not run csharpier from PATH (docs/security-review-windows-bindgen.md F3)
+uniffi-bindgen-cs --no-format --library target/debug/gist_ffi.dll --out-dir "$out"
 echo "Bindings written to $out (pinned generator rev $BINDGEN_REV)"
