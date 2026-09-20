@@ -13,4 +13,20 @@
     <Using Include="Xunit" />
     <ProjectReference Include="../GIST.Core/GIST.Core.csproj" />
   </ItemGroup>
+  <!-- Corpus fixtures copied from the top-level fixtures/ directory (mirrors apps/apple/Tests/Fixtures).
+       Looked up at runtime relative to AppContext.BaseDirectory, never by a relative path out of the
+       test's working directory. -->
+  <ItemGroup>
+    <None Include="Fixtures/**" CopyToOutputDirectory="PreserveNewest" LinkBase="Fixtures" />
+  </ItemGroup>
+  <!-- The uniffi bindings P/Invoke `gist_ffi` by bare name, so the DLL must sit next to the test
+       assembly (AppContext.BaseDirectory is the first probe location). GIST.Core stages it under
+       runtimes/win-<arch>/native/, which only the host's package-asset probing would consult, so it
+       is copied to the output root here as well. Staged by tools/build-core-windows.sh (until then:
+       `cargo build -p gist-ffi` then copy target/debug/gist_ffi.dll into apps/windows/native/x64/). -->
+  <ItemGroup>
+    <Content Include="$(MSBuildThisFileDirectory)../native/x64/gist_ffi.dll" Link="gist_ffi.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             Condition="Exists('$(MSBuildThisFileDirectory)../native/x64/gist_ffi.dll')" />
+  </ItemGroup>
 </Project>
