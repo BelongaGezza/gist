@@ -18,6 +18,19 @@ updates:
       - "dependencies"
       - "rust"
 
+  # fuzz/ is its own Cargo workspace with its own tracked Cargo.lock, which the
+  # "/" entry above does not index. Without this, the fuzz lockfile silently
+  # goes stale and accumulates advisories (quick-xml, rustls-webpki, time).
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+      - "fuzz"
+
   # Companion to F3's SHA-pinning policy (every `uses:` line pinned to a full
   # commit SHA) — Dependabot opens a PR to bump the pin (with the version
   # comment) when a new release lands, so pinning doesn't silently calcify.
