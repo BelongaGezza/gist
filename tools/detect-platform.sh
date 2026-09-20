@@ -12,6 +12,9 @@ case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*) os=windows ;;
   *) os=unknown ;;
 esac
+# Test seam: GIST_FAKE_OS=macos|linux|windows overrides detection so other
+# branches can be exercised. Inert when unset; never set it in real sessions.
+[ -n "${GIST_FAKE_OS:-}" ] && os="$GIST_FAKE_OS"
 arch="$(uname -m 2>/dev/null || echo unknown)"
 host="$(hostname 2>/dev/null || echo unknown)"
 root="${CLAUDE_PROJECT_DIR:-.}"
@@ -52,6 +55,13 @@ fi
 if [ "$os" = macos ] && [ -f "$root/PENDING_APPLE_CHANGES.md" ] \
    && grep -q '^## Pending Apple Change' "$root/PENDING_APPLE_CHANGES.md"; then
   echo "[GIST ENV] ACTION: PENDING_APPLE_CHANGES.md has unapplied entries - review before new work."
+fi
+if [ "$os" = macos ]; then
+  echo "[GIST ENV] macOS: Windows-only C#/XAML under apps/windows can be edited as text but cannot be built or tested here; log what needs verifying in PENDING_WINDOWS_CHANGES.md."
+else
+  if [ -f "$root/PENDING_WINDOWS_CHANGES.md" ] && grep -q "^## Pending Windows Change" "$root/PENDING_WINDOWS_CHANGES.md"; then
+    echo "[GIST ENV] ACTION: PENDING_WINDOWS_CHANGES.md has unapplied entries - review before new work."
+  fi
 fi
 [ -f "$root/PLATFORM_VERIFICATION.md" ] && echo "[GIST ENV] See PLATFORM_VERIFICATION.md for per-platform verification status; update it when you verify or change something."
 exit 0
