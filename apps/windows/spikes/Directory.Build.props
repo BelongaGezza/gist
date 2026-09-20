@@ -1,0 +1,3 @@
+<Project>
+  <!-- Spikes are throwaway (W0) and predate the shared build policy; do not inherit it. Deleted once promoted into GIST.Core / GIST.App. -->
+</Project>
