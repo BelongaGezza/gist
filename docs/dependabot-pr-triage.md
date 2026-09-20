@@ -1,54 +1,61 @@
 # Dependabot PR triage
 
-**Purpose:** 11 Dependabot PRs are open as of 2026-09-19, none yet reviewed or merged. This file tracks them so triage can happen in a dedicated pass instead of being reconstructed from scratch. Not urgent — none of these are the RUSTSEC-driving PRs (those were `scraper` #6, already merged, and the direct fixes in PR #17).
+**Updated 2026-09-20** against `main` @ `07af835` (Rust pinned at 1.88.0). Supersedes the 2026-09-19 version of this file. 18 Dependabot PRs are open. Nothing here is required for any currently-green gate.
 
-**Before touching any of these:** `main` has moved substantially since these PRs were opened (2026-09-18) — the Rust toolchain bumped to 1.88.0, `quick-xml`/`ureq`/`scraper` were upgraded, and `.github/workflows/core-quality.yml`'s `cargo-deny-action` was bumped to v2.1.1. Every one of these PRs' existing CI results predates all of that and is stale. **Rebase (`@dependabot rebase` as a PR comment) before trusting any check result**, the same way PRs #6/#12 were handled earlier.
+Evidence: `gh pr checks`, the PR diffs, upstream release notes, crates.io metadata (`rust_version`), and a grep of how this repo actually uses each crate.
 
-**How to use this file:** work top to bottom, lowest-risk first. For each: rebase, wait for CI, review the actual diff (not just the version bump — check for a linked changelog/release notes), merge or hold. Check the box and note anything that came up (a needed code change, a reason to hold) right under it.
+## Freshness of CI results
 
-## Low risk — patch/trivial bumps, merge after rebase + green CI
+PRs based on `0e9eb93` or `a46a2e8` (#2, #5, #8, #9, #10, #12, #18-#24) ran against a `main` that already has the current toolchain, Windows CI job and cargo-deny fix, so their results are trustworthy. PRs based on `59a5f21`, `129c079` or `ab14ee9` (#1, #3, #4, #7, #11) are **stale**: #3/#4/#11's `test`/`quality` failures are pre-fix breakage (old toolchain pin, cargo-deny CVSS-4.0 parse error), not real. They need `@dependabot rebase` before any verdict is trusted.
 
-- [ ] **#1 `roxmltree` 0.20.0 → 0.21.1** — minor bump within 0.x. Used by `gist-parse-epub` (`container.xml`/OPF parsing). Check for API changes in the 0.21 changelog before assuming safe.
-- [ ] **#3 `uuid` 1.26.0 → 1.26.1** — patch bump. Low risk.
-- [ ] **#5 `uniffi` 0.32.0 → 0.32.1** — patch bump, but `uniffi` is ADR-001's mandated FFI layer underpinning `gist-ffi` and the Swift bindings. After merging, regenerate bindings (`./tools/gen-bindings.sh`) and confirm `apple-build` still passes on real CI — don't assume a patch bump is inert here given how much of today's `apple-build` work was "should be fine" turning out not to be.
-- [ ] **#12 `encoding_rs` 0.8.35 → 0.8.41** — patch-level bump within 0.8.x. This is the PR that originally needed rustc 1.88 (now satisfied by the merged toolchain bump) — should just work now. Already independently reconfirmed green on `test`/`parser-corpus` once, but re-verify after rebase since `main` has moved further since.
-- [ ] **#9 `actions/checkout` 4.2.2 → 7.0.1** — GitHub Action major-version jumps, but `checkout`'s core behavior is stable across majors (mostly Node.js runtime bumps). Low functional risk. Verify the new SHA resolves (same class of bug as `N6`) before merging.
-- [ ] **#11 `actions/upload-artifact` 4.6.0 → 7.0.1** — same category as #9, and only used in `fuzz.yml`/`parser-corpus.yml` (nightly/manual workflows, not on the PR-blocking critical path). Low risk, low urgency.
+## Verdict table
 
-## Medium risk — check for breaking API changes before merging
-
-- [ ] **#2 `aes-gcm` 0.10.3 → 0.11.1** — minor bump, but this is the encryption crate behind ADR-011/013/014 (at-rest encryption/integrity). Security-sensitive: run the full `gist-store` encryption round-trip test suite after rebasing, not just a green CI glance. Check the 0.11 changelog for any semantic changes to nonce handling or key sizing before merging.
-- [ ] **#4 `chardetng` 0.1.17 → 1.0.0** — a 0.x → 1.0 jump (semantically a major bump). Used for charset detection during text/DOCX import. 1.0 releases sometimes reflect real API stabilization changes, not just a version-number formality — check its changelog/migration notes, don't assume it's a no-op because "it's just hitting 1.0."
-- [ ] **#7 `infer` 0.15.0 → 0.22.0** — a large jump across many 0.x minor versions (each technically allowed to break, per semver's pre-1.0 rules). Used for file-type detection during import. Check for API changes across that range, not just the diff between adjacent versions.
-- [ ] **#8 `directories` 5.0.1 → 6.0.0** — major version bump. Used for platform storage-directory resolution, which `gist-store`/`gist-core`'s copy-on-import (ADR-006) and IR storage (ADR-007) paths depend on being correct. Review the 6.0 changelog for any path-resolution behavior changes before merging — a silent behavior change here could misdirect where user data gets written/read.
-
-## High risk — needs real review time, don't rush
-
-- [ ] **#10 `zip` 2.4.2 → 8.6.0** — a 6-major-version jump in the exact crate (`gist-parse-epub`/`gist-parse-docx`) that today's `N6`/`N7` work already touched twice (scoping to `deflate`-only features, then the `quick-xml`/`ureq` RUSTSEC fixes in the same files). Given how much breaking-API surface even `quick-xml`'s single major jump had, expect real work here: read the `zip` changelog across all 6 majors, check whether the `default-features = false, features = ["deflate"]` scoping from `N6`'s fix still applies the same way, rebuild, and re-run every fixture-parsing test — not just a CI glance. Budget real time for this one; don't merge it opportunistically alongside a "just rebase and merge" pass through the others.
-
-## Open security alerts (added 2026-09-20)
-
-GitHub reported **4 open Dependabot vulnerabilities on `main` (1 high, 1 moderate, 2 low)** when `b74726f` was pushed. `gh` was not authenticated on the Windows machine, so the alert list itself could not be read (https://github.com/BelongaGezza/gist/security/dependabot is the authoritative list; confirm the mapping below against it).
-
-`cargo audit` (RustSec DB, 1251 advisories) run locally on both lockfiles: **root `Cargo.lock` is clean; `fuzz/Cargo.lock` has 6 findings.** PR #17's fixes only touched the root lockfile, and the fuzz workspace has its own stale lockfile (`quick-xml` 0.36.2, `rustls-webpki` 0.101.7, `time` 0.3.45, `fxhash` 0.2.1). Fuzz targets are dev tooling and are not shipped, but they still parse untrusted input in nightly CI.
-
-| Crate (fuzz lock) | Advisory | Severity | Fix |
+| PR | Change | Verdict | Reason |
 |---|---|---|---|
-| `quick-xml` 0.36.2 | RUSTSEC-2026-0194 quadratic attribute check | 7.5 high | >= 0.41.0 |
-| `quick-xml` 0.36.2 | RUSTSEC-2026-0195 unbounded namespace allocation | 7.5 high | >= 0.41.0 |
-| `rustls-webpki` 0.101.7 | RUSTSEC-2026-0098 URI name constraints | n/a | >= 0.103.12 |
-| `rustls-webpki` 0.101.7 | RUSTSEC-2026-0099 wildcard name constraints | n/a | >= 0.103.12 |
-| `rustls-webpki` 0.101.7 | RUSTSEC-2026-0104 CRL parse panic | n/a | >= 0.103.13 |
-| `time` 0.3.45 | RUSTSEC-2026-0009 stack exhaustion DoS | 6.8 medium | >= 0.3.47 |
-| `fxhash` 0.2.1 | RUSTSEC-2025-0057 unmaintained (warning) | n/a | drop via `scraper` bump |
+| #10 | `zip` 2.4.2 -> 8.6.0 | **MERGE-NOW** (merge on its own) | Both crates' Cargo.toml become `version = "8", default-features = false, features = ["deflate"]`; `deflate` still exists in 8.6.0, MSRV 1.88. All checks green incl. Windows and parser-corpus, so the entry-count (`max_zip_entries`), expanded-bytes bomb and DRM tests pass unchanged. Lockfile diff drops `arbitrary`/`crossbeam-utils`/`derive_arbitrary`, adds `typed-path`; no bzip2/lzma pulled in. No code change needed. |
+| #24 | `sha2` 0.10.9 -> 0.11.0 | **MERGE-NOW** | Only use is `Sha256::new()/update/finalize` then `digest.iter().map(\|b\| format!("{b:02x}"))` in `Store::store_original_copy`; compiles unchanged on 0.11 (green on ubuntu/macos/windows). SHA-256 is a fixed standard function, so content-addressed filenames in `originals/` are identical; no on-disk migration. MSRV 1.85. |
+| #5 | `uniffi` 0.32.0 -> 0.32.1 | **MERGE-NOW, with follow-up check** | Patch release; upstream notes list only a Kotlin checksum fix. Green on all OS. The Swift generator is built from `gist-ffi`'s own `uniffi/cli` feature, so it moves in lockstep. The pinned C# generator (`uniffi-bindgen-cs` rev `0fc022a`) is built `--locked` against `uniffi_bindgen 0.32.0` and its workspace requires `"0.32.0"` (caret), so semver-compatible with a 0.32.1 runtime, but **no CI job exercises C# generation** and I did not build the generator. After merge run `tools/gen-bindings-cs.sh` plus the .NET bindings spike and confirm `Generated/gist_ffi.cs` is unchanged; regenerate Swift with `tools/gen-bindings.sh`. `apple-build` did not run on this PR (lockfile only), so confirm it on the first main push. |
+| #2 | `aes-gcm` 0.10.3 -> 0.11.1 | **HOLD (MSRV) / NEEDS-CODE-CHANGE** | Fails on every OS: `aes@0.9.3 requires rustc 1.89` (pin is 1.88.0). Beyond MSRV it is an API migration: `aead 0.6`/`cipher 0.5`/`hybrid-array` replace `generic-array`, so `Key::<Aes256Gcm>::from_slice`, `Nonce::from_slice` and `aead::OsRng` (`gist-store/src/lib.rs` lines 1-2, 107-135) must be rewritten and `generate_nonce` needs a rand_core 0.10 RNG. The construction (AES-256-GCM, 96-bit nonce, 16-byte tag) is standard so the on-disk format should not change, but that must be proved with a test decrypting a blob written by 0.10 before merging. Do it as a deliberate branch with a 1.89 toolchain bump (ADR-011/014 note). Not urgent: no advisory against 0.10.3. |
+| #8 | `directories` 5.0.1 -> 6.0.0 | **MERGE-NOW** (better: remove the dep) | `gist-store` declares `directories = "5"` but no `.rs` file in the workspace references it (the storage dir is passed in by the caller). Green on all OS. Cheapest right fix is deleting the unused dep in a separate PR and closing this. |
+| #1 | `roxmltree` 0.20.0 -> 0.21.1 | **MERGE after rebase** | Green but stale base (no Windows job). Changes: attribute accessors match local names, optional `entity_resolver`, fixes for a quadratic text merge and an entity panic (good for untrusted epub). Our call sites are only `Document::parse` (3). Rebase, confirm epub fixture tests, merge. |
+| #12 | `encoding_rs` 0.8.35 -> 0.8.41 | **MERGE-NOW** | Green incl. Windows. MSRV 1.88 equals our pin. Declared in `gist-parse-txt` but not referenced in any `.rs` file. |
+| #3 | `uuid` 1.26.0 -> 1.26.1 | **MERGE after rebase** | Patch. Red result is stale. MSRV 1.85. |
+| #4 | `chardetng` 0.1.17 -> 1.0.0 | **MERGE after rebase** (or remove dep) | 1.0 API changes (enums instead of bools, `guess_assess` removed) are irrelevant: no source file uses `chardetng` (declared only). Red result is stale. |
+| #7 | `infer` 0.15.0 -> 0.22.0 | **MERGE after rebase** | Only call: `infer::get(&bytes).map(\|t\| t.mime_type())` in `gist-core` (line ~389), a stable API. test/corpus green, `quality` red and base stale. Release notes include hardening (non-recursive LZ4/zstd frame detection). MSRV 1.74. Re-run the corpus after rebase to confirm mime gating is unchanged. |
+| #9 | `actions/checkout` 4.2.2 -> 7.0.1 | **MERGE-NOW** | Pinned SHA `3d3c42e5...` verified to resolve to tag v7.0.1; `apple-build` and all tests green with it. The v6.1/v7 breaking change concerns `pull_request_target` unsafe checkouts; no workflow uses `pull_request_target`. Node runtime bump only. |
+| #18 | `actions/cache` 4.2.0 -> 6.1.0 | **MERGE-NOW** | SHA `55cc8345...` verified as v6.1.0; all checks green incl. `apple-build`. Notes: read-only cache-token handling. |
+| #11 | `actions/upload-artifact` 4.6.0 -> 7.0.1 | **MERGE after rebase** | SHA `043fb46d...` verified as v7.0.1. Red result is stale. Used only on failure/nightly in `fuzz.yml`/`parser-corpus.yml`. v6+ runs on Node 24 (runner >= 2.327.1; hosted runners fine). |
+| #19 | `zip` 8.6.0 in /fuzz | **BATCH with #10** | Duplicate of #10 (same two crate manifests plus `fuzz/Cargo.lock`); conflicts once #10 merges. |
+| #20 | `infer` 0.22 in /fuzz | **BATCH with #7** | Same duplicate pattern. |
+| #21 | `chardetng` 1.0.0 in /fuzz | **BATCH with #4** | Same. |
+| #22 | `encoding_rs` 0.8.41 in /fuzz | **BATCH with #12** | Same. |
+| #23 | `sha2` 0.11.0 in /fuzz | **BATCH with #24** | Same. |
 
-**Confirmed 2026-09-20 via `gh api` (all 4 open alerts are in `fuzz/Cargo.lock`):** #8 rustls-webpki high (GHSA-82j2-j2ch-gfr8, RUSTSEC-2026-0104), #7 and #6 rustls-webpki low (RUSTSEC-2026-0098/0099), #5 time medium (RUSTSEC-2026-0009). The two `quick-xml` advisories and the `fxhash` warning were not GitHub alerts, but were fixed by the same refresh.
+After a root PR merges, comment `@dependabot rebase` on its fuzz twin; it should shrink to a `fuzz/Cargo.lock` update, which is worth keeping so the fuzz lock does not drift.
 
-- [x] Refresh `fuzz/Cargo.lock` so none of the above remain (done 2026-09-20; cargo audit clean, cargo check passes)
-- [x] `.github/dependabot.yml` now covers `/fuzz`; `core-quality.yml` also runs `cargo audit --file fuzz/Cargo.lock`
-- [ ] Re-read the real GitHub alert list after the push and confirm all 4 are closed
+## Recommended merge order
+
+1. #9, #18 (Actions; SHA pins verified), then #11 after rebase.
+2. #12, #3, #1 (rebase where stale).
+3. #24 sha2, then #23.
+4. #10 zip alone, then #19.
+5. #5 uniffi, then run both bindings generators (see decisions).
+6. #7, #4, #8 each after rebase (or remove the unused deps instead).
+7. Remaining fuzz twins #20-#22 as their root PRs land.
+8. #2 aes-gcm last, separately, after a toolchain decision.
+
+## Decisions needed from a human
+
+- **aes-gcm 0.11 / Rust 1.89:** bump the toolchain and migrate the AEAD code (with a 0.10-written-blob decrypt test), or add an `ignore` for `aes-gcm` in `dependabot.yml` until then. Recommend the latter until a deliberate crypto-migration pass.
+- **uniffi 0.32.1 vs the C# generator:** no CI covers it; someone with the Windows toolchain should run `tools/gen-bindings-cs.sh` post-merge. Consider adding it to CI.
+- **Unused dependencies:** `directories`, `chardetng`, `encoding_rs` are declared but unused in source. Remove them (and close #4, #8, #12 and their fuzz twins) or keep; removal reduces supply-chain surface.
+- **zip 8:** a six-major jump merged on the strength of the existing bomb/entry-count tests (pass on all three OSes, no code change needed). Confirm you are comfortable.
+
+## Open security alerts (carried over)
+
+All four open Dependabot alerts were in `fuzz/Cargo.lock` and were fixed by the fuzz lock refresh; `.github/dependabot.yml` now covers `/fuzz` and `core-quality.yml` runs `cargo audit --file fuzz/Cargo.lock`. Remaining item: re-read the real GitHub alert list and confirm all 4 are closed.
 
 ## Notes
 
-- None of these block anything currently green — `core-test`, `core-quality`, `parser-corpus`, and `apple-build` are all fully passing on `main` without any of these merged.
-- If a PR turns out to need real code changes (likely for `zip`, possibly `chardetng`/`infer`/`directories`), do that work on the PR's own branch (or a fresh branch based on it) rather than force-pushing over Dependabot's commit, so Dependabot can still track and re-open it on the next release if needed.
+- If a PR needs real code changes, do them on a branch based on the PR's branch rather than force-pushing over Dependabot's commit.
+- This triage was documentation-only; no PR was merged, closed or rebased.
