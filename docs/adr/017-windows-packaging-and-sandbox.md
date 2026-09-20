@@ -29,3 +29,8 @@ Verified facts (run, not recalled):
 - The MSIX path needs a hand-maintained `Package.appxmanifest` and image assets (the spike built without them, but a store/sideload package needs real ones per `docs/iconspecification.md`), and a test certificate plus Developer Mode (or a trusted cert) on any machine that installs it.
 - Loading `gist_ffi.dll` from an MSIX-packaged process, ARM64, and self-contained/clean-machine runtime behaviour remain unverified (see ADR-015's not-yet-verified list); they are W1/W6 exit items.
 - Requiring elevation for Developer Mode is a one-time per-machine step to document in `SETUP_NOTES.md` (team lead).
+
+## Addendum 2026-09-21 (W1 review)
+- **Redistribution licence:** `Microsoft.WindowsAppSDK` is under proprietary Microsoft Software License Terms, not an OSI licence (`docs/THIRD-PARTY.md`). Its redistribution terms, especially for the self-contained option, must be reviewed before the MSIX release.
+- **ARM64 is in scope for v1.0** (maintainer decision, review Q7). Decide before W6 whether to ship per-architecture MSIX packages or a bundle; the app currently defaults to `win-x64`, so an ARM64 build path (`-r win-arm64`) and an ARM64 runtime gate are required.
+- Runtime choice (framework-dependent, needs Windows App Runtime 2.x, vs. self-contained via `-p:GistSelfContained=true`) remains open and unverified on a clean machine.
