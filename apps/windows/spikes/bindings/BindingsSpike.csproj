@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- W0 spike (docs/windows-development-plan.md, ADR-015): proves the uniffi C# bindings
+       can drive gist-ffi. Throwaway; the real solution is GIST.Core in W1.
+       Generated/gist_ffi.cs is produced by tools/gen-bindings-cs.sh and is gitignored. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RepoRoot>$(MSBuildThisFileDirectory)../../../../</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="$(RepoRoot)target/debug/gist_ffi.dll" Link="gist_ffi.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
