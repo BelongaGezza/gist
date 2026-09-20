@@ -9,7 +9,7 @@ license = "MIT"
 gist-model  = { path = "../gist-model" }   # for ParseLimits
 zip         = { version = "8", default-features = false, features = ["deflate"] }
 quick-xml   = "0.42"   # >=0.41 needed for RUSTSEC-2026-0194/-0195, see N7
-roxmltree   = "0.20"
+roxmltree   = "0.21"
 url         = "2"
 percent-encoding = "2"
 thiserror   = { workspace = true }
