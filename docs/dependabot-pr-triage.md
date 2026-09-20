@@ -26,6 +26,28 @@
 
 - [ ] **#10 `zip` 2.4.2 → 8.6.0** — a 6-major-version jump in the exact crate (`gist-parse-epub`/`gist-parse-docx`) that today's `N6`/`N7` work already touched twice (scoping to `deflate`-only features, then the `quick-xml`/`ureq` RUSTSEC fixes in the same files). Given how much breaking-API surface even `quick-xml`'s single major jump had, expect real work here: read the `zip` changelog across all 6 majors, check whether the `default-features = false, features = ["deflate"]` scoping from `N6`'s fix still applies the same way, rebuild, and re-run every fixture-parsing test — not just a CI glance. Budget real time for this one; don't merge it opportunistically alongside a "just rebase and merge" pass through the others.
 
+## Open security alerts (added 2026-09-20)
+
+GitHub reported **4 open Dependabot vulnerabilities on `main` (1 high, 1 moderate, 2 low)** when `b74726f` was pushed. `gh` was not authenticated on the Windows machine, so the alert list itself could not be read (https://github.com/BelongaGezza/gist/security/dependabot is the authoritative list; confirm the mapping below against it).
+
+`cargo audit` (RustSec DB, 1251 advisories) run locally on both lockfiles: **root `Cargo.lock` is clean; `fuzz/Cargo.lock` has 6 findings.** PR #17's fixes only touched the root lockfile, and the fuzz workspace has its own stale lockfile (`quick-xml` 0.36.2, `rustls-webpki` 0.101.7, `time` 0.3.45, `fxhash` 0.2.1). Fuzz targets are dev tooling and are not shipped, but they still parse untrusted input in nightly CI.
+
+| Crate (fuzz lock) | Advisory | Severity | Fix |
+|---|---|---|---|
+| `quick-xml` 0.36.2 | RUSTSEC-2026-0194 quadratic attribute check | 7.5 high | >= 0.41.0 |
+| `quick-xml` 0.36.2 | RUSTSEC-2026-0195 unbounded namespace allocation | 7.5 high | >= 0.41.0 |
+| `rustls-webpki` 0.101.7 | RUSTSEC-2026-0098 URI name constraints | n/a | >= 0.103.12 |
+| `rustls-webpki` 0.101.7 | RUSTSEC-2026-0099 wildcard name constraints | n/a | >= 0.103.12 |
+| `rustls-webpki` 0.101.7 | RUSTSEC-2026-0104 CRL parse panic | n/a | >= 0.103.13 |
+| `time` 0.3.45 | RUSTSEC-2026-0009 stack exhaustion DoS | 6.8 medium | >= 0.3.47 |
+| `fxhash` 0.2.1 | RUSTSEC-2025-0057 unmaintained (warning) | n/a | drop via `scraper` bump |
+
+The 6 vs 4 count and the severity split do not match GitHub's report exactly (different advisory database and grouping), so this table is a best local reconstruction, not the alert list.
+
+- [ ] Refresh `fuzz/Cargo.lock` so none of the above remain
+- [ ] Check `.github/dependabot.yml` covers `/fuzz` (likely why its lockfile went stale unnoticed)
+- [ ] Re-read the real GitHub alert list after the push and confirm all 4 are closed
+
 ## Notes
 
 - None of these block anything currently green — `core-test`, `core-quality`, `parser-corpus`, and `apple-build` are all fully passing on `main` without any of these merged.
