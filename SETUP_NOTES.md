@@ -41,3 +41,11 @@ One-time setup steps per machine. Mark done by appending `[DONE — machine, dat
 ## Windows — ARM64 (required for v1.0, review Q7)
 - [TODO — needs UAC] Visual Studio Installer > Modify > Individual components > "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools (Latest)" (and the ARM64 Windows SDK libs if offered). Rust target `aarch64-pc-windows-msvc` is already installed on ProArt13.
 - Verify: `cargo build -p gist-ffi --release --target aarch64-pc-windows-msvc` succeeds, then `tools/check-dll-imports.sh` on the ARM64 DLL. Runtime testing needs ARM64 hardware or a `windows-11-arm` runner.
+
+## Windows developer inner loop (W1)
+From the repo root in Git Bash (Windows 11, MSVC Rust toolchain per `rust-toolchain.toml`):
+1. Build + stage the core: `tools/build-core-windows.sh x64 debug` (or `release`; release also runs `tools/check-dll-imports.sh`). Output: `apps/windows/native/x64/gist_ffi.dll` (gitignored). `arm64` needs the VS component "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools (Latest)"; the script says so and fails if it is missing.
+2. One-time: install the pinned generator (`cargo +stable-x86_64-pc-windows-msvc install --locked --git https://github.com/BelongaGezza/uniffi-bindgen-cs --rev 0fc022aa1d73fb1dda91a778b63f2824d7dca58b uniffi-bindgen-cs`, add its `bin` to PATH). The script refuses any other rev.
+3. Generate bindings: `tools/gen-bindings-cs.sh` -> `apps/windows/GIST.Core/Generated/` (gitignored; builds the x64 debug DLL if none is staged; `GIST_FFI_DLL=<path>` overrides the DLL). It fails if any `uniffi.toml` / `[bindings.csharp]` sets `exclude` (review F5; guard test: `tools/test-gen-bindings-cs-guard.sh`).
+4. Optional reproducibility check: `tools/check-bindings-reproducible.sh`.
+5. `cd apps/windows && dotnet build && dotnet test`.

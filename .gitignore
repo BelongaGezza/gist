@@ -38,3 +38,6 @@ artifacts/
 apps/windows/**/Generated/
 apps/windows/**/bin/
 apps/windows/**/obj/
+# Staged native core (tools/build-core-windows.sh); .gitkeep stays tracked
+apps/windows/native/**/*.dll
+!apps/windows/native/**/.gitkeep
