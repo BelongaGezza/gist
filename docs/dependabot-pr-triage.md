@@ -42,7 +42,7 @@ GitHub reported **4 open Dependabot vulnerabilities on `main` (1 high, 1 moderat
 | `time` 0.3.45 | RUSTSEC-2026-0009 stack exhaustion DoS | 6.8 medium | >= 0.3.47 |
 | `fxhash` 0.2.1 | RUSTSEC-2025-0057 unmaintained (warning) | n/a | drop via `scraper` bump |
 
-The 6 vs 4 count and the severity split do not match GitHub's report exactly (different advisory database and grouping), so this table is a best local reconstruction, not the alert list.
+**Confirmed 2026-09-20 via `gh api` (all 4 open alerts are in `fuzz/Cargo.lock`):** #8 rustls-webpki high (GHSA-82j2-j2ch-gfr8, RUSTSEC-2026-0104), #7 and #6 rustls-webpki low (RUSTSEC-2026-0098/0099), #5 time medium (RUSTSEC-2026-0009). The two `quick-xml` advisories and the `fxhash` warning were not GitHub alerts, but were fixed by the same refresh.
 
 - [x] Refresh `fuzz/Cargo.lock` so none of the above remain (done 2026-09-20; cargo audit clean, cargo check passes)
 - [x] `.github/dependabot.yml` now covers `/fuzz`; `core-quality.yml` also runs `cargo audit --file fuzz/Cargo.lock`
