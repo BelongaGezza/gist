@@ -31,4 +31,5 @@ DerivedData/
 artifacts/
 
 # Claude Code agent worktrees (transient, per-session)
-.claude/
+.claude/worktrees/
+.claude/settings.local.json
