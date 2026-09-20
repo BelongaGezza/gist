@@ -24,3 +24,6 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - run: cargo audit
+      # fuzz/ is a separate workspace with its own tracked lockfile; the
+      # bare `cargo audit` above only sees the root Cargo.lock.
+      - run: cargo audit --file fuzz/Cargo.lock
