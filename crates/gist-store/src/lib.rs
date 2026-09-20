@@ -1,5 +1,5 @@
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, Generate, KeyInit, Nonce};
+use aes_gcm::Aes256Gcm;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -107,8 +107,8 @@ impl KeyProvider for FakeKeyProvider {
 /// A fresh random nonce is generated per call (`Aes256Gcm::generate_nonce`),
 /// never reused, which AES-GCM requires for its security guarantees to hold.
 fn encrypt_at_rest(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let cipher = Aes256Gcm::new(key.into());
+    let nonce = Nonce::<Aes256Gcm>::generate();
     // Only fails on absurd (>~64 GiB) plaintext sizes for this cipher, which
     // none of this app's document/original-file content can ever reach —
     // ParseLimits caps every import path well below that.
@@ -131,8 +131,9 @@ fn decrypt_at_rest(key: &[u8; 32], data: &[u8], context: &str) -> Result<Vec<u8>
         return Err(StoreError::DecryptionFailed(context.to_string()));
     }
     let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = Aes256Gcm::new(key.into());
+    let nonce = <&Nonce<Aes256Gcm>>::try_from(nonce_bytes)
+        .map_err(|_| StoreError::DecryptionFailed(context.to_string()))?;
     cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| StoreError::DecryptionFailed(context.to_string()))
@@ -1462,6 +1463,25 @@ fn now_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    /// Compatibility pin (review: aes-gcm 0.10 -> 0.11). This blob was produced by
+    /// `encrypt_at_rest` under aes-gcm 0.10.3 with key 0x42*32. It must keep
+    /// decrypting under any later aes-gcm, or every already-encrypted user item
+    /// becomes unreadable. Never regenerate it to make this test pass.
+    #[test]
+    fn decrypts_blob_written_by_aes_gcm_0_10() {
+        let key = [0x42u8; 32];
+        let hex = "bfda90f08972ffeab5a5186262b59df3edf7e461de4677e163e8a3fa56b72844574611cae08c2ee95c2f8e7c5f5723cb6a4b887fa1ecefb9e8374e75";
+        let blob: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let plain = super::decrypt_at_rest(&key, &blob, "kat").expect("0.10 blob must decrypt");
+        assert_eq!(plain, b"GIST at-rest known-answer vector");
+        let mut bad = blob.clone();
+        *bad.last_mut().unwrap() ^= 1;
+        assert!(super::decrypt_at_rest(&key, &bad, "kat").is_err());
+    }
+
     use super::*;
     use gist_model::{Document, Metadata};
 
