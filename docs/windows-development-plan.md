@@ -10,11 +10,11 @@
 | Question | Result |
 |---|---|
 | Does the Rust core build on Windows? | **Yes.** `cargo build -p gist-ffi` succeeded (14.6 s incremental, pinned Rust 1.88.0, MSVC toolchain), producing `target/debug/gist_ffi.dll` (11 MB) and `gist_ffi.lib`. `gist-ffi` already declares `crate-type = ["staticlib","cdylib"]`, so a DLL comes for free. `rusqlite` is `bundled`, so no system SQLite is needed. |
-| Rust tests/clippy on Windows? | Not yet run this session; W0 runs `cargo test --workspace` and records it in `PLATFORM_VERIFICATION.md`. |
-| .NET SDK? | **Not installed.** Only the .NET 8.0.31 *runtimes* (`Microsoft.NETCore.App`, `Microsoft.WindowsDesktop.App`). `dotnet --list-sdks` is empty. |
+| Rust tests/clippy on Windows? | **Yes (W0, 2026-09-20).** `cargo test --workspace` 117 passed / 0 failed; `clippy -D warnings` and `fmt --check` clean. |
+| .NET SDK? | **Installed in W0:** .NET SDK 10.0.401 (via winget). Was runtimes only. |
 | Visual Studio? | Build Tools 2022 (17.14) and **Visual Studio Community 2026**. Whether the "WinUI application development" workload is installed is **unverified**. |
 | MSBuild / cl on PATH | No (normal for VS installs; use a Developer shell or `vswhere`). Note: `link.exe` on the Git Bash PATH is Git's coreutils `link`, not MSVC's — cargo finds MSVC via `vswhere` so builds work, but ad-hoc `link` calls from Git Bash will hit the wrong one. |
-| C# bindings generator for uniffi? | **Unverified and the #1 risk (R1).** The Apple side uses uniffi 0.32 (ADR-001). The only maintained C# generator I know of (NordSecurity's `uniffi-bindgen-cs`) tracks specific uniffi versions, and whether it supports 0.32 has not been checked. W0 exists to answer this before anything else is built. |
+| C# bindings generator for uniffi? | **Resolved in W0 (see ADR-015).** No release supports uniffi 0.32 (latest, v0.11.0, is 0.31), but upstream PR #176 does; pinned commit `0fc022a` built and drove the real core through a 20-check .NET spike, all passing. Condition: unreviewed unmerged third-party generator, pinned by SHA. |
 
 Everything below that depends on an unverified row is marked as a gate.
 
@@ -61,7 +61,7 @@ Platform guards: `apps/windows/**` is Windows-only by definition and needs no pe
 | **015 Windows FFI binding** | Prefer **uniffi C# bindings** over the *same* proc-macro `gist-ffi` used by Apple, contingent on the W0 spike. Fallback, in order: (a) pin/upgrade a compatible `uniffi-bindgen-cs` + matching uniffi, if the Apple side can move in lockstep; (b) hand-written `extern "C"` shim (what ADR-001 originally reserved for Windows) — the surface is ~25 exported methods and constructors with mostly `String`/`Vec`/record returns, so ~2–3 extra weeks; (c) C++/WinRT wrapper (rejected: adds a third language). | One binding source keeps Apple and Windows behaviourally identical and avoids a second API to keep in sync. The reason ADR-001 avoided a dylib ("avoid a second signed dylib") was macOS-specific; on Windows the DLL simply ships in the MSIX. |
 | **016 Windows key custody** | 32-byte data key generated once, protected with **DPAPI `ProtectedData` (scope CurrentUser)**, stored under `LocalState`. Implements the `KeyProvider` callback (`get_or_create_key() -> Vec<u8>`, exactly 32 bytes). Race-safe create (file created with `CreateNew`, loser re-reads) — the same race Apple fixed with `SecItemAdd`. | DPAPI ≈ Keychain for this threat model (protects against other users and offline disk access, not against malware running as the user). Credential Locker rejected (size/roaming semantics, no advantage). TPM-backed keys (CNG/Platform Crypto Provider) are a possible v1.1 hardening. |
 | **017 Packaging & sandbox** | **MSIX**, full-trust WinUI 3 desktop app with package identity. Capabilities: `internetClient` only (URL import), no `broadFileSystemAccess`; all user files via `FileOpenPicker`. This is the Windows analogue of ADR-012's macOS sandbox. Storage in package `LocalState` (`gist.sqlite3` + `storage/`, same layout as Apple's Application Support/GIST). | Package identity gives clean install/uninstall, per-app data isolation, and required APIs (`ApplicationData`). Unpackaged dev builds are supported for the inner loop. Distribution channel (Microsoft Store vs signed sideload MSIX) decided at W6. |
-| **018 UI stack** | WinUI 3 / Windows App SDK (latest stable at W0), **C# / .NET 8 LTS** (matches installed runtimes; revisit .NET 10 LTS at W0 if the SDK install makes it the better default), MVVM via CommunityToolkit.Mvvm, no other UI framework. | Matches product spec §8. Rust is the only non-C# code. |
+| **018 UI stack** | WinUI 3 / Windows App SDK (latest stable at W0), **C# / .NET 8 LTS** (decision 2026-09-20: **.NET 10 LTS**, SDK 10.0.401 installed; .NET 8 support ends Nov 2026. The spike runs on net10.0), MVVM via CommunityToolkit.Mvvm, no other UI framework. | Matches product spec §8. Rust is the only non-C# code. |
 
 Also recorded at W0: the R11 exception. The v2 plan says "do not begin Windows until the iOS shell has validated the core API is platform-neutral." Windows is being started deliberately; the mitigation is that W0/W1 *are* the neutrality test — anything the C# client needs that the FFI can't express cleanly is fixed in Rust once, for both platforms (§4.3).
 
@@ -115,7 +115,7 @@ If the FFI addition is judged too large, the fallback is a faithful C# port with
 
 Effort figures are rough single-engineer estimates assuming ~4-6 productive days/week and WinUI familiarity; they are planning aids, not commitments. Total ≈ **12–17 weeks** to feature parity with the current Apple app, plus buffer if the ADR-015 fallback is needed.
 
-### W0 — Foundations and the binding spike (1–1.5 weeks) — **GATE**
+### W0 — Foundations and the binding spike (1–1.5 weeks) — **GATE** — status 2026-09-20: spike and Rust checks DONE; ADR-016..018, `PENDING_WINDOWS_CHANGES.md`, WinUI workload check still open
 Goals: answer R1, make the environment reproducible.
 - Install .NET SDK + VS workload (§4.1); run `cargo test --workspace`, `clippy -D warnings`, `fmt --check` on Windows; record results.
 - **Spike:** generate C# bindings for the current `gist-ffi`; a console app that calls `new`, `health`, `import_file` on a fixture, `list_items`, `search_items`, and implements the `KeyProvider` callback; confirm records, `Vec<String>`, `Option`, errors→exceptions and callback interfaces all work against uniffi 0.32.
@@ -179,7 +179,7 @@ Goals: answer R1, make the environment reproducible.
 
 | ID | Risk | L | I | Mitigation |
 |---|---|---|---|---|
-| **WR1** | No C# generator compatible with uniffi 0.32 | M | H | W0 spike first; ADR-015 fallbacks; cost bounded (~2–3 wk for hand C ABI) |
+| **WR1** | No release of a C# generator supports uniffi 0.32 (only unmerged PR #176) | H (realised) | M | Pinned by SHA, built `--locked`; review generated code and the pinned diff before W1 closes; re-pin to an official release when one exists; hand C ABI fallback (~2–3 wk). See ADR-015 |
 | WR2 | WinUI 3 virtualised `RichTextBlock` list performance/selection quirks in the flow view | M | M | Prototype the block list in W5 day 1 with the ≥100k-word fixture; fall back to per-section paragraphs or `WebView2` only if measured unacceptable (would need an ADR) |
 | WR3 | Pacing copies diverge (Rust/Swift/C#) | H | M | §4.3: single Rust source, or golden-file test |
 | WR4 | Team lacks WinUI/MSIX experience | M | M | W1 is deliberately thin; keep XAML simple, standard Fluent controls only |
@@ -197,7 +197,7 @@ Goals: answer R1, make the environment reproducible.
 | Distribution channel: Microsoft Store vs signed sideload MSIX (affects signing cost and update story) | W6 |
 | "Rounded" font option on Windows (drop vs Trebuchet MS mapping) | W5 |
 | Windows OCR engine (`Windows.Media.Ocr` vs Tesseract) — spec Q4/Q8 | W5 (design note), implement M3 |
-| .NET 8 vs .NET 10 LTS as the target framework | W0 |
+| ~~.NET 8 vs .NET 10 LTS~~ resolved: .NET 10 | done W0 |
 | ARM64 as a v1.0 requirement or fast-follow | W1 |
 | Adopt the pacing FFI (§4.3) on Apple in the same release | Next macOS session |
 

@@ -33,3 +33,8 @@ artifacts/
 # Claude Code agent worktrees (transient, per-session)
 .claude/worktrees/
 .claude/settings.local.json
+
+# Windows shell — uniffi-generated C# and .NET build output
+apps/windows/**/Generated/
+apps/windows/**/bin/
+apps/windows/**/obj/
