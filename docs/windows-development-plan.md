@@ -12,7 +12,7 @@
 | Does the Rust core build on Windows? | **Yes.** `cargo build -p gist-ffi` succeeded (14.6 s incremental, pinned Rust 1.88.0, MSVC toolchain), producing `target/debug/gist_ffi.dll` (11 MB) and `gist_ffi.lib`. `gist-ffi` already declares `crate-type = ["staticlib","cdylib"]`, so a DLL comes for free. `rusqlite` is `bundled`, so no system SQLite is needed. |
 | Rust tests/clippy on Windows? | **Yes (W0, 2026-09-20).** `cargo test --workspace` 117 passed / 0 failed; `clippy -D warnings` and `fmt --check` clean. |
 | .NET SDK? | **Installed in W0:** .NET SDK 10.0.401 (via winget). Was runtimes only. |
-| Visual Studio? | Build Tools 2022 (17.14) and **Visual Studio Community 2026**. Whether the "WinUI application development" workload is installed is **unverified**. |
+| Visual Studio? | Community 2026 (18.10) with **only the Native Desktop C++ workload**, Build Tools 2022 (17.14). **No WinUI/Windows App SDK/MSIX/.NET-desktop workload — and none is needed to build**: a hand-made WinUI 3 project builds and runs with plain `dotnet build` (W0, `apps/windows/spikes/winui-hello`, Windows App SDK **2.5.1** from NuGet, net10.0-windows10.0.19041.0). The workload is only for the XAML designer / Hot Reload / debugger. Windows SDK 10.0.26100.0; Windows App Runtime 2.5.1 installed machine-wide. Developer Mode is off. |
 | MSBuild / cl on PATH | No (normal for VS installs; use a Developer shell or `vswhere`). Note: `link.exe` on the Git Bash PATH is Git's coreutils `link`, not MSVC's — cargo finds MSVC via `vswhere` so builds work, but ad-hoc `link` calls from Git Bash will hit the wrong one. |
 | C# bindings generator for uniffi? | **Resolved in W0 (see ADR-015).** No release supports uniffi 0.32 (latest, v0.11.0, is 0.31), but upstream PR #176 does; pinned commit `0fc022a` built and drove the real core through a 20-check .NET spike, all passing. Condition: unreviewed unmerged third-party generator, pinned by SHA. |
 
@@ -25,11 +25,11 @@ Everything below that depends on an unverified row is marked as a gate.
 ```
 apps/windows/
 ├── GIST.sln
-├── GIST.Core/              net8.0 (no UI). Generated uniffi bindings, CoreClient, view models,
+├── GIST.Core/              net10.0 (no UI). Generated uniffi bindings, CoreClient, view models,
 │   │                       JSON models, theme logic, persistence stores. Headless-testable.
 │   └── Generated/          gitignored, produced by tools/gen-bindings-cs.sh (mirrors apps/apple/Generated)
 ├── GIST.Core.Tests/        xunit. Real GistCore against a temp dir per test (no mocks) — mirrors GISTTests.swift
-├── GIST.App/               WinUI 3, packaged (MSIX), net8.0-windows10.0.19041.0. Views, XAML, dialogs, navigation
+├── GIST.App/               WinUI 3, packaged (MSIX), net10.0-windows10.0.19041.0, Windows App SDK 2.x. Views, XAML, dialogs, navigation
 ├── GIST.App.UITests/       FlaUI (UI Automation) smoke + click-through tests
 └── native/                 build output staging: gist_ffi.dll (x64, arm64)
 tools/
@@ -71,7 +71,7 @@ Also recorded at W0: the R11 exception. The v2 plan says "do not begin Windows u
 
 ### 4.1 Environment prerequisites (W0, one-time, recorded in `SETUP_NOTES.md`)
 1. Install a **.NET 8 SDK** (currently runtimes only).
-2. Verify/install the VS "WinUI application development" workload (Windows App SDK C# templates + MSIX packaging tools).
+2. (Optional) Add the VS "WinUI application development" workload for the designer/Hot Reload/debugger — not required to build (proved in W0). Enable **Developer Mode** (Settings > System > For developers, needs UAC) to install/run the MSIX locally.
 3. `cargo install` the chosen bindgen (per ADR-015) — note this machine's cargo works, `rustup` pinned 1.88.0 is installed.
 4. Add targets as needed: `rustup target add aarch64-pc-windows-msvc`.
 5. Enable Windows Developer Mode (needed to deploy unsigned/dev MSIX).
@@ -115,7 +115,7 @@ If the FFI addition is judged too large, the fallback is a faithful C# port with
 
 Effort figures are rough single-engineer estimates assuming ~4-6 productive days/week and WinUI familiarity; they are planning aids, not commitments. Total ≈ **12–17 weeks** to feature parity with the current Apple app, plus buffer if the ADR-015 fallback is needed.
 
-### W0 — Foundations and the binding spike (1–1.5 weeks) — **GATE** — status 2026-09-20: spike and Rust checks DONE; ADR-016..018, `PENDING_WINDOWS_CHANGES.md`, WinUI workload check still open
+### W0 — Foundations and the binding spike (1–1.5 weeks) — **GATE** — status 2026-09-20: DONE except the generator security review (in progress) and enabling Developer Mode (needs UAC)
 Goals: answer R1, make the environment reproducible.
 - Install .NET SDK + VS workload (§4.1); run `cargo test --workspace`, `clippy -D warnings`, `fmt --check` on Windows; record results.
 - **Spike:** generate C# bindings for the current `gist-ffi`; a console app that calls `new`, `health`, `import_file` on a fixture, `list_items`, `search_items`, and implements the `KeyProvider` callback; confirm records, `Vec<String>`, `Option`, errors→exceptions and callback interfaces all work against uniffi 0.32.
@@ -125,6 +125,7 @@ Goals: answer R1, make the environment reproducible.
 ### W1 — Skeleton, CoreClient, CI (1.5–2 weeks)
 - Solution structure (§2), `tools/build-core-windows.sh`, `tools/gen-bindings-cs.sh`, `.gitignore` for `Generated/` and build output.
 - `GIST.Core`: `CoreClient` (init with `new_with_read_key` + DPAPI provider, storage paths, `Refresh`, import file/URL, error/DRM surfacing), VMs; ADR-016 `DpapiKeyProvider` + its tests.
+- **From the W0 ADRs (requirements):** (1) `CoreClient` calls `DpapiKeyProvider.GetOrCreateKey()` eagerly in managed code *before* `NewWithReadKey`, because the uniffi callback has no error channel (a throw inside it becomes an opaque `InternalPanic`); a `KeyStoreCorruptException` must show a blocking "encrypted items unrecoverable" state and never generate a new key (ADR-016). (2) Promote `apps/windows/spikes/keyprovider` into `GIST.Core` with its 13 tests. (3) **Pin every NuGet version** (no `10.*`/`17.*` ranges), commit `packages.lock.json`, and add the Dependabot `nuget` entry in the same PR. (4) Decide clean-machine runtime: require Windows App Runtime 2.x or ship self-contained (ADR-017; neither verified). (5) CI: confirm the `windows-latest` image has .NET 10 and a Windows SDK before relying on it.
 - `GIST.App`: window, title bar, Mica, `NavigationView` shell with empty Library page, app icon per iconspecification, packaged-and-unpackaged run profiles.
 - `windows-build.yml` green on real GitHub Actions; Dependabot `nuget` entry.
 - **Exit:** app launches, lists imported items from the real store; CoreClient tests pass locally **and** in CI.
