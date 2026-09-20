@@ -44,8 +44,8 @@ GitHub reported **4 open Dependabot vulnerabilities on `main` (1 high, 1 moderat
 
 The 6 vs 4 count and the severity split do not match GitHub's report exactly (different advisory database and grouping), so this table is a best local reconstruction, not the alert list.
 
-- [ ] Refresh `fuzz/Cargo.lock` so none of the above remain
-- [ ] Check `.github/dependabot.yml` covers `/fuzz` (likely why its lockfile went stale unnoticed)
+- [x] Refresh `fuzz/Cargo.lock` so none of the above remain (done 2026-09-20; cargo audit clean, cargo check passes)
+- [x] `.github/dependabot.yml` now covers `/fuzz`; `core-quality.yml` also runs `cargo audit --file fuzz/Cargo.lock`
 - [ ] Re-read the real GitHub alert list after the push and confirm all 4 are closed
 
 ## Notes
