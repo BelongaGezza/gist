@@ -29,7 +29,7 @@ Security is a first-class architectural concern. This section defines the standi
 
 ### 0.1 FFI Safety Policy
 - Every function exported via `#[uniffi::export]` **must** wrap its body in `std::panic::catch_unwind`. No exception. Panics must map to a `GistError::InternalPanic` variant — never propagate across the C ABI.
-- The FFI crate's `[profile.release]` in `Cargo.toml` **must** set `panic = "abort"` as a belt-and-braces measure.
+- The workspace `[profile.release]` **must keep `panic = "unwind"`** (do NOT set `panic = "abort"`). **Corrected 2026-09-20:** this line used to require `panic = "abort"` "as belt-and-braces", but that defeats `catch_unwind` (a panic would kill the host app instead of returning `InternalPanic`), reproduced in release builds. CI now proves containment in release mode (`cargo run --release -p gist-ffi --features test-panic --example panic_containment`).
 - Rationale: a panic crossing a C ABI boundary is undefined behaviour on all targets. On Apple Silicon it typically produces SIGABRT, but there is no guarantee in release builds, LTO builds, or future iOS targets. `[F1]` ✅ Closed
 
 ### 0.2 Mutex Discipline
@@ -390,7 +390,7 @@ Phase C:          ├──> web
 
 **Implemented:**
 - `catch_unwind` + `ffi_catch!` macro on all `#[uniffi::export]` functions. `[F1]` ✅
-- `[profile.release] panic = "abort"`. `[F1]` ✅
+- `[profile.release] panic = "unwind"` (corrected 2026-09-20; the original `panic = "abort"` disabled `catch_unwind`). `[F1]` ✅
 - `GistError { Core(String), InternalPanic(String) }`.
 - `OcrPageResult` (uniffi Record) + `OcrEngine` (`#[uniffi::export(callback_interface)]`).
 - `CoreOcrAdapter`: bridges FFI `OcrEngine` → `gist_core::OcrEngine` without circular dep.
@@ -516,7 +516,7 @@ All M0 deliverables complete (commit `c5f074e`):
 
 | Task | Finding | Status |
 |---|---|---|
-| `catch_unwind` + `panic = "abort"` on FFI | `[F1]` | ✅ |
+| `catch_unwind` on FFI, release profile keeps `panic = "unwind"` (release-mode CI probe) | `[F1]` | ✅ (corrected 2026-09-20) |
 | Mutex poison-tolerant recovery in `gist-store` | `[F2]` | ✅ |
 | UUIDv7 in `gist-model` | `[F6]` | ✅ |
 | `[advisories]`, `[bans]`, `[sources]` in `deny.toml` | `[F5]` | ✅ |

@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-20 · **Repo state:** `main` @ `0bc737b` · **Reviewer role:** independent software-quality and security consultant
 **Scope:** the Windows work created so far (W0 spikes, ADR-015…018, DPAPI key provider, WinUI hello app, generator pin, hooks/tooling, docs) and the architecture defined for the rest of the Windows development (`docs/windows-ui-spec.md`, `docs/windows-development-plan.md`), including the shared Rust core and CI it depends on.
-**Status of this document:** findings and recommendations only. Nothing in the code was changed by this review.
+**Status of this document:** findings and recommendations. **Update 2026-09-20 (branch `fix/w1-gates`): gate items Q1–Q4 are fixed and verified locally; see the "Resolution of gate items" section at the end.** Q5–Q14 remain open.
 
 ## 1. Executive summary
 
@@ -112,3 +112,14 @@ The fuzz workflow now runs on floating `nightly` (`RUSTUP_TOOLCHAIN: nightly`), 
 **Before W2/W6:** Q10 (path and locked-file tests), Q11 (FlaUI proof, Developer Mode, clean-VM run), Q13–Q14.
 
 **Residual risks accepted for now:** unreviewed third-party generator source (mitigated by pin and review); single-engineer schedule estimates; full-trust MSIX being weaker than the macOS sandbox (stated honestly in ADR-017).
+
+## 6. Resolution of gate items (2026-09-20, branch `fix/w1-gates`)
+
+| Item | Fix | Verification |
+|---|---|---|
+| **Q1** | Release profile now `panic = "unwind"` (with an explanatory comment). New `test-panic` feature, `gist_ffi::test_support::ffi_panic_probe` and `examples/panic_containment.rs` (crate type gains `rlib` so the example can link). CI runs the probe in release mode on every OS. `docs/development-plan-v2.md` (lines 32, 393, 519) and ADR-015 corrected; Apple verification logged in `PENDING_APPLE_CHANGES.md`. | Baseline reproduced the failure (probe dies `0xc0000409` with `panic = "abort"`); after the fix it prints `ok: panic contained as InternalPanic`, exit 0. The full C# spike against the **release** DLL passes 20/20, including bad callback -> `InternalPanic` with the process alive. |
+| **Q2** | `.cargo/config.toml`: `+crt-static` for the two Windows MSVC targets. `tools/check-dll-imports.sh` fails on any `VCRUNTIME140`/`MSVCP140`/`concrt140` import; CI runs it on the Windows leg. | The check fails on the old release DLL (imports `VCRUNTIME140.dll`) and passes on the rebuilt one (no VC++ or UCRT imports; DLL grew 5.06 -> 6.07 MB). Clean-machine load is **not** verified (no clean VM). |
+| **Q3** | `windows-latest` added to the `core-test` matrix. | Local Windows run: see the PR's checks for the first real `windows-latest` result (not proven until it runs on GitHub). |
+| **Q4** | `.github/CODEOWNERS` added. Branch protection is applied after the PR's checks pass (required contexts must exist first). | See the PR description and the repository settings for the applied rules. |
+
+Residual notes: `rlib` was added to `gist-ffi`'s crate types (a tooling-only change; the Apple script consumes only the static library). Static CRT is untested on ARM64 (Q7) and on a clean machine (W6).

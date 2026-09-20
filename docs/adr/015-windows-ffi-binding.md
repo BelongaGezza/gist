@@ -15,7 +15,7 @@ Findings, 2026-09-20:
   - the `KeyProvider` callback interface invoked from Rust, `EncryptItems`, then read-after-encrypt (the ADR-014 requirement) and `ContentEncrypted` in listings
   - 64 concurrent FFI calls from a thread pool, no errors
   - `RemoveItems(deleteSourceFiles: true)` leaves the user's original file in place
-  - a wrong-length key from the callback surfaces as `GistException.InternalPanic` and the process survives (the `ffi_catch!` guarantee holds across the C# boundary)
+  - a wrong-length key from the callback surfaces as `GistException.InternalPanic` and the process survives (the `ffi_catch!` guarantee holds across the C# boundary **in debug builds only; see the amendment below**)
 
 ## Decision
 Use uniffi-generated C# bindings over the unchanged `gist-ffi` crate. No Windows-specific C ABI shim is written. The generator is pinned to the exact commit above and built with `--locked`.
@@ -32,3 +32,6 @@ Use uniffi-generated C# bindings over the unchanged `gist-ffi` crate. No Windows
 `docs/security-review-windows-bindgen.md` reviews the pinned commit's full diff against v0.11.0 (one commit, 22 files) and the generated C#. **Verdict: acceptable for W1 with conditions; nothing malicious or unsafe found.** Limits: no upstream maintainer has reviewed PR #176, and the source of the newly added dependency crates was not audited. `cargo audit` on the generator's lockfile shows one vulnerability that lives only in its test fixtures (slab, RUSTSEC-2025-0047) plus unmaintained-crate warnings in a build-time tool. Independent rebuild from a fresh clone produced byte-identical output once line endings are normalised.
 
 Conditions (each a W1 exit item): keep the pin by full SHA and `--locked`; `tools/gen-bindings-cs.sh` passes `--no-format` (done); never set the generator's `exclude` option and add a CI guard for it; load `gist_ffi.dll` by absolute path or set `DefaultDllImportSearchPaths` (the generated `DllImport("gist_ffi")` is an unqualified name); regenerate in CI and keep the generated file out of git; repeat the review before any re-pin and re-pin to an official release as soon as one exists for uniffi 0.32.
+
+## Amendment 2026-09-20 — panic containment and the release build
+The spike's "bad callback -> `InternalPanic`, process survives" result was first obtained on a **debug** DLL. Re-running the spike against a **release** DLL showed the workspace release profile (`panic = "abort"`) killed the process instead (exit `0xC0000409`), so the statement above was not true of shipped builds (`docs/review-pre-w1-quality-security.md`, Q1). Fixed on `fix/w1-gates`: the release profile now keeps `panic = "unwind"`, CI runs a release-mode `panic_containment` probe on every OS, and the spike passes 20/20 against the release DLL (process survives, `InternalPanic` returned). The same review (Q2) also found the DLL imported the dynamic VC++ runtime; Windows targets now link the CRT statically and CI checks the DLL's imports.
