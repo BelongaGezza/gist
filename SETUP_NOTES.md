@@ -35,7 +35,7 @@ One-time setup steps per machine. Mark done by appending `[DONE — machine, dat
 ## Windows — W0 additions (2026-09-20)
 - Visual Studio's "WinUI application development" / ".NET desktop" workloads are **optional** (designer, Hot Reload, debugger only). A WinUI 3 app builds with plain `dotnet build` using the `Microsoft.WindowsAppSDK` NuGet package (2.5.1). Installed here: only the Native Desktop C++ workload.
 - **Pending, needs elevation:** enable Developer Mode (Settings > System > For developers) to install/run MSIX packages locally. Until then, packaged-app behaviour (LocalState paths, `gist_ffi.dll` load from a package) is unverified.
-- Run the key-custody tests: `cd apps/windows/spikes/keyprovider/DpapiKeyProvider.Tests && dotnet test` (13 tests, real DPAPI).
+- Run the key-custody tests: `cd apps/windows && dotnet test` (real DPAPI, real filesystem, temp dir per test). The spike at `apps/windows/spikes/keyprovider/` was promoted into `GIST.Core/Keys/` in W1 and deleted.
 - Run the WinUI hello spike: `cargo build -p gist-ffi`, `cd apps/windows/spikes/winui-hello && dotnet build -p:Platform=x64`, copy `target/debug/gist_ffi.dll` next to the built exe, run it (unpackaged; needs Windows App Runtime 2.x installed, present here).
 
 ## Windows — ARM64 (required for v1.0, review Q7)
