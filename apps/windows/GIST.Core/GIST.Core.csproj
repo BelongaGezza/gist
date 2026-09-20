@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- UI-free core: generated uniffi bindings, CoreClient, view models, key provider. Headless-testable.
+       Generated/ is produced by tools/gen-bindings-cs.sh (gitignored). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Gist.Core</RootNamespace>
+    <AssemblyName>GIST.Core</AssemblyName>
+    <!-- uniffi-generated code uses unsafe/pointer interop. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Generated code is not ours to lint; our own code stays warnings-as-errors. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+  </ItemGroup>
+  <!-- Native core staged by tools/build-core-windows.sh as native/<x64|arm64>/gist_ffi.dll.
+       Copied next to the assembly so P/Invoke finds it; absent = build still succeeds (managed-only work). -->
+  <ItemGroup>
+    <Content Include="$(MSBuildThisFileDirectory)../native/x64/gist_ffi.dll" Link="runtimes/win-x64/native/gist_ffi.dll"
+             CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(MSBuildThisFileDirectory)../native/x64/gist_ffi.dll')" />
+    <Content Include="$(MSBuildThisFileDirectory)../native/arm64/gist_ffi.dll" Link="runtimes/win-arm64/native/gist_ffi.dll"
+             CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(MSBuildThisFileDirectory)../native/arm64/gist_ffi.dll')" />
+  </ItemGroup>
+</Project>
