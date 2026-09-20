@@ -6,9 +6,9 @@ this file when it contains entries.
 
 **Delete each entry's block after the change is applied and committed.**
 
-<!-- Template — copy to add an entry (heading must start with "## Pending Apple Change"):
+<!-- Template — copy to add an entry (real headings start at column 0 with "## Pending Apple Change"; this example is indented so the detector ignores it):
 
-## Pending Apple Change — [YYYY-MM-DD]
+    ## Pending Apple Change — [YYYY-MM-DD]
 **File:** [path]
 **Change required:** [what]
 **Reason:** [why]
