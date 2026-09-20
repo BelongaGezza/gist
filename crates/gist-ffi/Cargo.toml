@@ -6,7 +6,8 @@ publish = false
 license = "MIT"
 
 [lib]
-crate-type = ["staticlib", "cdylib"]
+# rlib: lets examples/tests link the crate (release-mode panic_containment probe).
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 gist-core = { path = "../gist-core" }
@@ -23,6 +24,14 @@ tracing    = { workspace = true }
 # installed as a standalone binary (uniffi 0.28+ no longer ships one on
 # crates.io). Not enabled for the library/xcframework build.
 uniffi-bindgen-bin = ["uniffi/cli"]
+# Exposes `test_support::ffi_panic_probe`, used only by the `panic_containment`
+# example that CI runs in release mode (see docs/review-pre-w1-quality-security.md Q1).
+# Never enabled for shipped builds.
+test-panic = []
+
+[[example]]
+name = "panic_containment"
+required-features = ["test-panic"]
 
 [[bin]]
 name = "uniffi-bindgen"

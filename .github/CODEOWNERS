@@ -1,0 +1,16 @@
+# Code owners (review Q4). Anything that executes on contributors' machines or
+# in CI, or that defines the security/architecture contract, needs the owner's
+# review. Later matching patterns take precedence.
+*                          @BelongaGezza
+/.claude/                  @BelongaGezza
+/tools/                    @BelongaGezza
+/.github/                  @BelongaGezza
+/.cargo/                   @BelongaGezza
+/deny.toml                 @BelongaGezza
+/Cargo.toml                @BelongaGezza
+/rust-toolchain.toml       @BelongaGezza
+/docs/adr/                 @BelongaGezza
+/apps/apple/               @BelongaGezza
+/apps/windows/             @BelongaGezza
+/PENDING_APPLE_CHANGES.md  @BelongaGezza
+/PENDING_WINDOWS_CHANGES.md @BelongaGezza

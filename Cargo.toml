@@ -24,4 +24,9 @@ sha2        = "0.10"
 blake3      = "1"
 
 [profile.release]
-panic = "abort"
+# Must stay "unwind". `ffi_catch!` in gist-ffi contains panics with
+# `catch_unwind`, which is a no-op under `panic = "abort"`: a release build
+# would then kill the host app on any parser/core panic instead of returning
+# `GistError::InternalPanic`. Enforced by the release-mode `panic_containment`
+# example in CI (docs/review-pre-w1-quality-security.md, Q1).
+panic = "unwind"
