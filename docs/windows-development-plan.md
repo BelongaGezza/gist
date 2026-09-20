@@ -87,7 +87,7 @@ Also recorded at W0: the R11 exception. The v2 plan says "do not begin Windows u
 Apple's `RsvpPlayer` hand-ports `token_duration_ms` and its punctuation helpers from `crates/gist-rsvp`, and its `Task.sleep`-per-token loop drifts over long sessions (known gap, per CLAUDE.md). **Windows must not become a third copy.** Plan:
 1. W4 starts with a small additive Rust change: expose the pacing to the UI over FFI (e.g. an `RsvpEngine` object: `duration_ms(index, wpm)` and/or `token_at_elapsed(ms)` using the existing wall-clock-anchored engine) plus tests in `gist-rsvp`/`gist-ffi`.
 2. Windows consumes it via a `DispatcherQueueTimer` that re-anchors to a monotonic clock, so it does not drift.
-3. The Apple app adopting the same call is **not** done from a Windows session; log it in `PENDING_APPLE_CHANGES.md` (the guard hook enforces this) with a pointer to the Rust API.
+3. The Apple app adopting the same call is **not** done from a Windows session; log it in `PENDING_APPLE_CHANGES.md` (the guard hook is only a safety net; CODEOWNERS/PR review is the real enforcement) with a pointer to the Rust API.
 If the FFI addition is judged too large, the fallback is a faithful C# port with a golden-file test that runs the same token/config fixtures through Rust and C# and asserts identical durations, so drift between the copies is caught mechanically.
 
 ### 4.4 Testing strategy
