@@ -16,7 +16,16 @@ env:
   # toolchain the setup step installs, so `cargo install cargo-fuzz` (needs
   # rustc >= 1.91 for cargo-platform) and every `cargo fuzz run` (needs nightly)
   # ran under 1.88.0 and failed. RUSTUP_TOOLCHAIN outranks the toolchain file.
-  RUSTUP_TOOLCHAIN: nightly
+  #
+  # Pinned to a dated nightly so fuzz results are reproducible (review Q14).
+  # The date appears TWICE: here and in the "toolchain:" input of the
+  # dtolnay/rust-toolchain step below; change both together. To bump: pick a
+  # recent date, confirm `rustup toolchain install nightly-YYYY-MM-DD --profile
+  # minimal` works and `cd fuzz && cargo +nightly-YYYY-MM-DD fuzz build`
+  # succeeds (rustc must stay >= 1.91), then run this workflow via
+  # workflow_dispatch. Review the pin roughly quarterly or when cargo-fuzz
+  # needs a newer rustc.
+  RUSTUP_TOOLCHAIN: nightly-2026-09-01
 
 permissions:
   contents: read
@@ -31,7 +40,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-09-01
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
