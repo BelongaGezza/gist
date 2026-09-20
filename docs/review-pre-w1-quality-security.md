@@ -123,3 +123,19 @@ The fuzz workflow now runs on floating `nightly` (`RUSTUP_TOOLCHAIN: nightly`), 
 | **Q4** | `.github/CODEOWNERS` added. Branch protection applied to `main` (2026-09-20): PR required (0 approvals, solo maintainer), required checks `quality`, `test (ubuntu-latest)`, `test (macos-latest)`, `test (windows-latest)`, no force-push, no deletion, **enforced for admins**. The path-filtered Apple `build` job is deliberately not required (it would block unrelated PRs). | Read back via `gh api .../branches/main/protection`. To relax for an emergency: repo Settings > Branches, or set `enforce_admins` false. Code-owner review is **not** required (a sole owner cannot approve their own PR). |
 
 Residual notes: `rlib` was added to `gist-ffi`'s crate types (a tooling-only change; the Apple script consumes only the static library). Static CRT is untested on ARM64 (Q7) and on a clean machine (W6).
+
+## 7. Triage of remaining items (2026-09-20)
+
+| Item | Disposition | Where tracked |
+|---|---|---|
+| Q5 | Delegated: normalise path in the guard + tests; reword "enforced" | PR `fix/q5-guard-normalise` |
+| Q6 | Plan (W1, day 1): needs maintainer to create the mirror repo | `windows-development-plan.md` W1 |
+| Q7 | Maintainer decision (recommended: post-1.0 fast-follow) | Plan decision table |
+| Q8 | Plan (W1): comparers and text-element offsets specified up front | W1 |
+| Q9 | Plan (W1, recovery-key decision before W2 Encrypt) | W1, decision table |
+| Q10 | Plan (W2): path/locked-file tests, partial-delete surfacing | W2 |
+| Q11 | Plan (start of W2 FlaUI smoke; clean-VM in W6) | W2, W6 |
+| Q12 | Plan (W1, with the `GIST.Core` promotion) | W1 |
+| Q13 | Plan (before W1 exit): ADR-017/018 status reconciliation | W1 |
+| Q14 | Delegated: pin dated nightly | PR `fix/q14-pin-nightly` |
+| Dependabot backlog | Delegated: evidence-based triage and merge order | PR `docs/dependabot-triage-2026-09-20` |
