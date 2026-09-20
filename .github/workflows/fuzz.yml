@@ -12,6 +12,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # rust-toolchain.toml pins 1.88.0 for the whole repo and beats the default
+  # toolchain the setup step installs, so `cargo install cargo-fuzz` (needs
+  # rustc >= 1.91 for cargo-platform) and every `cargo fuzz run` (needs nightly)
+  # ran under 1.88.0 and failed. RUSTUP_TOOLCHAIN outranks the toolchain file.
+  RUSTUP_TOOLCHAIN: nightly
 
 permissions:
   contents: read
