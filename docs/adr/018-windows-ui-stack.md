@@ -1,7 +1,7 @@
 # ADR 018 — Windows UI stack: WinUI 3, Windows App SDK, C# on .NET 10, CommunityToolkit.Mvvm
 
 **Date:** 2026-09-20
-**Status:** Proposed
+**Status:** Accepted (2026-09-20, W1). Evidence: `apps/windows/GIST.App` (WinUI 3, `net10.0-windows10.0.19041.0`, Windows App SDK 2.5.1, CommunityToolkit.Mvvm 8.4.2, Mica + custom title bar + NavigationView shell) builds with plain `dotnet build` at 0 warnings and 0 errors under warnings-as-errors, and the built unpackaged exe launches, shows a "GIST" window, stays responsive for 6 s and exits with code 0 on close (`apps/windows/GIST.App/verify-launch.ps1`). Still unverified: virtualised list/RichTextBlock behaviour, Narrator/UIA, ARM64, MSIX install/run.
 
 ## Context
 The Rust core owns parsing, persistence and pacing; the platform shell must present the same product as the SwiftUI app (library, collections/tags, RSVP, flow view with virtualised text, theming incl. OLED/Sepia, keyboard-driven use) per `docs/product-spec-reader-app-v3.md` and `docs/windows-ui-spec.md`. The binding to the core is uniffi-generated C# (ADR-015), so the shell language should be a .NET language. `docs/windows-development-plan.md` originally named `net8.0`; .NET 8 is not the newest LTS.
