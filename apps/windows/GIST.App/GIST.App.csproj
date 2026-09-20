@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- WinUI 3 shell. Packaging is selected by ONE property:
+         dotnet build                              -> unpackaged (WindowsPackageType=None), the default
+         dotnet build -p:GistPackaged=true         -> MSIX-packaged configuration (see Package.appxmanifest)
+       Windows App Runtime: default is framework-dependent (the machine needs the Windows App Runtime 2.x
+       installed). Alternative: -p:GistSelfContained=true bundles the runtime. ADR-017 clean-machine question
+       is still OPEN; the default here is not a decision. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>Gist.App</RootNamespace>
+    <AssemblyName>GIST</AssemblyName>
+    <UseWinUI>true</UseWinUI>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\GIST.ico</ApplicationIcon>
+    <EnableMsixTooling>true</EnableMsixTooling>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(GistPackaged)' != 'true'">
+    <WindowsPackageType>None</WindowsPackageType>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(GistPackaged)' == 'true'">
+    <WindowsPackageType>MSIX</WindowsPackageType>
+  </PropertyGroup>
+  <PropertyGroup>
+    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(GistSelfContained)' == 'true'">
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <ProjectReference Include="..\GIST.Core\GIST.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\**\*.png" />
+  </ItemGroup>
+</Project>
