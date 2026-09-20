@@ -18,3 +18,10 @@ this file when it contains entries.
 -->
 
 <!-- No pending items. -->
+
+## Pending Apple Change — 2026-09-20
+**File:** `Cargo.toml` (workspace `[profile.release]`), consumed by `tools/build-core-xcframework.sh`
+**Change required:** none in Swift. The release profile changed from `panic = "abort"` to `panic = "unwind"` so `ffi_catch!` actually contains panics in shipped builds (review Q1). Verify on macOS.
+**Reason:** under `panic = "abort"` the shipped xcframework killed the app on any core/parser panic instead of returning `GistError.InternalPanic`. Fixed and proven on Windows; Apple release build not run here.
+**Related commit/PR:** fix/w1-gates
+**Action:** run `./tools/build-core-xcframework.sh` and `xcodebuild build/test` (scheme GISTmacOS); note the xcframework size delta; optionally add a Swift test that a forced panic yields `.InternalPanic` (needs the `test-panic` feature build).

@@ -1,0 +1,10 @@
+# Windows: link the C runtime statically so gist_ffi.dll does not import
+# VCRUNTIME140.dll and loads on machines without the Visual C++ Redistributable
+# (docs/review-pre-w1-quality-security.md, Q2). Scoped to the MSVC targets only;
+# macOS/Linux builds are unaffected. CI verifies the imports with
+# tools/check-dll-imports.sh.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

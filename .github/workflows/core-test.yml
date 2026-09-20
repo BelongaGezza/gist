@@ -8,12 +8,12 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
-      # rust-toolchain.toml pins 1.87.0, so any plain `cargo` invocation in
+      # rust-toolchain.toml pins 1.88.0, so any plain `cargo` invocation in
       # this repo auto-installs and switches to that exact toolchain
       # (rustup's toolchain-file mechanism) — a different, separately-named
       # rustup toolchain from whatever "stable" version the action step
@@ -27,3 +27,15 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo fmt --check
+      # Release-mode panic containment (review Q1). Unit tests always unwind, so
+      # only a release-profile binary can detect `panic = "abort"`, which would
+      # turn every FFI panic into a process kill instead of `InternalPanic`.
+      - name: Release-mode panic containment
+        run: cargo run --release -p gist-ffi --features test-panic --example panic_containment
+      # Windows only: the core DLL must not import the dynamic VC++ runtime (review Q2).
+      - name: Windows DLL has no dynamic VC++ runtime imports
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release -p gist-ffi
+          bash tools/check-dll-imports.sh target/release/gist_ffi.dll
