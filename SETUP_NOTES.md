@@ -27,7 +27,7 @@ One-time setup steps per machine. Mark done by appending `[DONE — machine, dat
 - [DONE — ProArt13, 2026-09-20] .NET SDK 10.0.401: `winget install --id Microsoft.DotNet.SDK.10`
 - [DONE — ProArt13, 2026-09-20] `rustup toolchain install stable-x86_64-pc-windows-msvc` (the machine's default was the GNU stable; use MSVC for anything linking Windows libs)
 - [DONE — ProArt13, 2026-09-20] uniffi C# generator, pinned (ADR-015):
-  `cargo +stable-x86_64-pc-windows-msvc install --locked --git https://github.com/dennisameling/uniffi-bindgen-cs --rev 0fc022aa1d73fb1dda91a778b63f2824d7dca58b uniffi-bindgen-cs`
+  `cargo +stable-x86_64-pc-windows-msvc install --locked --git https://github.com/BelongaGezza/uniffi-bindgen-cs --rev 0fc022aa1d73fb1dda91a778b63f2824d7dca58b uniffi-bindgen-cs`
   (`--locked` is mandatory). Then `tools/gen-bindings-cs.sh` from Git Bash; make sure the cargo bin dir is on PATH in POSIX form (`/c/Users/<you>/.cargo/bin`).
 - Run the spike: `cd apps/windows/spikes/bindings && dotnet run` (needs `cargo build -p gist-ffi` and the generated bindings first).
 - Still to do: confirm the VS "WinUI application development" workload (needed from W1).
