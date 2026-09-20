@@ -644,3 +644,17 @@ mod tests {
         assert_eq!(succeeds().unwrap(), 42);
     }
 }
+
+/// Test-only support: lets a *release-profile* binary prove that `ffi_catch!`
+/// really contains panics (i.e. that the release profile does not set
+/// `panic = "abort"`). Not part of the uniffi surface; compiled only with the
+/// `test-panic` feature, which shipped builds never enable.
+#[cfg(feature = "test-panic")]
+pub mod test_support {
+    use super::*;
+
+    /// Panics inside `ffi_catch!`; a correct build returns `Err(InternalPanic)`.
+    pub fn ffi_panic_probe() -> Result<(), GistError> {
+        ffi_catch!({ panic!("ffi_panic_probe: deliberate panic") })
+    }
+}
