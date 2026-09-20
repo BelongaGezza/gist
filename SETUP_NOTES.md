@@ -37,3 +37,7 @@ One-time setup steps per machine. Mark done by appending `[DONE — machine, dat
 - **Pending, needs elevation:** enable Developer Mode (Settings > System > For developers) to install/run MSIX packages locally. Until then, packaged-app behaviour (LocalState paths, `gist_ffi.dll` load from a package) is unverified.
 - Run the key-custody tests: `cd apps/windows/spikes/keyprovider/DpapiKeyProvider.Tests && dotnet test` (13 tests, real DPAPI).
 - Run the WinUI hello spike: `cargo build -p gist-ffi`, `cd apps/windows/spikes/winui-hello && dotnet build -p:Platform=x64`, copy `target/debug/gist_ffi.dll` next to the built exe, run it (unpackaged; needs Windows App Runtime 2.x installed, present here).
+
+## Windows — ARM64 (required for v1.0, review Q7)
+- [TODO — needs UAC] Visual Studio Installer > Modify > Individual components > "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools (Latest)" (and the ARM64 Windows SDK libs if offered). Rust target `aarch64-pc-windows-msvc` is already installed on ProArt13.
+- Verify: `cargo build -p gist-ffi --release --target aarch64-pc-windows-msvc` succeeds, then `tools/check-dll-imports.sh` on the ARM64 DLL. Runtime testing needs ARM64 hardware or a `windows-11-arm` runner.

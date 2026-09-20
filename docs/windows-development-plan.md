@@ -129,7 +129,7 @@ Goals: answer R1, make the environment reproducible.
 - **Review items scheduled into W1 (Q5–Q9, Q12, Q13):**
   - **Q5** apple-edit guard path normalisation — delegated, PR `fix/q5-guard-normalise`; W1 must not start feature work on a branch that predates it. Hook is a safety net; CODEOWNERS is the enforcement.
   - **Q6** mirror the pinned generator commit into a repo the project controls, re-pin `tools/gen-bindings-cs.sh` to the mirror (same SHA), cache the built generator in CI keyed on the SHA, and add the normalised-line-ending generated-output hash check. Needs the maintainer to create the mirror (outward-facing) — first W1 task.
-  - **Q7** decide ARM64 scope on day 1 of W1 (maintainer decision, see table). If in scope: add the ARM64 MSVC build-tools component to `SETUP_NOTES.md` and a cross-compile CI leg; if not, record as post-1.0 fast-follow and drop "ARM64 build" from W6.
+  - **Q7 — DECIDED 2026-09-20: ARM64 is in scope for v1.0** (maintainer decision). W1 must therefore: (a) install the VS "MSVC v143 ARM64 build tools" component (needs UAC) and get `cargo build -p gist-ffi --release --target aarch64-pc-windows-msvc` passing locally (currently fails: `libsqlite3-sys`/`blake3`/`ring` cannot find an ARM64 `cl.exe`); (b) add an ARM64 leg to CI (cross-compile on `windows-latest`, plus the DLL-imports check on the ARM64 DLL); (c) confirm the generated C# bindings and `+crt-static` behave on ARM64; (d) find runtime-test capacity now — a `windows-11-arm` hosted runner if available to this repo, otherwise real hardware — because W6 gates on it; (e) decide MSIX shape (per-arch packages vs a bundle) in ADR-017 before W6.
   - **Q8** `GIST.Core` states comparers up front: title/author sort uses `StringComparer.CurrentCultureIgnoreCase` via a stable `OrderBy`; find offsets are computed over `StringInfo` text elements (one choice, documented). Ported `LibraryFiltering`/find tests add emoji, surrogate-pair and combining-mark fixtures. Spec §4.3/§7.2 wording changed from "exactly" to the chosen semantics.
   - **Q9** `CoreClient`'s corrupt-key state offers Retry and never deletes or recreates anything; only a proven-corrupt blob (tamper/truncate) is "unrecoverable", other `CryptographicException`s are "temporarily unavailable, retry". Add a test that the key directory derives from the same root as the store (packaged vs unpackaged). Reap stale `.tmp` files, restrict the key directory ACL to the current user. Decide the recovery-key export before Encrypt is exposed in W2 (ADR-016 addendum).
   - **Q12** spike bad-callback check made profile-aware, spikes deleted after promotion, NuGet exact pins + lock files + Dependabot `nuget` (already item 3 above).
@@ -165,7 +165,8 @@ Goals: answer R1, make the environment reproducible.
 ### W6 — Hardening, accessibility, packaging (2–3 weeks)
 - FlaUI automation of the click-through checklist (mirror of `docs/qa-manual-clickthrough-m2.md`, as `docs/qa-manual-clickthrough-windows.md`, then automate what's automatable).
 - Narrator + Accessibility Insights pass, keyboard-only pass, text-scale 150 %/200 %, high-contrast pass, contrast audit of all themes.
-- MSIX build in CI (unsigned artifact), signing plan, SmartScreen/Store decision (ADR-017), ARM64 build (only if Q7 put it in scope).
+- MSIX build in CI (unsigned artifact), signing plan, SmartScreen/Store decision (ADR-017), ARM64 build and MSIX per-arch/bundle output (in scope, Q7).
+- **ARM64 runtime gate (Q7):** the release DLL and app run and pass the smoke suite (DPAPI key create/read, import, search, RSVP, flow open) on real ARM64 Windows (hardware or a `windows-11-arm` runner); cross-compile alone does not satisfy this gate.
 - **Clean-machine gate (Q2/Q11):** run the release build on a clean VM with no VC++ redistributable and no Windows App Runtime (whichever ADR-017 chose), confirm `gist_ffi.dll` loads and the core works; static-CRT was only import-checked, never loaded on a clean box.
 - **Q14 watch items:** `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19; pinned nightly for fuzz needs a periodic bump.
 - Security review of the Windows shell (FFI error paths, key file permissions, package capabilities); add `docs/security-review-windows.md`.
@@ -212,7 +213,7 @@ Goals: answer R1, make the environment reproducible.
 | "Rounded" font option on Windows (drop vs Trebuchet MS mapping) | W5 |
 | Windows OCR engine (`Windows.Media.Ocr` vs Tesseract) — spec Q4/Q8 | W5 (design note), implement M3 |
 | ~~.NET 8 vs .NET 10 LTS~~ resolved: .NET 10 | done W0 |
-| ARM64 as a v1.0 requirement or fast-follow (Q7 — needs ARM64 MSVC tools locally and an ARM64 runner/hardware for runtime tests; **recommended: fast-follow after 1.0**) | Day 1 of W1 |
+| ~~ARM64 as a v1.0 requirement or fast-follow~~ resolved: **v1.0 requirement** (maintainer, 2026-09-20). Open sub-items: runtime-test hardware/runner by end of W1; MSIX per-arch vs bundle (ADR-017) | decided; sub-items W1 |
 | Mirror the pinned bindgen fork under a project-controlled repo (Q6) | Day 1 of W1 |
 | Recovery-key export for encrypted items (Q9) | Before Encrypt ships in W2 |
 | Adopt the pacing FFI (§4.3) on Apple in the same release | Next macOS session |

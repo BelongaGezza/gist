@@ -130,7 +130,7 @@ Residual notes: `rlib` was added to `gist-ffi`'s crate types (a tooling-only cha
 |---|---|---|
 | Q5 | Delegated: normalise path in the guard + tests; reword "enforced" | PR `fix/q5-guard-normalise` |
 | Q6 | Plan (W1, day 1): needs maintainer to create the mirror repo | `windows-development-plan.md` W1 |
-| Q7 | Maintainer decision (recommended: post-1.0 fast-follow) | Plan decision table |
+| Q7 | **Decided 2026-09-20: ARM64 in scope for v1.0** (option B). W1: toolchain + CI cross-compile + runtime-test capacity; W6: ARM64 runtime gate | Plan W1/W6, decision table |
 | Q8 | Plan (W1): comparers and text-element offsets specified up front | W1 |
 | Q9 | Plan (W1, recovery-key decision before W2 Encrypt) | W1, decision table |
 | Q10 | Plan (W2): path/locked-file tests, partial-delete surfacing | W2 |
