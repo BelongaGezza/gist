@@ -41,3 +41,28 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+
+  # Windows app (docs/windows-development-plan.md 4.2). Versions are pinned centrally in
+  # apps/windows/Directory.Packages.props with committed packages.lock.json files; Dependabot
+  # bumps both. Grouped so related packages move together in one PR.
+  - package-ecosystem: "nuget"
+    directory: "/apps/windows"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "windows"
+    groups:
+      test-tooling:
+        patterns:
+          - "Microsoft.NET.Test.Sdk"
+          - "xunit*"
+      windows-app-sdk:
+        patterns:
+          - "Microsoft.WindowsAppSDK*"
+          - "Microsoft.Windows.SDK.BuildTools*"
+      dotnet-runtime-libs:
+        patterns:
+          - "System.*"
+          - "CommunityToolkit.*"
