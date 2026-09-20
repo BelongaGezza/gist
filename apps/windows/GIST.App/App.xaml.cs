@@ -1,6 +1,6 @@
 using Microsoft.UI.Xaml;
 
-namespace WinUiHello;
+namespace Gist.App;
 
 public partial class App : Application
 {
@@ -10,6 +10,8 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // Composition root: build services once, before any window exists.
+        AppServices.Initialize();
         _window = new MainWindow();
         _window.Activate();
     }
