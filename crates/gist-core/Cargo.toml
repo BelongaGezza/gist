@@ -10,7 +10,7 @@ gist-model     = { path = "../gist-model" }
 gist-parse-txt  = { path = "../gist-parse-txt" }
 gist-parse-epub = { path = "../gist-parse-epub" }
 gist-parse-docx = { path = "../gist-parse-docx" }
-infer            = "0.15"
+infer            = "0.22"
 gist-rsvp      = { path = "../gist-rsvp" }
 gist-store     = { path = "../gist-store" }
 gist-web       = { path = "../gist-web" }
