@@ -13,6 +13,7 @@ public partial class App : Application
         // Composition root: build services once, before any window exists.
         AppServices.Initialize();
         _window = new MainWindow();
+        AppServices.MainWindow = _window;
         _window.Activate();
     }
 }
