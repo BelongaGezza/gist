@@ -1315,12 +1315,16 @@ impl Store {
         Ok(names)
     }
 
-    /// Return the names of every tag that exists across the whole library,
+    /// Return the names of every tag currently attached to at least one item,
     /// alphabetically -- used to populate a filter menu, not scoped to any
     /// one item (see `list_tags_for_item` for that).
     pub fn list_all_tags(&self) -> Result<Vec<String>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        let mut stmt = conn.prepare("SELECT name FROM tags ORDER BY name ASC")?;
+        let mut stmt = conn.prepare(
+            "SELECT t.name FROM tags t
+             WHERE EXISTS (SELECT 1 FROM item_tags it WHERE it.tag_id = t.id)
+             ORDER BY t.name ASC",
+        )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut names = Vec::new();
         for row in rows {
@@ -1782,6 +1786,57 @@ mod tests {
             store.list_all_tags().unwrap(),
             vec!["favorite".to_string(), "sci-fi".to_string()]
         );
+    }
+
+    #[test]
+    fn list_all_tags_drops_tag_after_last_use_removed() {
+        let (_dir, store) = open_test_store();
+        let a = insert_test_item(&store);
+        let b = insert_test_item(&store);
+        store.add_tag(&a, "shared").unwrap();
+        store.add_tag(&b, "shared").unwrap();
+        store.add_tag(&a, "solo").unwrap();
+
+        store.remove_tag(&a, "solo").unwrap();
+        assert_eq!(store.list_all_tags().unwrap(), vec!["shared".to_string()]);
+
+        // Still used by another item: stays after one link is removed.
+        store.remove_tag(&a, "shared").unwrap();
+        assert_eq!(store.list_all_tags().unwrap(), vec!["shared".to_string()]);
+        store.remove_tag(&b, "shared").unwrap();
+        assert!(store.list_all_tags().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_all_tags_drops_tag_when_last_tagged_item_removed() {
+        let (_dir, store) = open_test_store();
+        let a = insert_test_item(&store);
+        store.add_tag(&a, "gone").unwrap();
+        assert_eq!(store.list_all_tags().unwrap(), vec!["gone".to_string()]);
+
+        store.remove_items(std::slice::from_ref(&a)).unwrap();
+        assert!(store.list_all_tags().unwrap().is_empty());
+    }
+
+    #[test]
+    fn readding_orphaned_tag_name_works_and_reappears() {
+        let (_dir, store) = open_test_store();
+        let a = insert_test_item(&store);
+        let b = insert_test_item(&store);
+        store.add_tag(&a, "again").unwrap();
+        store.remove_tag(&a, "again").unwrap();
+        assert!(store.list_all_tags().unwrap().is_empty());
+
+        // The orphaned `tags` row is reused, not duplicated.
+        store.add_tag(&b, "again").unwrap();
+        assert_eq!(store.list_all_tags().unwrap(), vec!["again".to_string()]);
+        let conn = store.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE name = 'again'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     #[test]
