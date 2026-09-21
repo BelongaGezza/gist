@@ -71,8 +71,14 @@ jobs:
         id: bindgen-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          path: ~/.cargo/bin/uniffi-bindgen-cs.exe
-          key: uniffi-bindgen-cs-${{ runner.os }}-${{ env.BINDGEN_REV }}
+          # The binary AND cargo's install records: tools/gen-bindings-cs.sh verifies the pinned rev by
+          # reading .crates.toml, so a cache hit that restored only the .exe failed that check.
+          path: |
+            ~/.cargo/bin/uniffi-bindgen-cs.exe
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          # v2: the v1 entry held only the .exe and would fail the pinned-rev check; bump on any path change.
+          key: uniffi-bindgen-cs-v2-${{ runner.os }}-${{ env.BINDGEN_REV }}
 
       - name: Install pinned uniffi-bindgen-cs
         if: steps.bindgen-cache.outputs.cache-hit != 'true'
