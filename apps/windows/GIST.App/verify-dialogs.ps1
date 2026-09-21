@@ -21,7 +21,7 @@ function Get-Els($proc) {
 $scenarios = [ordered]@{
   ImportUrl      = @('^Import URL$', '^GIST fetches the page, extracts', @('Import', 'Cancel'))
   NewCollection  = @('^New Collection$', '^Collection name$', @('Create', 'Cancel'))
-  RemoveConfirm  = @('^Remove 1 item\?$', 'can''t be undone', @('Remove from Library', 'Also Delete Stored Copy', 'Cancel'))
+  RemoveConfirm  = @('^Remove 1 item\?$', 'can''t be undone', @('Remove', 'Cancel'))
   EncryptConfirm = @('^Encrypt 1 item\?$', 'no way to recover encrypted items', @('Encrypt', 'Cancel'))
   EncryptResult  = @('^Encryption finished$', 'No items were selected|encrypted', @('OK'))
   DrmProtected   = @('^Can''t import this book$', '^This book is DRM-protected and can''t be imported\.$', @('OK'))

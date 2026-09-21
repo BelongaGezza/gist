@@ -312,6 +312,42 @@ pub struct RemovedItem {
     /// existed. This — not `source_path` — is what removal deletes when the
     /// caller asks to discard the source file.
     pub source_copy_path: Option<String>,
+    /// `true` when `source_copy_path` is **still referenced by a library row
+    /// that survived this removal**, so the caller must not delete that file
+    /// (ADR-006 addendum, 2026-09-21).
+    ///
+    /// Stored copies are content-addressed, so two items imported from
+    /// byte-identical files share one file on disk. Deleting it on behalf of
+    /// one item would silently take away the other item's copy. Evaluated
+    /// inside the same transaction, *after* every id in the batch has been
+    /// deleted, which gives the intended batch semantics for free: removing
+    /// both sharers in one call deletes the file (nothing references it any
+    /// more), removing one keeps it, and removing the second one later
+    /// deletes it.
+    ///
+    /// Always `false` when `source_copy_path` is `None` — there is nothing to
+    /// share.
+    pub source_copy_still_referenced: bool,
+}
+
+/// Key a stored-copy path is compared by when deciding whether a surviving
+/// row still references it: the lower-cased file name, or the lower-cased
+/// whole path when there is no file name.
+///
+/// Compares names rather than whole path strings for the same reason
+/// `gist_core::Core::sweep_orphaned_files` does: a row's stored path is
+/// whatever string `storage_dir` was when the row was written, so prefix and
+/// separator normalisation (`C:\x` vs `C:\x\`, `\\?\C:\x`, …) must not be
+/// able to turn into data loss. Lower-casing matches Windows' case-insensitive
+/// filesystem semantics. Both choices are conservative in the only safe
+/// direction: they can only ever make a file look *more* referenced, i.e. keep
+/// a file that could have been deleted — never delete one that is still in use.
+fn copy_ref_key(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+        .to_ascii_lowercase()
 }
 
 // ── ReferencedFiles (what an orphan sweep must never delete) ───────────────
@@ -878,6 +914,12 @@ impl Store {
     /// only the ids that were actually found and removed, in no guaranteed
     /// order, so callers can tell exactly which ids took effect.
     ///
+    /// **Shared stored copies:** each returned row carries
+    /// [`RemovedItem::source_copy_still_referenced`], computed after every
+    /// deletion in the batch has been applied but before the commit, so the
+    /// caller can honour ADR-006's content-addressed dedup instead of
+    /// deleting a file another surviving item still points at.
+    ///
     /// `reading_progress`, `tokens`, and (via the `tokens_ad` trigger)
     /// `fts_index` rows are cleaned up automatically through
     /// `ON DELETE CASCADE` / triggers — this function never deletes from
@@ -907,9 +949,34 @@ impl Store {
                         doc_path,
                         source_path,
                         source_copy_path,
+                        // Filled in below, once every id in the batch is gone.
+                        source_copy_still_referenced: false,
                     });
                 }
                 // else: unknown id — silently skipped, see doc comment above.
+            }
+        }
+
+        // ADR-006 shared-copy safety. Deliberately done *after* the whole
+        // batch has been deleted and *before* `tx.commit()`, so the answer is
+        // "does any row that survives this removal still reference this
+        // file?" — the question the caller actually needs answered.
+        if removed.iter().any(|r| r.source_copy_path.is_some()) {
+            let mut surviving: std::collections::HashSet<String> = Default::default();
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT source_copy_path FROM library_items WHERE source_copy_path IS NOT NULL",
+                )?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                for row in rows {
+                    surviving.insert(copy_ref_key(&row?));
+                }
+            }
+
+            for item in &mut removed {
+                if let Some(copy) = &item.source_copy_path {
+                    item.source_copy_still_referenced = surviving.contains(&copy_ref_key(copy));
+                }
             }
         }
 
@@ -1944,6 +2011,105 @@ mod tests {
         assert!(doc1_path.exists());
         assert!(doc1_tokens_path.exists());
         assert!(doc2_path.exists());
+    }
+
+    // ── Shared stored copies (ADR-006 addendum, 2026-09-21) ───────────────
+
+    /// Two documents pointed at one content-addressed stored copy, as
+    /// ADR-006's dedup produces for two imports of byte-identical files.
+    fn two_docs_sharing_one_copy(store: &Store) -> (String, String, String) {
+        let copy = store
+            .store_original_copy(b"one set of bytes, two library items", "txt")
+            .unwrap();
+
+        let mut a = doc_with_title("sharer-a");
+        a.metadata.source_copy_ref = Some(copy.clone());
+        let mut b = doc_with_title("sharer-b");
+        b.metadata.source_copy_ref = Some(copy.clone());
+
+        store.insert_item(&a).unwrap();
+        store.insert_item(&b).unwrap();
+        (a.id, b.id, copy)
+    }
+
+    /// Removing one of two sharers must report the copy as still referenced,
+    /// so the caller keeps it. This is the flag that stops removal deleting
+    /// a surviving item's stored copy.
+    #[test]
+    fn remove_items_flags_a_stored_copy_another_surviving_row_still_references() {
+        let (_dir, store) = open_test_store();
+        let (id_a, id_b, copy) = two_docs_sharing_one_copy(&store);
+
+        let removed = store.remove_items(&[id_a]).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].source_copy_path.as_deref(), Some(copy.as_str()));
+        assert!(
+            removed[0].source_copy_still_referenced,
+            "the surviving row still points at this copy"
+        );
+
+        // …and once the last sharer goes, it is no longer referenced.
+        let removed = store.remove_items(&[id_b]).unwrap();
+        assert!(
+            !removed[0].source_copy_still_referenced,
+            "nothing references the copy any more, so it is the caller's to delete"
+        );
+    }
+
+    /// Both sharers in **one batch**: the question is asked after every
+    /// deletion in the batch has been applied, so neither row is flagged as
+    /// still referenced and the caller deletes the copy once.
+    #[test]
+    fn remove_items_does_not_flag_a_copy_shared_only_within_the_same_batch() {
+        let (_dir, store) = open_test_store();
+        let (id_a, id_b, _copy) = two_docs_sharing_one_copy(&store);
+
+        let removed = store.remove_items(&[id_a, id_b]).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(
+            removed.iter().all(|r| !r.source_copy_still_referenced),
+            "a row that is itself being removed must not count as a survivor: {removed:?}"
+        );
+    }
+
+    /// An item with no stored copy at all (a URL import, or one predating
+    /// ADR-006) must never be flagged — there is nothing to share.
+    #[test]
+    fn remove_items_never_flags_an_item_without_a_stored_copy() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("no-copy");
+        store.insert_item(&doc).unwrap();
+
+        let removed = store.remove_items(&[doc.id]).unwrap();
+        assert_eq!(removed[0].source_copy_path, None);
+        assert!(!removed[0].source_copy_still_referenced);
+    }
+
+    /// Windows filesystems are case-insensitive, so a row recorded as
+    /// `…/ABC.txt` and one recorded as `…/abc.txt` name the *same file*.
+    /// Comparing the two paths case-sensitively would miss the match and
+    /// report the copy as unreferenced — i.e. fail in the direction that
+    /// deletes a live item's stored copy. `copy_ref_key` lower-cases both
+    /// sides; this pins that.
+    #[test]
+    fn remove_items_matches_a_shared_copy_whose_recorded_path_differs_only_by_case() {
+        let (_dir, store) = open_test_store();
+        let copy = store
+            .store_original_copy(b"case-insensitive", "txt")
+            .unwrap();
+
+        let mut a = doc_with_title("lower");
+        a.metadata.source_copy_ref = Some(copy.clone());
+        let mut b = doc_with_title("upper");
+        b.metadata.source_copy_ref = Some(copy.to_uppercase());
+        store.insert_item(&a).unwrap();
+        store.insert_item(&b).unwrap();
+
+        let removed = store.remove_items(&[a.id]).unwrap();
+        assert!(
+            removed[0].source_copy_still_referenced,
+            "a surviving row naming the same file in a different case must still count"
+        );
     }
 
     #[test]

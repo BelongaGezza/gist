@@ -146,11 +146,17 @@ Centered icon + title + secondary text (+ button where applicable):
 | DRM-protected file | Structured `DrmProtected` error → "This book is DRM-protected and can't be imported." (GIST never circumvents DRM, ADR-004) | OK |
 | Generic error | message from `GistError` | OK |
 | New Collection | `TextBox` | Create · Cancel |
-| Remove | title "Remove N items?" **[P]** plus, **[+]** per product spec §4, the item titles (first 5, "and N more") and an explicit irreversibility line | **Remove from Library** · **Also Delete Stored Copy** (destructive style) · Cancel |
+| Remove | title "Remove N items?" **[P]** plus, **[+]** per product spec §4, the item titles (first 5, "and N more") and an explicit irreversibility line | **Remove** (destructive style) · Cancel (default) |
 | Encrypt | explains per-item at-rest encryption (ADR-014), does not touch originals | Encrypt · Cancel |
 | Encrypt result | summary: N encrypted, N already encrypted, N failed (+ first errors) | OK |
 
-**Wording note [+]:** Apple's button says "Also Delete Original File", but the core deletes only GIST's sandboxed copy and never the user's file (ADR-006). Windows says "Stored Copy", which is accurate. Back-port to Apple via `PENDING_APPLE_CHANGES.md`. Remove from Library is the default/accent-free choice so the safe path is Enter.
+**Remove is one thing (maintainer decision, 2026-09-21).** Windows briefly offered two buttons — "Remove from Library" (keep GIST's stored copy) and "Also Delete Stored Copy". That choice was misleading rather than useful: the startup orphan sweep reclaims any stored copy no library row references, so "keep" only meant "until the next launch". Removing an item now always deletes **everything GIST holds** for it — the database row and everything cascading from it (tokens, FTS entries, reading progress, collection membership, tag links), the document and tokens blobs with their checksum sidecars, and GIST's own sandboxed stored copy (ADR-006) — and **never the user's own file**. One button, no second choice. See ADR-006's addendum.
+
+**Wording note [+]:** the irreversibility line says what actually happens, in both halves: *"This permanently deletes this item, and GIST's stored copy of it, from this PC. It can't be undone. The original file you imported is not touched."* (plural form for a multi-item selection). Apple still shows the older two-button dialog, whose second button is additionally mislabelled "Also Delete Original File" when it deletes only the sandboxed copy — back-port both the single-button semantics and the wording via `PENDING_APPLE_CHANGES.md`.
+
+**Button roles:** Remove carries the destructive style and **Cancel is the Enter default**, matching Encrypt — the irreversible action must never be what a stray Return key triggers.
+
+**Shared stored copies:** two imports of byte-identical files dedup to one content-addressed file (ADR-006), so the core keeps that file until the *last* item referencing it is removed. Removing one sharer keeps it; removing both together, or the second one later, deletes it. This is neither a failure nor a missing file and raises no warning bar.
 
 Long operations (import, URL fetch) show an indeterminate `ProgressRing` in the command bar and disable Import commands; errors surface through the dialogs above, never silently.
 
@@ -248,7 +254,7 @@ Shortcuts are `KeyboardAccelerator`s with tooltips showing the gesture.
 
 These are functional contracts, not styling, and each has an Apple test to port (plan W2–W5):
 
-1. Removal never deletes the user's original file; only GIST's stored copy, and only when the second button is chosen.
+1. Removal never deletes the user's original file — only GIST's own stored copy. **Windows diverges deliberately on the choice, not the guarantee (2026-09-21):** Windows always deletes the stored copy (one "Remove" button), Apple still asks. The guarantee that the user's own file is never touched is identical on both, and so is the core rule that a stored copy shared with a surviving item is kept until the last item referencing it goes. See §4.5 and `PENDING_APPLE_CHANGES.md`.
 2. Items encrypted via "Encrypt" remain readable in both readers through the same running app (read-capable key provider from launch; ADR-014 `new_with_read_key`). New imports stay plaintext by default.
 3. Search input is passed to the core unescaped-by-UI; partial words match.
 4. `DrmProtected` is a distinct, structured error path, not string matching.

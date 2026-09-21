@@ -167,6 +167,53 @@ public sealed class LibraryDriver
         if (e.Patterns.Invoke.IsSupported) e.Patterns.Invoke.Pattern.Invoke(); else e.Click();
     }
 
+    /// <summary>
+    /// Invokes a command that opens a dialog and returns that dialog, re-invoking if the first attempt produced
+    /// nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This replaces the fixed 600 ms sleep <see cref="WaitDialogGone"/> used to do, and it is needed only in the
+    /// moments just after another dialog closed. WinUI tears a ContentDialog down asynchronously, and while its
+    /// light-dismiss layer is still up a synthetic UIA <c>Invoke</c> on a command-bar button is swallowed: the button
+    /// reports enabled, the pattern call returns without error, and the click simply never reaches the control, so no
+    /// dialog is ever <em>requested</em>.
+    /// </para>
+    /// <para>
+    /// <b>Measured, not assumed.</b> With the sleep removed, the second Encrypt dialog never appeared. Widening the
+    /// wait after a single invoke to 9 s did not help, and the first invoke still produced nothing while the second
+    /// worked immediately — so the request was not reaching the app at all. It is therefore a <b>harness</b> race in
+    /// synthetic input, and distinct from the product bug this suite also found (<c>LibraryDialogHost.HandleAsync</c>
+    /// swallowing a failed <c>ShowAsync</c> and then dismissing the pending request), which is fixed separately in the
+    /// app and which no amount of sleeping here would have addressed.
+    /// </para>
+    /// <para>
+    /// Re-invoking is safe: the command only sets <c>PendingDialog</c>, so a duplicate is a no-op if the first one did
+    /// land. This is a poll with a deadline like every other wait here, not a fixed sleep.
+    /// </para>
+    /// </remarks>
+    /// <summary>How many invokes the last <see cref="OpenDialog"/> needed. 1 means the first one landed.</summary>
+    public int LastOpenAttempts { get; private set; }
+
+    public AutomationElement OpenDialog(string commandId, string title)
+    {
+        var deadline = DateTime.UtcNow + Wait;
+        LastOpenAttempts = 0;
+        while (true)
+        {
+            LastOpenAttempts++;
+            InvokeCommand(commandId);
+            try
+            {
+                return Dialog(title, TimeSpan.FromSeconds(3));
+            }
+            catch (TimeoutException) when (DateTime.UtcNow < deadline)
+            {
+                // The invoke did not reach the button; try again.
+            }
+        }
+    }
+
     // ── Dialogs / menus ────────────────────────────────────────────────────
 
     /// <summary>
@@ -174,7 +221,7 @@ public sealed class LibraryDriver
     /// element matters: the page underneath stays in the UIA tree, so e.g. "Encrypt" names both the command and the
     /// dialog's primary button.
     /// </summary>
-    public AutomationElement Dialog(string title) =>
+    public AutomationElement Dialog(string title, TimeSpan? timeout = null) =>
         Poll(() =>
         {
             var dlg = Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Window).And(cf.ByName(title))).FirstOrDefault();
@@ -186,16 +233,23 @@ public sealed class LibraryDriver
                     && (Try(() => t.Name) ?? "").Length > 0 && Try(() => t.Name) != title);
             var hasButton = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Button)) is not null;
             return hasBody && hasButton ? dlg : null;
-        }, "dialog titled '" + title + "'");
+        }, "dialog titled '" + title + "'", timeout);
 
+    /// <summary>
+    /// Waits until the dialog with this title has left the UIA tree. No fixed settle afterwards.
+    /// </summary>
+    /// <remarks>
+    /// This used to sleep 600 ms here, to cover the window in which WinUI is still finishing a ContentDialog's close
+    /// after it has left the UIA tree. Two separate problems lived in that window, and both are now addressed at their
+    /// own level rather than by sleeping: the product's dialog host used to swallow a failed <c>ShowAsync</c> and then
+    /// dismiss the pending request (fixed — it retries for ~2 s and never dismisses a dialog that was not shown), and
+    /// a synthetic UIA invoke made in that window does not reach the button at all (handled by
+    /// <see cref="OpenDialog"/>, which polls and re-invokes; see its remarks for the measurements).
+    /// </remarks>
     public void WaitDialogGone(string title)
     {
         PollUntil(() => Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Window).And(cf.ByName(title))).Length == 0,
             "dialog closed: " + title);
-        // Unavoidable fixed settle: WinUI finishes closing a ContentDialog asynchronously after it disappears from the
-        // UIA tree, and the app's dialog host swallows the "only one ContentDialog may be open" error and drops a
-        // request made in that window (found by this suite; no UIA-visible signal exists for "fully closed").
-        Thread.Sleep(600);
     }
 
     public static AutomationElement DialogPart(AutomationElement dialog, string id) =>

@@ -364,15 +364,31 @@ public sealed class LibraryViewModel : LibraryViewModelBase
     public RemovePreview RemovePreview() => ViewModels.RemovePreview.ForLibrary(SelectedItems);
 
     /// <summary>
-    /// Removes the selected items.
+    /// Removes the selected items — <b>always a complete delete</b> (maintainer decision,
+    /// 2026-09-21).
     /// </summary>
-    /// <param name="deleteStoredCopy">
-    /// Whether to also delete GIST's own ADR-006 stored copy under <c>storage/originals/</c>. The
-    /// user's original file is never touched either way — which is why the Windows button says
-    /// "Also Delete Stored Copy" rather than Apple's inaccurate "Also Delete Original File"
-    /// (§4.5 wording note). There is a test asserting the original survives both paths.
-    /// </param>
-    public async Task RemoveAsync(bool deleteStoredCopy)
+    /// <remarks>
+    /// <para>
+    /// Everything GIST holds for each item goes: the database row and everything cascading from it
+    /// (tokens, FTS entries, reading progress, collection membership, tag links), the document and
+    /// tokens blobs with their checksum sidecars, and GIST's own sandboxed stored copy under
+    /// <c>storage/originals/</c> (ADR-006). <b>The file the user imported is never touched</b>,
+    /// wherever it lives; there is a test asserting it is byte-for-byte unchanged.
+    /// </para>
+    /// <para>
+    /// There used to be a choice here — keep GIST's stored copy, or delete it too. It was
+    /// misleading rather than useful: the startup orphan sweep reclaims any stored copy no row
+    /// references, so "keep" meant "until the next launch". The core keeps its
+    /// <c>deleteSourceFiles</c> parameter for Apple, which still has the two-button dialog
+    /// (see <c>PENDING_APPLE_CHANGES.md</c>); Windows always passes true.
+    /// </para>
+    /// <para>
+    /// A stored copy shared with another item — two imports of byte-identical files dedup to one
+    /// content-addressed file (ADR-006) — is kept by the core until the last item referencing it
+    /// is removed. That is not a failure and raises no warning.
+    /// </para>
+    /// </remarks>
+    public async Task RemoveAsync()
     {
         var ids = SelectedIds;
         if (ids.Count == 0)
@@ -382,7 +398,7 @@ public sealed class LibraryViewModel : LibraryViewModelBase
 
         BeginUserOperation();
         PendingDialog = LibraryDialog.None;
-        var result = await Core.RemoveItemsAsync(ids, deleteStoredCopy).ConfigureAwait(false);
+        var result = await Core.RemoveItemsAsync(ids, deleteSourceFiles: true).ConfigureAwait(false);
         CaptureOutcome();
 
         // Only genuine failures warn; FilesMissing (e.g. pre-ADR-013 items with no sidecars) is

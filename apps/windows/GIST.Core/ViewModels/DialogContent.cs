@@ -27,8 +27,18 @@ public static class DialogContent
     public const string NewCollectionPrimary = "Create";
 
     // Remove
-    public const string RemoveFromLibraryButton = "Remove from Library";
-    public const string RemoveAlsoStoredCopyButton = "Also Delete Stored Copy";
+    /// <summary>
+    /// The Library's single, destructive removal button (maintainer decision, 2026-09-21).
+    /// </summary>
+    /// <remarks>
+    /// This replaced the pair "Remove from Library" / "Also Delete Stored Copy". Offering both was
+    /// misleading: the startup orphan sweep reclaims any stored copy no row references, so the
+    /// "keep the stored copy" branch only kept it until the next launch. Removal is now always a
+    /// complete delete, so there is one button and no choice to get wrong. See ADR-006's addendum.
+    /// </remarks>
+    public const string RemoveButton = "Remove";
+
+    /// <summary>The Collection screen's removal button — detaching, not deleting (§5).</summary>
     public const string CollectionRemoveButton = "Remove";
 
     // Encrypt

@@ -22,12 +22,19 @@ public enum FileDeleteFailureKind
 /// warning (<see cref="HasFileFailures"/>), never a failed removal. <see cref="FilesMissing"/> is
 /// benign (items imported before ADR-013 have no checksum sidecars) and must never be surfaced.
 /// </remarks>
+/// <param name="SharedCopiesKept">
+/// How many stored copies were kept on purpose because another item that survived the removal
+/// shares the same content-addressed file (ADR-006 dedup). <b>Neither a failure nor a missing
+/// file</b> — no deletion was attempted, and removing the last item that shares the file deletes
+/// it then. Carried so the tally adds up; never surfaced to the user.
+/// </param>
 public sealed record RemoveResult(
     IReadOnlyList<string> RemovedIds,
     int FilesDeleted,
     int FilesMissing,
     int FilesFailed,
-    IReadOnlyList<FileDeleteFailureKind> FailureKinds)
+    IReadOnlyList<FileDeleteFailureKind> FailureKinds,
+    int SharedCopiesKept = 0)
 {
     /// <summary>A removal that did nothing (no ids, or the core was unavailable).</summary>
     public static RemoveResult Empty { get; } = new(
