@@ -217,10 +217,12 @@ impl DeleteTally {
 /// plain string comparison would otherwise get wrong) and a reparse point
 /// planted inside `originals/` cannot redirect a delete outside it.
 ///
-/// A path that cannot be canonicalised — overwhelmingly "it isn't there" —
-/// returns `true`: there is nothing to delete, and the caller's ordinary
-/// `NotFound` handling should record it as *missing* rather than have it
-/// silently disappear from the tally.
+/// A path that does not exist (`NotFound`) returns `true`: there is nothing
+/// to delete, and the caller's ordinary `NotFound` handling should record it
+/// as *missing* rather than have it silently disappear from the tally.
+/// Any OTHER canonicalisation failure (access denied, a bad component, an I/O
+/// error) returns `false`: containment could not be proven, and this check
+/// exists precisely so that an unproven path is never deleted.
 fn is_inside(storage_dir: &Path, path: &str) -> bool {
     let Ok(storage) = std::fs::canonicalize(storage_dir) else {
         // No storage directory to be inside of: refuse rather than guess.
@@ -228,7 +230,7 @@ fn is_inside(storage_dir: &Path, path: &str) -> bool {
     };
     match std::fs::canonicalize(path) {
         Ok(candidate) => candidate.starts_with(&storage),
-        Err(_) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
     }
 }
 
