@@ -109,7 +109,7 @@
         <ListView x:Name="ItemsList" Grid.Row="2" SelectionMode="Extended" IsMultiSelectCheckBoxEnabled="True"
                   Visibility="Collapsed" IsItemClickEnabled="False" TabIndex="1"
                   SelectionChanged="OnSelectionChanged" DoubleTapped="OnListDoubleTapped"
-                  KeyDown="OnListKeyDown" ContainerContentChanging="OnContainerContentChanging"
+                  ContainerContentChanging="OnContainerContentChanging"
                   AutomationProperties.AutomationId="LibraryPage_List" AutomationProperties.Name="Library items">
             <ListView.ItemsPanel>
                 <ItemsPanelTemplate>
