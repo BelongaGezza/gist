@@ -49,3 +49,4 @@ From the repo root in Git Bash (Windows 11, MSVC Rust toolchain per `rust-toolch
 3. Generate bindings: `tools/gen-bindings-cs.sh` -> `apps/windows/GIST.Core/Generated/` (gitignored; builds the x64 debug DLL if none is staged; `GIST_FFI_DLL=<path>` overrides the DLL). It fails if any `uniffi.toml` / `[bindings.csharp]` sets `exclude` (review F5; guard test: `tools/test-gen-bindings-cs-guard.sh`).
 4. Optional reproducibility check: `tools/check-bindings-reproducible.sh`.
 5. `cd apps/windows && dotnet build && dotnet test`.
+6. Dev/test only: set `GIST_DATA_ROOT=<dir>` before launching `GIST.exe` to use a scratch store (`GistStoragePaths.ForRoot`) instead of the real profile; the app also appends state/item-count (never titles or paths) to `<dir>/diag.log`. `apps/windows/GIST.App/verify-library.ps1 -Scenario Library|Corrupt` uses it with the seed tool (`cd apps/windows/spikes/seed && dotnet build`) and UI Automation for an end-to-end check.
