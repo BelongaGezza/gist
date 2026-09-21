@@ -14,5 +14,6 @@ public partial class App : Application
         AppServices.Initialize();
         _window = new MainWindow();
         _window.Activate();
+        Dialogs.DialogHarness.RunIfRequested(_window);
     }
 }
