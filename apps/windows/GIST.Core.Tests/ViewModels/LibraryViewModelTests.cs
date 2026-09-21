@@ -644,12 +644,9 @@ public sealed class LibraryViewModelTests : IDisposable
         Assert.True(await vm.RemoveTagAsync(id!, "science fiction"));
         Assert.Empty(await vm.TagsForAsync(id!));
 
-        // Documented current core behaviour, not an assertion that it is ideal: `remove_tag`
-        // deletes the item↔tag row but leaves the `tags` row, and `list_all_tags` reads that table
-        // directly, so a tag nobody uses any more stays in the Filter menu (and selecting it shows
-        // the "No items are tagged" empty state). Same on Apple; flagged for the lead as a
-        // shared Rust-side question rather than papered over here.
-        Assert.Contains("science fiction", vm.AllTags);
+        // `remove_tag` leaves the `tags` row, but `list_all_tags` now returns only tags with at
+        // least one item link, so a tag nobody uses any more drops out of the Filter menu.
+        Assert.DoesNotContain("science fiction", vm.AllTags);
     }
 
     [Fact]

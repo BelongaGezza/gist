@@ -179,6 +179,24 @@ fn collections_and_tags_written_by_old_version_read_back() {
 }
 
 #[test]
+fn removing_last_use_of_an_old_tag_drops_it_from_list_all_tags() {
+    let (_dir, db, storage) = fixture_copy("library_v5_rusqlite031.db");
+    let store = Store::open(&db, &storage).unwrap();
+
+    // "pirates" is only on Treasure Island; "gothic" is on some other item.
+    let treasure = id_of(&store, "Treasure Island");
+    store.remove_tag(&treasure, "pirates").unwrap();
+    assert_eq!(store.list_all_tags().unwrap(), vec!["adventure", "gothic"]);
+
+    // Re-adding the orphaned name reuses the old `tags` row and shows again.
+    store.add_tag(&treasure, "pirates").unwrap();
+    assert_eq!(
+        store.list_all_tags().unwrap(),
+        vec!["adventure", "gothic", "pirates"]
+    );
+}
+
+#[test]
 fn writes_under_the_new_version_interleave_with_old_rows() {
     let (_dir, db, storage) = fixture_copy("library_v5_rusqlite031.db");
     let store = Store::open(&db, &storage).unwrap();
