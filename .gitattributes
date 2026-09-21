@@ -19,6 +19,9 @@ fixtures/**/*.epub  binary
 fixtures/**/*.docx  binary
 fixtures/**/*.pdf   binary
 fuzz/corpus/**      binary
+# SQLite fixture databases (gist-store's old-version compatibility tests).
+# Line-ending normalisation would silently corrupt the file format.
+*.db                binary
 
 # Vendor/generated content excluded from GitHub's language stats and diffs.
 apps/apple/Generated/**  linguist-generated
