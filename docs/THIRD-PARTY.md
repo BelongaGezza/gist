@@ -14,6 +14,8 @@ package's `.nuspec` on nuget.org (and, for the file-based one, from the `license
 | Microsoft.NET.Test.Sdk | 17.14.1 | MIT | Test-only, not shipped |
 | xunit | 2.9.3 | Apache-2.0 | Test-only, not shipped |
 | xunit.runner.visualstudio | 2.8.2 | Apache-2.0 | Test-only, not shipped |
+| FlaUI.Core | 5.0.0 | MIT | `LICENSE.txt` in the package read; test-only (GIST.App.UITests), not shipped |
+| FlaUI.UIA3 | 5.0.0 | MIT | `LICENSE.txt` in the package read; brings Interop.UIAutomationClient (transitive, unreviewed); test-only, not shipped |
 
 Transitive NuGet packages are not listed here; `dotnet list package --include-transitive` in
 `windows-build` CI covers vulnerabilities, and licences of transitive packages should be reviewed

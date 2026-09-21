@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 gist-model = { path = "../gist-model" }
-rusqlite = { version = "0.31", features = ["bundled", "backup", "serde_json"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup", "serde_json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -20,3 +20,8 @@ aes-gcm = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
+# Integration tests (`tests/`) link only the crate under test plus its
+# dev-dependencies, so these two must be repeated here even though they are
+# already regular dependencies above.
+gist-model = { path = "../gist-model" }
+rusqlite = { version = "0.40", features = ["bundled"] }
