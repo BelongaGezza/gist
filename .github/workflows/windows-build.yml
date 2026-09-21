@@ -1,0 +1,161 @@
+name: windows-build
+# Paths-filtered, so it must NOT be configured as a required status check
+# (a required check that never runs on non-matching PRs would block them).
+on:
+  pull_request:
+    paths:
+      - 'apps/windows/**'
+      - 'crates/gist-ffi/**'
+      - 'crates/gist-core/**'
+      - 'crates/gist-store/**'
+      - 'tools/build-core-windows.sh'
+      - 'tools/gen-bindings-cs.sh'
+      - 'tools/check-bindings-reproducible.sh'
+      - '.github/workflows/windows-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/windows/**'
+      - 'crates/gist-ffi/**'
+      - 'crates/gist-core/**'
+      - 'crates/gist-store/**'
+      - 'tools/build-core-windows.sh'
+      - 'tools/gen-bindings-cs.sh'
+      - 'tools/check-bindings-reproducible.sh'
+      - '.github/workflows/windows-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Project mirror of the C# bindgen (docs/security-review-windows-bindgen.md); must match
+  # BINDGEN_REV in tools/gen-bindings-cs.sh.
+  BINDGEN_REV: 0fc022aa1d73fb1dda91a778b63f2824d7dca58b
+  DOTNET_NOLOGO: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+      # Same reasoning as core-test.yml: rust-toolchain.toml selects its own toolchain,
+      # so attach components to that one, not the action's "stable".
+      - run: rustup component add clippy rustfmt
+
+      - name: Confirm .NET SDK 10.x and Windows SDK are present
+        run: |
+          echo "--- dotnet SDKs"
+          dotnet --list-sdks
+          if ! dotnet --list-sdks | grep -qE '^10\.'; then
+            echo "::error::windows-latest image has no .NET SDK 10.x; apps/windows requires it (docs/windows-development-plan.md 4.1)."
+            exit 1
+          fi
+          echo "--- Windows SDK"
+          sdkroot="/c/Program Files (x86)/Windows Kits/10"
+          if [ ! -d "$sdkroot/Include" ]; then
+            echo "::error::No Windows SDK found under '$sdkroot'."
+            exit 1
+          fi
+          ls "$sdkroot/Include"
+          echo "--- Visual Studio"
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          "$vswhere" -latest -products '*' -property displayName -property installationVersion
+
+      - name: Cache uniffi-bindgen-cs binary
+        id: bindgen-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cargo/bin/uniffi-bindgen-cs.exe
+          key: uniffi-bindgen-cs-${{ runner.os }}-${{ env.BINDGEN_REV }}
+
+      - name: Install pinned uniffi-bindgen-cs
+        if: steps.bindgen-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked --git https://github.com/BelongaGezza/uniffi-bindgen-cs \
+            --rev "$BINDGEN_REV" uniffi-bindgen-cs
+
+      - name: Guard - C# bindgen 'exclude' must never be set
+        run: |
+          # docs/security-review-windows-bindgen.md: an `exclude` would silently drop generated API.
+          hits=$(git ls-files -z '*uniffi.toml' '*.cargo/config*' \
+                 | xargs -0 -r grep -nE '^[[:space:]]*exclude[[:space:]]*=' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::A uniffi.toml / Cargo config sets 'exclude':"
+            echo "$hits"
+            exit 1
+          fi
+          echo "no exclude settings found"
+
+      - name: Build core (x64 release)
+        run: tools/build-core-windows.sh x64 release
+
+      - name: Regenerate C# bindings
+        run: tools/gen-bindings-cs.sh
+
+      - name: Bindings reproducibility check
+        run: tools/check-bindings-reproducible.sh
+
+      - name: dotnet restore (locked mode)
+        run: dotnet restore apps/windows/GIST.sln --locked-mode
+
+      - name: dotnet build
+        run: dotnet build apps/windows/GIST.sln -c Release --no-restore
+
+      - name: dotnet test
+        run: dotnet test apps/windows/GIST.sln -c Release --no-build
+
+      - name: NuGet vulnerability gate (High/Critical fail)
+        run: |
+          dotnet list apps/windows/GIST.sln package --vulnerable --include-transitive 2>&1 | tee vuln.txt
+          # Do not trust the exit code: parse the report. Finding rows start with '>' and carry
+          # a severity column.
+          if grep -qiE "^[[:space:]]*error" vuln.txt; then
+            echo "::error::dotnet list package reported an error; cannot certify the gate."
+            exit 1
+          fi
+          if grep -E '^[[:space:]]*>' vuln.txt | grep -qE '[[:space:]](High|Critical)([[:space:]]|$)'; then
+            echo "::error::High/Critical NuGet vulnerability found (see report above)."
+            exit 1
+          fi
+          echo "no High/Critical NuGet vulnerabilities"
+
+  arm64-crosscompile:
+    # Not a required check. Reports honestly whether the ARM64 core DLL builds on windows-latest.
+    runs-on: windows-latest
+    continue-on-error: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+      - run: rustup component add clippy rustfmt
+
+      - name: Check for MSVC ARM64 build tools; install if missing
+        run: |
+          vs="/c/Program Files (x86)/Microsoft Visual Studio/Installer"
+          inst=$("$vs/vswhere.exe" -latest -products '*' -property installationPath)
+          echo "VS install: $inst"
+          comp=Microsoft.VisualStudio.Component.VC.Tools.ARM64
+          found=$("$vs/vswhere.exe" -latest -products '*' -requires "$comp" -property installationPath || true)
+          if [ -n "$found" ]; then
+            echo "ARM64 MSVC tools already present on the image."
+          else
+            echo "::warning::ARM64 MSVC tools NOT on the image; attempting install via VS Installer."
+            "$vs/setup.exe" modify --installPath "$inst" --add "$comp" --quiet --norestart --nocache \
+              || { echo "::error::Could not install $comp"; exit 1; }
+          fi
+          "$vs/vswhere.exe" -latest -products '*' -requires "$comp" -property installationPath \
+            | grep . || { echo "::error::ARM64 MSVC tools still missing after install attempt"; exit 1; }
+
+      - name: Build core (arm64 release)
+        run: |
+          rustup target add aarch64-pc-windows-msvc
+          tools/build-core-windows.sh arm64 release
+          ls -l apps/windows/native/arm64/gist_ffi.dll
