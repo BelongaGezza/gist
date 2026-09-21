@@ -73,6 +73,16 @@ dll="${GIST_FFI_DLL:-$root/apps/windows/native/x64/gist_ffi.dll}"
 if [ ! -f "$dll" ]; then
   if [ -n "${GIST_FFI_DLL:-}" ]; then echo "gen-bindings-cs: GIST_FFI_DLL=$dll not found" >&2; exit 1; fi
   bash "$root/tools/build-core-windows.sh" x64 debug
+elif [ -z "${GIST_FFI_DLL:-}" ]; then
+  # A staged DLL older than the Rust sources silently yields bindings for the OLD FFI surface (found in
+  # W2: a changed record shape regenerated unchanged, with no error). Refuse instead of guessing; do not
+  # auto-rebuild, since that would replace a staged release DLL with a debug one.
+  stale="$(find "$root/crates" "$root/Cargo.toml" "$root/Cargo.lock" \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' -o -name 'uniffi.toml' \) -newer "$dll" -print -quit 2>/dev/null || true)"
+  if [ -n "$stale" ]; then
+    echo "gen-bindings-cs: staged $dll is older than the Rust sources (e.g. ${stale#"$root"/})" >&2
+    echo "  rebuild it first: tools/build-core-windows.sh x64 <debug|release>   (or set GIST_FFI_DLL to a current DLL)" >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$out"
