@@ -252,8 +252,86 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
             State = CoreClientState.Ready;
             LastError = null;
         }).ConfigureAwait(false);
+
+        // Startup housekeeping: reclaim files a previous run's failed delete left behind.
+        // Fire-and-forget by design; see StartBackgroundSweep.
+        StartBackgroundSweep();
         return true;
     }
+
+    // ── Orphan sweep ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The outcome of the most recent orphan sweep (counts only), or null if none has completed.
+    /// Diagnostic; nothing in the UI reads it.
+    /// </summary>
+    [ObservableProperty]
+    private SweepResult? _lastSweepResult;
+
+    private Task _sweepTask = Task.CompletedTask;
+    private int _sweepPending;
+
+    /// <summary>Completes when any sweep started so far has finished. For tests and diagnostics.</summary>
+    public Task WaitForSweepAsync() => Volatile.Read(ref _sweepTask);
+
+    /// <summary>
+    /// Runs <c>SweepOrphanedFiles</c> once, in the background. <b>Rule (deliberately simple):</b> it
+    /// runs at startup (state Ready), and once more on the first public <see cref="RefreshAsync"/>
+    /// after a removal that reported <c>FilesFailed &gt; 0</c> — never after an ordinary removal.
+    /// </summary>
+    /// <remarks>
+    /// The call goes through <see cref="InvokeAsync{T}"/>, i.e. the same <c>_ffiGate</c> as every
+    /// removal, import and encrypt, so it can never overlap one: it queues behind whatever is in
+    /// flight. It never runs on the caller's or the UI thread, and every failure is swallowed
+    /// (this class logs nothing, so there is nothing to log; the outcome is counts-only anyway).
+    /// </remarks>
+    private void StartBackgroundSweep()
+    {
+        if (_disposed || _core is null)
+        {
+            return;
+        }
+
+        var previous = Volatile.Read(ref _sweepTask);
+        var next = Task.Run(async () =>
+        {
+            try
+            {
+                await previous.ConfigureAwait(false);
+                if (!TryGetCore(out var core))
+                {
+                    return;
+                }
+
+                var result = await InvokeAsync(() => core.SweepOrphanedFiles()).ConfigureAwait(false);
+                if (result.Failed)
+                {
+                    return;
+                }
+
+                var o = result.Value;
+                var mapped = new SweepResult(
+                    (int)o.FilesScanned, (int)o.FilesDeleted, (int)o.FilesMissing, (int)o.FilesFailed,
+                    MapKinds(o.FailureKinds));
+                await OnUiAsync(() => LastSweepResult = mapped).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is not OutOfMemoryException and not StackOverflowException)
+            {
+                // Housekeeping only: never surfaced, and this class logs nothing (see remarks).
+            }
+        });
+        Volatile.Write(ref _sweepTask, next);
+    }
+
+    private static IReadOnlyList<FileDeleteFailureKind> MapKinds(FfiFileDeleteFailureKind[]? kinds) =>
+        (kinds ?? Array.Empty<FfiFileDeleteFailureKind>())
+            .Select(k => k switch
+            {
+                FfiFileDeleteFailureKind.Locked => FileDeleteFailureKind.Locked,
+                FfiFileDeleteFailureKind.Permission => FileDeleteFailureKind.Permission,
+                _ => FileDeleteFailureKind.Other,
+            })
+            .ToArray();
 
     /// <summary>
     /// Re-attempts initialisation after any non-ready state, including
@@ -283,7 +361,16 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
     // ── Library ────────────────────────────────────────────────────────────
 
     /// <summary>Reloads <see cref="Items"/> from the core (newest first).</summary>
-    public Task RefreshAsync() => ReloadItemsAsync(clearErrorOnSuccess: true);
+    public async Task RefreshAsync()
+    {
+        await ReloadItemsAsync(clearErrorOnSuccess: true).ConfigureAwait(false);
+
+        // The idle moment a failed-file removal was waiting for (see StartBackgroundSweep).
+        if (IsReady && Interlocked.Exchange(ref _sweepPending, 0) == 1)
+        {
+            StartBackgroundSweep();
+        }
+    }
 
     /// <summary>
     /// Reloads <see cref="Items"/>.
@@ -487,37 +574,52 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
     /// <c>&lt;storageDir&gt;/originals/</c>. <b>The user's real file is never touched either way</b>
     /// — that is the whole point of copy-on-import, and there is a test for it.
     /// </param>
-    public async Task RemoveItemsAsync(IReadOnlyList<string> ids, bool deleteSourceFiles)
+    /// <returns>
+    /// What the removal did. A file that could not be deleted is reported in the result
+    /// (<see cref="RemoveResult.HasFileFailures"/>) and is <b>not</b> an error: the database row is
+    /// gone, which is the success. <see cref="LastError"/> is only set when the removal itself failed.
+    /// </returns>
+    public async Task<RemoveResult> RemoveItemsAsync(IReadOnlyList<string> ids, bool deleteSourceFiles)
     {
         ArgumentNullException.ThrowIfNull(ids);
         if (ids.Count == 0)
         {
-            return;
+            return RemoveResult.Empty;
         }
 
         if (!TryGetCore(out var core))
         {
             await PublishNotInitializedAsync().ConfigureAwait(false);
-            return;
+            return RemoveResult.Empty;
         }
 
         var idArray = ids.ToArray();
-        var result = await InvokeAsync(() =>
-        {
-            core.RemoveItems(idArray, deleteSourceFiles);
-            return true;
-        }).ConfigureAwait(false);
+        var result = await InvokeAsync(() => core.RemoveItemsDetailed(idArray, deleteSourceFiles))
+            .ConfigureAwait(false);
 
+        var mapped = RemoveResult.Empty;
         if (result.Failed)
         {
             await PublishErrorAsync(result.Error).ConfigureAwait(false);
         }
         else
         {
+            var o = result.Value;
+            mapped = new RemoveResult(
+                o.RemovedIds ?? Array.Empty<string>(),
+                (int)o.FilesDeleted, (int)o.FilesMissing, (int)o.FilesFailed,
+                MapKinds(o.FailureKinds));
+            if (mapped.HasFileFailures)
+            {
+                // Retry on the next idle refresh (see StartBackgroundSweep).
+                Interlocked.Exchange(ref _sweepPending, 1);
+            }
+
             await OnUiAsync(() => LastError = null).ConfigureAwait(false);
         }
 
         await ReloadItemsAsync(clearErrorOnSuccess: false).ConfigureAwait(false);
+        return mapped;
     }
 
     // ── Collections ────────────────────────────────────────────────────────
@@ -887,6 +989,17 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
         }
 
         _disposed = true;
+
+        // Don't free the native core under a running background sweep (bounded, best effort).
+        try
+        {
+            Volatile.Read(ref _sweepTask).Wait(TimeSpan.FromSeconds(2));
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            // Sweep failures are swallowed by the sweep itself; nothing to do here.
+        }
+
         _core?.Dispose();
         _core = null;
         _key = null;
