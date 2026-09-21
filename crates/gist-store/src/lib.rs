@@ -210,6 +210,57 @@ fn verify_checksum(path: &str, bytes: &[u8]) -> Result<(), StoreError> {
     Ok(())
 }
 
+// ── Long database paths on Windows (review Q10) ────────────────────────────
+
+/// The path to hand SQLite for the database file.
+///
+/// Everything else this crate touches goes through `std::fs`, which converts
+/// absolute Windows paths to the `\\?\` verbatim form internally and so
+/// already works past the legacy 260-character `MAX_PATH` limit. SQLite does
+/// not: its Win32 VFS calls `CreateFileW` with the path as given, which stays
+/// bound by `MAX_PATH` unless the *process* opts in (a `longPathAware`
+/// manifest **and** the machine-wide `LongPathsEnabled` policy). A GIST
+/// library under a long packaged `LocalState` path therefore failed to open
+/// at all — `CannotOpen` — while every blob, sidecar and original copy beside
+/// it read and wrote fine. This normalises the database path so that cannot
+/// happen regardless of how the host process is manifested.
+///
+/// Applied only when the path is close enough to the limit to matter, so the
+/// ordinary case is byte-for-byte unchanged. The budget subtracts room for
+/// the `-journal`/`-wal`/`-shm` siblings SQLite derives by appending to this
+/// name.
+#[cfg(windows)]
+// [PLATFORM: Windows] ─── begin ───────────────────────────────────────────
+fn sqlite_path(db_path: &Path) -> PathBuf {
+    const MAX_PATH: usize = 260;
+    /// Longest suffix SQLite appends to the database filename (`-journal`).
+    const LONGEST_DERIVED_SUFFIX: usize = 8;
+
+    if db_path.as_os_str().len() + LONGEST_DERIVED_SUFFIX < MAX_PATH {
+        return db_path.to_owned();
+    }
+    // `canonicalize` returns the verbatim (`\\?\`) form, but requires the
+    // path to exist — the database file itself may not yet, so canonicalise
+    // the parent directory (the caller has just created it) and re-attach
+    // the file name. If that fails for any reason, fall back to the path as
+    // given rather than failing the open here: the caller's own error is
+    // more informative than one invented in this helper.
+    match (db_path.parent(), db_path.file_name()) {
+        (Some(parent), Some(name)) => match std::fs::canonicalize(parent) {
+            Ok(canonical) => canonical.join(name),
+            Err(_) => db_path.to_owned(),
+        },
+        _ => db_path.to_owned(),
+    }
+}
+// [PLATFORM: Windows] ─── end ─────────────────────────────────────────────
+
+/// No-op on platforms whose path limits SQLite already satisfies.
+#[cfg(not(windows))]
+fn sqlite_path(db_path: &Path) -> PathBuf {
+    db_path.to_owned()
+}
+
 // ── Schema version ────────────────────────────────────────────────────────
 
 // v5 added `content_encrypted` (ADR-011) — see Store::open's migration block.
@@ -260,6 +311,25 @@ pub struct RemovedItem {
     /// (no local file was ever copied) or items imported before this field
     /// existed. This — not `source_path` — is what removal deletes when the
     /// caller asks to discard the source file.
+    pub source_copy_path: Option<String>,
+}
+
+// ── ReferencedFiles (what an orphan sweep must never delete) ───────────────
+
+/// The on-disk files one `library_items` row still refers to, as returned by
+/// [`Store::list_referenced_files`]. Used by
+/// `gist_core::Core::sweep_orphaned_files` (review Q10) to build the
+/// keep-list before deleting anything in the storage directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferencedFiles {
+    /// Path to the `<id>.json` document blob (ADR-007). The
+    /// `<id>.tokens.json` blob and both `.blake3` sidecars are derived from
+    /// this name.
+    pub doc_path: String,
+    /// Path to the sandboxed, content-addressed copy of the original import
+    /// (ADR-006), if one exists. Because copies are content-addressed, the
+    /// *same* path can appear for more than one row — which is exactly why
+    /// the sweep keeps a file while **any** row still references it.
     pub source_copy_path: Option<String>,
 }
 
@@ -388,7 +458,7 @@ impl Store {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(db_path)?;
+        let conn = Connection::open(sqlite_path(db_path))?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
 
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -520,6 +590,45 @@ impl Store {
             key_provider,
             read_key_provider,
         })
+    }
+
+    /// The directory this `Store` writes document blobs, token streams,
+    /// checksum sidecars and the ADR-006 `originals/` copies into — i.e. the
+    /// `storage_dir` it was opened with. Read-only accessor, added so
+    /// `gist_core::Core::sweep_orphaned_files` (review Q10) can enumerate
+    /// what is actually on disk and compare it against
+    /// [`Store::list_referenced_files`]; nothing here mutates state.
+    pub fn storage_dir(&self) -> &Path {
+        &self.storage_dir
+    }
+
+    /// Every on-disk file path currently referenced by a `library_items`
+    /// row: the `<id>.json` IR blob (ADR-007) and, where one exists, the
+    /// sandboxed content-addressed copy of the original import (ADR-006).
+    ///
+    /// The `<id>.tokens.json` blob and every `.blake3` checksum sidecar are
+    /// *derived* from these two paths rather than stored separately, so
+    /// callers reconstruct those names themselves (see
+    /// `gist_core::Core::sweep_orphaned_files`).
+    ///
+    /// Deliberately returns `source_copy_path`, never `source_path`: the
+    /// latter is the user's real file at its real location, which GIST must
+    /// never delete and which the orphan sweep must therefore never even
+    /// consider (ADR-006).
+    pub fn list_referenced_files(&self) -> Result<Vec<ReferencedFiles>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare("SELECT doc_path, source_copy_path FROM library_items")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ReferencedFiles {
+                doc_path: row.get(0)?,
+                source_copy_path: row.get(1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// `Some(32-byte key)` if this `Store` was opened via
@@ -1525,6 +1634,70 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// `list_referenced_files` is what the orphan sweep builds its keep-list
+    /// from (review Q10), so it must report exactly the live rows' blob and
+    /// ADR-006 copy paths — and must never report `source_path`, the user's
+    /// own file, which no cleanup pass is allowed to consider.
+    #[test]
+    fn list_referenced_files_reports_blob_and_copy_paths_but_never_the_users_own_file() {
+        let (_dir, store) = open_test_store();
+        let id = insert_test_item(&store);
+        let copy = store.store_original_copy(b"original bytes", "txt").unwrap();
+
+        // `insert_test_item` stamps a `source_ref` but no `source_copy_ref`;
+        // re-insert the same document with the copy attached.
+        let mut doc = store.get_item(&id).unwrap().unwrap();
+        doc.metadata.source_copy_ref = Some(copy.clone());
+        store.insert_item(&doc).unwrap();
+
+        let referenced = store.list_referenced_files().unwrap();
+        assert_eq!(referenced.len(), 1);
+        assert_eq!(
+            referenced[0].doc_path,
+            store
+                .storage_dir()
+                .join(format!("{id}.json"))
+                .to_string_lossy()
+        );
+        assert_eq!(
+            referenced[0].source_copy_path.as_deref(),
+            Some(copy.as_str())
+        );
+
+        store.remove_items(&[id]).unwrap();
+        assert!(store.list_referenced_files().unwrap().is_empty());
+    }
+
+    /// A database path past the legacy 260-character `MAX_PATH` must open.
+    ///
+    /// Unguarded deliberately: the assertion ("a long path works") is the
+    /// same everywhere, and only the Windows leg can regress it — SQLite's
+    /// Win32 VFS passes the path to `CreateFileW` unprefixed, so before
+    /// `sqlite_path` existed this failed with `CannotOpen` even though every
+    /// `std::fs` write beside it succeeded. Found by the `gist-core`
+    /// long-path test (review Q10); pinned here at the layer that owns it.
+    #[test]
+    fn a_database_path_past_legacy_max_path_opens_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut root = dir.path().to_path_buf();
+        while root.as_os_str().len() < 300 {
+            root = root.join("a_directory_with_a_long_name");
+        }
+        std::fs::create_dir_all(&root).unwrap();
+
+        let db = root.join("long.db");
+        let storage = root.join("storage");
+        assert!(db.as_os_str().len() > 260);
+
+        let store = Store::open(&db, &storage).unwrap();
+        let id = insert_test_item(&store);
+        // Exercise a write-then-read cycle, which is what actually forces
+        // the journal/WAL sibling files (whose names SQLite derives by
+        // appending to the database path) into existence.
+        assert!(store.get_item(&id).unwrap().is_some());
+        assert_eq!(store.list_items(0, 10).unwrap().len(), 1);
     }
 
     #[test]
