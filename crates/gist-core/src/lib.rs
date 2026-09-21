@@ -2191,6 +2191,60 @@ mod tests {
             "the sweep must never reach outside the storage directory through a reparse point"
         );
     }
+
+    /// Windows filesystems are case-insensitive, so `ABC.json` and
+    /// `abc.json` are the *same file* — but two different strings. The
+    /// sweep's keep-list is matched on file names, so a case mismatch
+    /// between what a row recorded and what the directory listing reports
+    /// would fail in the **unsafe** direction: a file a live row still
+    /// references would look unreferenced and be deleted.
+    ///
+    /// Reproduced here by renaming a live item's blob to an upper-cased
+    /// form of the same name (which on Windows changes only the stored
+    /// case — the row still resolves to it, as the `get_document` assertion
+    /// below proves) while the database keeps the original lower-case path.
+    /// Without the case-insensitive keep-list this deletes a live item's
+    /// document blob; with it, the file is kept.
+    ///
+    /// `#[cfg(windows)]` because the premise is false elsewhere: on a
+    /// case-sensitive filesystem the renamed file genuinely *is* a
+    /// different, unreferenced file, and sweeping it would be correct.
+    #[cfg(windows)]
+    #[test]
+    fn sweep_keeps_a_referenced_file_whose_name_differs_only_by_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let src = dir.path().join("case.txt");
+        std::fs::write(&src, b"A live item whose blob gets re-cased on disk.").unwrap();
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        // Re-case the blob's name on disk; the row still says `<id>.json`.
+        let as_written = storage.join(format!("{id}.json"));
+        let re_cased = storage.join(format!("{}.json", id.to_ascii_uppercase()));
+        std::fs::rename(&as_written, &re_cased).unwrap();
+
+        assert!(
+            core.get_document(&id).is_ok(),
+            "precondition: on a case-insensitive filesystem the row must still resolve to the \
+             re-cased file — otherwise this test is not exercising what it claims to"
+        );
+
+        let outcome = core.sweep_orphaned_files().unwrap();
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (0, 0),
+            "a live row's file must be kept despite the case difference: {outcome:?}"
+        );
+        assert!(
+            re_cased.exists(),
+            "the sweep deleted a file a live library row still references"
+        );
+        assert!(
+            core.get_document(&id).is_ok(),
+            "the item must still be readable after the sweep"
+        );
+    }
     // [PLATFORM: Windows] ─── end ───────────────────────────────────────
 
     /// A bulk call spanning a real id and an unknown one must report both
