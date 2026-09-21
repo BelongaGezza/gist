@@ -15,7 +15,12 @@
         </Grid.RowDefinitions>
 
         <!-- Header: title left, search right (spec 4.1). -->
-        <Grid x:Name="HeaderGrid" Grid.Row="0" ColumnSpacing="16">
+        <StackPanel Grid.Row="0" Spacing="8">
+        <!-- Fixed-text warning when a removal left stored files behind (never paths/titles). -->
+        <InfoBar x:Name="RemoveWarningBar" Severity="Warning" IsOpen="False" IsClosable="True"
+                 Closed="OnRemoveWarningClosed" Loaded="OnRemoveWarningLoaded"
+                 AutomationProperties.AutomationId="LibraryPage_RemoveWarning" />
+        <Grid x:Name="HeaderGrid" ColumnSpacing="16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
@@ -27,6 +32,7 @@
                             AutomationProperties.AutomationId="LibraryPage_SearchBox"
                             ToolTipService.ToolTip="Search library (Ctrl+F)" />
         </Grid>
+        </StackPanel>
 
         <!-- Command bar, order per spec 4.1. Items 5-9 are last, so they overflow first at narrow widths. -->
         <CommandBar x:Name="Commands" Grid.Row="1" DefaultLabelPosition="Right" HorizontalAlignment="Left"

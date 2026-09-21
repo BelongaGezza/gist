@@ -38,6 +38,7 @@ public abstract class LibraryViewModelBase : ObservableObject, IDisposable
     private LibraryDialog _pendingDialog = LibraryDialog.None;
     private CoreError? _lastError;
     private string? _lastDrmFile;
+    private string? _lastRemoveWarning;
     private bool _isLoading;
     private bool _isBusy;
     private bool _disposed;
@@ -217,6 +218,20 @@ public abstract class LibraryViewModelBase : ObservableObject, IDisposable
         private set => SetProperty(ref _lastDrmFile, value);
     }
 
+    /// <summary>
+    /// Fixed-text warning after a removal whose stored files could not all be deleted, or null.
+    /// Never contains a path or title (<see cref="RemoveWarning"/>). Cleared by
+    /// <see cref="DismissRemoveWarning"/> or by the next user operation.
+    /// </summary>
+    public string? LastRemoveWarning
+    {
+        get => _lastRemoveWarning;
+        protected set => SetProperty(ref _lastRemoveWarning, value);
+    }
+
+    /// <summary>Dismisses <see cref="LastRemoveWarning"/>.</summary>
+    public void DismissRemoveWarning() => LastRemoveWarning = null;
+
     /// <summary>Asks the shell to present <paramref name="dialog"/>.</summary>
     public void RequestDialog(LibraryDialog dialog) => PendingDialog = dialog;
 
@@ -250,6 +265,7 @@ public abstract class LibraryViewModelBase : ObservableObject, IDisposable
     /// </summary>
     protected void BeginUserOperation()
     {
+        LastRemoveWarning = null;
         LastError = null;
         LastDrmFile = null;
         if (PendingDialog is LibraryDialog.DrmProtected or LibraryDialog.Error)

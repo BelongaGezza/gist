@@ -5,6 +5,7 @@ using Gist.Core.Models;
 using Gist.Core.ViewModels;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
@@ -178,10 +179,53 @@ public sealed partial class LibraryPage : Page
             SyncSearchBox(vm);
         }
 
+        UpdateRemoveWarning(vm);
+
         if (vm.PendingDialog != LibraryDialog.None && !_handlingDialog)
         {
             _ = SafeAsync(() => RunPendingDialogAsync(vm));
         }
+    }
+
+    private void UpdateRemoveWarning(LibraryViewModel vm)
+    {
+        var warning = vm.LastRemoveWarning;
+        if (warning is null)
+        {
+            RemoveWarningBar.IsOpen = false;
+            return;
+        }
+
+        RemoveWarningBar.Message = warning;
+        RemoveWarningBar.IsOpen = true;
+    }
+
+    private void OnRemoveWarningClosed(InfoBar sender, InfoBarClosedEventArgs args)
+    {
+        // Only a user dismissal clears the view-model warning; our own IsOpen=false is Programmatic.
+        if (args.Reason == InfoBarCloseReason.CloseButton) _vm?.DismissRemoveWarning();
+    }
+
+    // The InfoBar's built-in close button lives in its template; give it a stable automation id.
+    private void OnRemoveWarningLoaded(object sender, RoutedEventArgs e)
+    {
+        RemoveWarningBar.ApplyTemplate();
+        if (FindCloseButton(RemoveWarningBar) is { } close)
+        {
+            AutomationProperties.SetAutomationId(close, "LibraryPage_RemoveWarningClose");
+        }
+    }
+
+    private static Button? FindCloseButton(DependencyObject root)
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is Button { Name: "CloseButton" } b) return b;
+            if (FindCloseButton(child) is { } found) return found;
+        }
+
+        return null;
     }
 
     private static Visibility Vis(bool visible) => visible ? Visibility.Visible : Visibility.Collapsed;
