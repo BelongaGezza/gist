@@ -240,14 +240,14 @@ impl From<gist_core::EncryptItemOutcome> for FfiEncryptItemResult {
 ///
 /// Carries no path, filename or OS error text by design: these values are
 /// shown to the user in a result summary, and this project logs source paths
-/// at `debug!` only. `NotFound` is benign (a file that was already gone, e.g.
-/// a checksum sidecar written before ADR-013 existed); only `Locked`,
-/// `Permission` and `Other` are worth surfacing.
+/// at `debug!` only. Every variant is a genuine failure worth surfacing —
+/// "the file was already gone" is not one of them and is counted separately
+/// as `files_missing`, so a pre-ADR-013 item with no checksum sidecars
+/// reports zero failures rather than looking broken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiFileDeleteFailureKind {
     Locked,
     Permission,
-    NotFound,
     Other,
 }
 
@@ -256,7 +256,6 @@ impl From<gist_core::FileDeleteFailureKind> for FfiFileDeleteFailureKind {
         match k {
             gist_core::FileDeleteFailureKind::Locked => FfiFileDeleteFailureKind::Locked,
             gist_core::FileDeleteFailureKind::Permission => FfiFileDeleteFailureKind::Permission,
-            gist_core::FileDeleteFailureKind::NotFound => FfiFileDeleteFailureKind::NotFound,
             gist_core::FileDeleteFailureKind::Other => FfiFileDeleteFailureKind::Other,
         }
     }
@@ -275,7 +274,13 @@ pub struct FfiRemoveOutcome {
     /// true) the ADR-006 sandboxed original copy and its sidecar. Never the
     /// user's own file.
     pub files_deleted: u32,
-    /// How many of those deletions failed. Equals `failure_kinds.len()`.
+    /// Files that were already gone, so there was nothing to delete. **Not
+    /// a failure** — the ordinary case is an item imported before ADR-013
+    /// added checksum sidecars, which has no `.blake3` files to remove. Do
+    /// not surface this as a problem; it exists so the tally adds up.
+    pub files_missing: u32,
+    /// How many deletions genuinely failed. Equals `failure_kinds.len()`.
+    /// **This is the only count worth showing the user as a warning.**
     pub files_failed: u32,
     /// One coarse kind per failed deletion, in attempt order.
     pub failure_kinds: Vec<FfiFileDeleteFailureKind>,
@@ -286,6 +291,7 @@ impl From<gist_core::RemoveOutcome> for FfiRemoveOutcome {
         FfiRemoveOutcome {
             removed_ids: o.removed_ids,
             files_deleted: o.files_deleted,
+            files_missing: o.files_missing,
             files_failed: o.files_failed,
             failure_kinds: o.failure_kinds.into_iter().map(Into::into).collect(),
         }
@@ -298,6 +304,10 @@ impl From<gist_core::RemoveOutcome> for FfiRemoveOutcome {
 pub struct FfiSweepOutcome {
     pub files_scanned: u32,
     pub files_deleted: u32,
+    /// Files that vanished between this sweep listing the directory and
+    /// acting on it. Rare, benign, not a failure — same meaning as
+    /// `FfiRemoveOutcome.files_missing`.
+    pub files_missing: u32,
     pub files_failed: u32,
     pub failure_kinds: Vec<FfiFileDeleteFailureKind>,
 }
@@ -307,6 +317,7 @@ impl From<gist_core::SweepOutcome> for FfiSweepOutcome {
         FfiSweepOutcome {
             files_scanned: o.files_scanned,
             files_deleted: o.files_deleted,
+            files_missing: o.files_missing,
             files_failed: o.files_failed,
             failure_kinds: o.failure_kinds.into_iter().map(Into::into).collect(),
         }

@@ -36,19 +36,17 @@ pub enum FileDeleteFailureKind {
     /// The filesystem refused the delete on permission grounds (read-only
     /// file/attribute, ACL denial).
     Permission,
-    /// The file was already gone. Benign, not a fault: a checksum sidecar
-    /// written before ADR-013 landed never existed, and a user may have
-    /// cleaned up the storage directory by hand. Counted here so the caller
-    /// sees an honest "attempted vs deleted" tally rather than a silent gap,
-    /// but a UI should treat only `Locked`/`Permission`/`Other` as anything
-    /// worth reporting.
-    NotFound,
     /// Anything else (I/O error, path too long for the platform, etc.).
     Other,
 }
 
 impl FileDeleteFailureKind {
-    /// Classify a `std::fs::remove_file` error.
+    /// Classify a `std::fs::remove_file` error that is **known not to be
+    /// `NotFound`** — callers must handle a missing file before reaching
+    /// here, because "the file was already gone" is not a failure (see
+    /// [`RemoveOutcome::files_missing`]). There is deliberately no
+    /// `NotFound` variant to return: every value of this enum is something
+    /// that genuinely went wrong.
     fn classify(e: &std::io::Error) -> Self {
         // [PLATFORM: Windows] ─── begin ───────────────────────────────────
         // Windows reports "another handle has this file open and did not
@@ -69,8 +67,11 @@ impl FileDeleteFailureKind {
         }
         // [PLATFORM: Windows] ─── end ─────────────────────────────────────
         match e.kind() {
-            std::io::ErrorKind::NotFound => FileDeleteFailureKind::NotFound,
             std::io::ErrorKind::PermissionDenied => FileDeleteFailureKind::Permission,
+            // `NotFound` cannot reach here (the caller filters it) and is
+            // not a failure if it somehow did, so it falls in with `Other`
+            // rather than being given a variant that would then be
+            // permanently unreachable.
             _ => FileDeleteFailureKind::Other,
         }
     }
@@ -96,10 +97,25 @@ pub struct RemoveOutcome {
     /// and its sidecar. Never counts the user's own file at `source_path`,
     /// which is never touched.
     pub files_deleted: u32,
-    /// How many of those deletions failed. Equals `failure_kinds.len()`.
+    /// How many files were already gone, so there was nothing to delete.
+    ///
+    /// **Not a failure, and deliberately its own counter.** The ordinary
+    /// case is an item imported before ADR-013 added checksum sidecars: it
+    /// has no `.blake3` files, so a clean removal of it reports
+    /// `files_missing: 2` (or 3) with `files_failed: 0`. Folding these into
+    /// `files_failed` would make a perfectly good removal look broken in
+    /// the UI. A user who tidied the storage directory by hand lands here
+    /// too. Kept visible rather than ignored so the tally still adds up
+    /// against what was attempted.
+    pub files_missing: u32,
+    /// How many deletions genuinely failed — `Locked`, `Permission` or
+    /// `Other` only. Equals `failure_kinds.len()`. A non-zero value here is
+    /// the thing worth telling the user about; everything else in this
+    /// struct is bookkeeping.
     pub files_failed: u32,
     /// One entry per failed deletion, in attempt order, coarse kind only —
-    /// no paths, no titles. See [`FileDeleteFailureKind`].
+    /// no paths, no titles. Never contains a "missing file" entry; see
+    /// `files_missing`. See [`FileDeleteFailureKind`].
     pub failure_kinds: Vec<FileDeleteFailureKind>,
 }
 
@@ -112,11 +128,18 @@ pub struct SweepOutcome {
     pub files_scanned: u32,
     /// Orphaned files successfully deleted.
     pub files_deleted: u32,
-    /// Orphaned files that could not be deleted this time. Equals
-    /// `failure_kinds.len()`; a later sweep will try again.
+    /// Orphaned files that turned out to be already gone by the time the
+    /// delete ran — i.e. something removed them between this sweep listing
+    /// the directory and acting on it. Rare, benign, and not a failure;
+    /// carried for the same reason as [`RemoveOutcome::files_missing`], so
+    /// deleted + missing + failed accounts for everything attempted.
+    pub files_missing: u32,
+    /// Orphaned files that genuinely could not be deleted this time
+    /// (`Locked`/`Permission`/`Other`). Equals `failure_kinds.len()`; a
+    /// later sweep will try again.
     pub files_failed: u32,
-    /// One entry per failure, coarse kind only. See
-    /// [`FileDeleteFailureKind`].
+    /// One entry per failure, coarse kind only. Never contains a "missing
+    /// file" entry. See [`FileDeleteFailureKind`].
     pub failure_kinds: Vec<FileDeleteFailureKind>,
 }
 
@@ -125,6 +148,7 @@ pub struct SweepOutcome {
 #[derive(Default)]
 struct DeleteTally {
     deleted: u32,
+    missing: u32,
     failure_kinds: Vec<FileDeleteFailureKind>,
 }
 
@@ -134,9 +158,17 @@ impl DeleteTally {
     /// gone, so failing the whole call here would misreport a removal that
     /// genuinely happened. The path (and full OS error) go to `debug!` only,
     /// per this project's source-path logging policy.
+    ///
+    /// Three outcomes, kept distinct on purpose: deleted, already missing
+    /// (not a failure — see [`RemoveOutcome::files_missing`]), or a real
+    /// failure with a coarse kind.
     fn try_delete(&mut self, path: &str) {
         match std::fs::remove_file(path) {
             Ok(()) => self.deleted += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!("gist-core: nothing to delete at {}", path);
+                self.missing += 1;
+            }
             Err(e) => {
                 tracing::debug!("gist-core: failed to delete file {}: {}", path, e);
                 self.failure_kinds.push(FileDeleteFailureKind::classify(&e));
@@ -805,6 +837,7 @@ impl Core {
         Ok(RemoveOutcome {
             removed_ids,
             files_deleted: tally.deleted,
+            files_missing: tally.missing,
             files_failed: tally.failed(),
             failure_kinds: tally.failure_kinds,
         })
@@ -917,6 +950,7 @@ impl Core {
         Ok(SweepOutcome {
             files_scanned: scanned,
             files_deleted: tally.deleted,
+            files_missing: tally.missing,
             files_failed: tally.failed(),
             failure_kinds: tally.failure_kinds,
         })
@@ -1767,13 +1801,12 @@ mod tests {
         );
     }
 
-    /// A file that is already gone is reported as `NotFound`, not silently
-    /// counted as deleted — the "attempted vs deleted" tally has to be
-    /// honest in both directions. This is also the shape a pre-ADR-013 item
-    /// (no checksum sidecars) produces, which is why `NotFound` is
-    /// documented as benign rather than actionable.
+    /// A file that is already gone is counted as **missing, not failed**.
+    /// The "attempted vs deleted" tally still has to add up, but a missing
+    /// file is not something to warn the user about, so it must not inflate
+    /// `files_failed` or appear in the failure breakdown.
     #[test]
-    fn remove_items_detailed_reports_already_missing_files_as_not_found() {
+    fn remove_items_detailed_counts_already_deleted_files_as_missing_not_failed() {
         let dir = tempfile::tempdir().unwrap();
         let (core, storage) = core_rooted_at(dir.path());
 
@@ -1787,17 +1820,55 @@ mod tests {
 
         let outcome = core.remove_items_detailed(&[id], false).unwrap();
         assert_eq!(
-            (outcome.files_deleted, outcome.files_failed),
-            (2, 2),
-            "the tokens blob and its sidecar go; the two already-deleted files are reported: {outcome:?}"
+            (
+                outcome.files_deleted,
+                outcome.files_missing,
+                outcome.files_failed
+            ),
+            (2, 2, 0),
+            "the tokens blob and its sidecar are deleted; the two already-gone files are \
+             missing, and nothing failed: {outcome:?}"
         );
         assert!(
-            outcome
-                .failure_kinds
-                .iter()
-                .all(|k| *k == FileDeleteFailureKind::NotFound),
-            "{outcome:?}"
+            outcome.failure_kinds.is_empty(),
+            "a missing file must never appear in the failure breakdown: {outcome:?}"
         );
+    }
+
+    /// The case the `files_missing`/`files_failed` split exists for: an
+    /// item imported before ADR-013 added checksum sidecars has no
+    /// `.blake3` files at all, so removing it inevitably finds two of them
+    /// absent. That is a completely clean removal and **must report zero
+    /// failures** — otherwise every legacy item in a user's library would
+    /// warn on removal for no reason.
+    #[test]
+    fn removing_a_pre_adr013_item_without_checksum_sidecars_reports_no_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let src = dir.path().join("legacy.txt");
+        std::fs::write(&src, b"Imported before checksum sidecars existed.").unwrap();
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        // Simulate the legacy on-disk shape: blobs present, sidecars never
+        // written. (The sandboxed copy keeps its sidecar, so this also
+        // covers a mixed library rather than an all-or-nothing one.)
+        for name in [format!("{id}.json"), format!("{id}.tokens.json")] {
+            std::fs::remove_file(storage.join(format!("{name}.blake3"))).unwrap();
+        }
+
+        let outcome = core.remove_items_detailed(&[id], true).unwrap();
+        assert_eq!(
+            (
+                outcome.files_deleted,
+                outcome.files_missing,
+                outcome.files_failed
+            ),
+            (FILES_PER_FRESH_ITEM_WITH_SOURCE_COPY - 2, 2, 0),
+            "a legacy item removes cleanly: only the two never-written sidecars are missing, \
+             and nothing failed: {outcome:?}"
+        );
+        assert!(outcome.failure_kinds.is_empty(), "{outcome:?}");
     }
 
     /// The sweep deletes GIST-generated files no row references, and leaves
@@ -2018,6 +2089,10 @@ mod tests {
             outcome.files_deleted,
             FILES_PER_FRESH_ITEM_WITH_SOURCE_COPY - 1,
             "everything except the locked file should still be cleaned up: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.files_missing, 0,
+            "a locked file is present-but-undeletable, never 'missing': {outcome:?}"
         );
         assert!(
             doc_path.exists(),
