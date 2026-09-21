@@ -18,6 +18,12 @@ public static class AppServices
 
     public static bool IsInitialized { get; private set; }
 
+    /// <summary>The main window (set by App); owner for pickers.</summary>
+    public static Microsoft.UI.Xaml.Window? MainWindow { get; set; }
+
+    /// <summary>TODO(W2): swap for Gist.App.Dialogs.LibraryDialogHost once merged.</summary>
+    internal static Views.ILibraryDialogHost DialogHost { get; set; } = new Views.StubLibraryDialogHost();
+
     public static CoreClient Core { get; private set; } = null!;
 
     public static GistStoragePaths Paths { get; private set; } = null!;
