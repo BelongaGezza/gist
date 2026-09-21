@@ -16,6 +16,13 @@ namespace Gist.Core.ViewModels;
 /// Computed as data rather than formatted inside a XAML page so the truncation arithmetic —
 /// the part with off-by-one risk — is unit-tested directly.
 /// </para>
+/// <para>
+/// <b>Removal is one thing (maintainer decision, 2026-09-21).</b> There used to be two library
+/// buttons, "Remove from Library" (keep GIST's stored copy) and "Also Delete Stored Copy". The
+/// first was misleading: the startup orphan sweep reclaims any stored copy no row references, so
+/// "keep" only meant "until the next launch". Removing an item now always deletes everything GIST
+/// holds for it, and the dialog offers one destructive button. See ADR-006's addendum.
+/// </para>
 /// </remarks>
 /// <param name="Count">How many items the confirmation covers.</param>
 /// <param name="Title">Dialog title, e.g. <c>"Remove 3 items?"</c>.</param>
@@ -29,48 +36,50 @@ namespace Gist.Core.ViewModels;
 /// a line's visibility straight to it.
 /// </param>
 /// <param name="Message">The irreversibility line, always present.</param>
-/// <param name="AllowsDeletingStoredCopy">
-/// Whether the dialog offers the second, destructive button. True on the Library screen
-/// ("Also Delete Stored Copy"), false on a Collection screen, where removal only detaches the item
-/// from the collection.
-/// </param>
 public sealed record RemovePreview(
     int Count,
     string Title,
     IReadOnlyList<string> Titles,
     int MoreCount,
     string? MoreText,
-    string Message,
-    bool AllowsDeletingStoredCopy)
+    string Message)
 {
     /// <summary>How many titles are listed before the dialog switches to "and N more".</summary>
     public const int MaxListedTitles = 5;
 
     /// <summary>
-    /// The irreversibility line for removing items from the library. States what is and is not
-    /// deleted, because the two buttons differ only in whether GIST's own stored copy goes too —
-    /// the user's original file is never touched by either (ADR-006, spec §10 item 1).
+    /// The irreversibility line for removing exactly one item from the library. Says plainly what
+    /// goes (the item and GIST's own stored copy, from this PC) and what does not (the file the
+    /// user imported, wherever it lives — ADR-006, spec §10 item 1).
     /// </summary>
-    public const string LibraryIrreversibleLine =
-        "This can't be undone. GIST forgets these items and deletes its own stored copy of the text. "
-        + "Your original files are never touched, wherever they live — "
-        + "\"Also Delete Stored Copy\" only removes the copy GIST made when importing.";
+    public const string LibraryIrreversibleLineOne =
+        "This permanently deletes this item, and GIST's stored copy of it, from this PC. "
+        + "It can't be undone. The original file you imported is not touched.";
+
+    /// <summary>The same line for a multi-item selection.</summary>
+    public const string LibraryIrreversibleLineMany =
+        "This permanently deletes these items, and GIST's stored copies of them, from this PC. "
+        + "It can't be undone. The original files you imported are not touched.";
 
     /// <summary>The irreversibility line for detaching items from a collection.</summary>
     public const string CollectionIrreversibleLine =
         "The items stay in your library; only their membership of this collection is removed.";
+
+    /// <summary>The library irreversibility line for a selection of <paramref name="count"/> items.</summary>
+    public static string LibraryIrreversibleLine(int count) =>
+        count == 1 ? LibraryIrreversibleLineOne : LibraryIrreversibleLineMany;
 
     /// <summary>Builds the Library-screen preview for <paramref name="selected"/>.</summary>
     public static RemovePreview ForLibrary(IReadOnlyList<LibraryItemVM> selected) =>
         Build(
             selected,
             count => count == 1 ? "Remove 1 item?" : $"Remove {count} items?",
-            LibraryIrreversibleLine,
-            allowsDeletingStoredCopy: true);
+            LibraryIrreversibleLine);
 
     /// <summary>
     /// Builds the Collection-screen preview. The title names the collection so the two removals can
-    /// never be mistaken for each other (§5).
+    /// never be mistaken for each other (§5). Removing from a collection is not destructive and is
+    /// deliberately untouched by the 2026-09-21 complete-delete decision.
     /// </summary>
     public static RemovePreview ForCollection(IReadOnlyList<LibraryItemVM> selected, string collectionName) =>
         Build(
@@ -78,14 +87,12 @@ public sealed record RemovePreview(
             count => count == 1
                 ? $"Remove 1 item from “{collectionName}”?"
                 : $"Remove {count} items from “{collectionName}”?",
-            CollectionIrreversibleLine,
-            allowsDeletingStoredCopy: false);
+            _ => CollectionIrreversibleLine);
 
     private static RemovePreview Build(
         IReadOnlyList<LibraryItemVM> selected,
         Func<int, string> title,
-        string message,
-        bool allowsDeletingStoredCopy)
+        Func<int, string> message)
     {
         ArgumentNullException.ThrowIfNull(selected);
 
@@ -99,7 +106,6 @@ public sealed record RemovePreview(
             listed,
             more,
             more > 0 ? $"and {more} more" : null,
-            message,
-            allowsDeletingStoredCopy);
+            message(count));
     }
 }

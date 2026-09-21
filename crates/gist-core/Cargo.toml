@@ -20,6 +20,14 @@ tracing        = { workspace = true }
 
 [dev-dependencies]
 tempfile        = "3"
+# Tests only: proves a user's own original file is byte-for-byte unchanged
+# after a removal, rather than merely still present. Same version the rest of
+# the workspace already uses (gist-store), so this adds no new dependency.
+sha2            = { workspace = true }
+# Tests only: lets the removal tests tamper with a `library_items` row the way
+# a corrupted database would, to prove removal refuses a stored-copy path that
+# points outside the storage directory. Same version gist-store already uses.
+rusqlite        = { version = "0.40", features = ["bundled"] }
 gist-parse-txt  = { path = "../gist-parse-txt"  }
 gist-parse-epub = { path = "../gist-parse-epub" }
 gist-parse-docx = { path = "../gist-parse-docx" }

@@ -127,7 +127,7 @@ public sealed class CollectionViewModelTests : IDisposable
         var preview = vm.RemovePreview();
 
         Assert.Equal("Remove 1 item from “Reading List”?", preview.Title);
-        Assert.False(preview.AllowsDeletingStoredCopy);
+        Assert.Equal(RemovePreview.CollectionIrreversibleLine, preview.Message);
         Assert.Equal(new[] { "alpha" }, preview.Titles);
     }
 

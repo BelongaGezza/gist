@@ -30,6 +30,23 @@ public sealed class LibraryDialogHost
 {
     private const int MaxChainedDialogs = 4;
 
+    /// <summary>
+    /// How long <see cref="ShowDialogAsync"/> keeps retrying while WinUI refuses to open a
+    /// <c>ContentDialog</c> because another one is still closing.
+    /// </summary>
+    /// <remarks>
+    /// WinUI allows exactly one open <c>ContentDialog</c> per window, and a dialog stays "open" for
+    /// a short tail <em>after</em> it has disappeared from the UI Automation tree — roughly half a
+    /// second. A request made inside that window used to throw, get swallowed, and then be
+    /// dismissed, silently dropping whatever the user had just asked for (found by the FlaUI
+    /// click-through suite, which had to sleep 600 ms after every dialog to avoid it). Retrying is
+    /// the fix: the wait is bounded so a genuinely broken show still fails rather than hanging.
+    /// </remarks>
+    private static readonly TimeSpan ShowRetryWindow = TimeSpan.FromSeconds(2);
+
+    /// <summary>Gap between <see cref="ShowRetryWindow"/> attempts — short enough to feel instant.</summary>
+    private static readonly TimeSpan ShowRetryDelay = TimeSpan.FromMilliseconds(50);
+
     private static readonly SemaphoreSlim Gate = new(1, 1);
 
     private const string DestructiveButtonStyleXaml =
@@ -52,18 +69,30 @@ public sealed class LibraryDialogHost
         {
             for (var i = 0; i < MaxChainedDialogs && vm.PendingDialog != LibraryDialog.None; i++)
             {
-                var shown = vm.PendingDialog;
+                var requested = vm.PendingDialog;
+                bool displayed;
                 try
                 {
-                    await ShowAsync(vm, xamlRoot, shown);
+                    await ShowAsync(vm, xamlRoot, requested);
+                    displayed = true;
                 }
                 catch (Exception)
                 {
-                    // A dialog failure must never surface exception text (spec §4.5); fall through
-                    // to the dismissal below so state cannot stick.
+                    // A dialog failure must never surface exception text (spec §4.5).
+                    displayed = false;
                 }
 
-                if (vm.PendingDialog == shown)
+                if (!displayed)
+                {
+                    // The user never saw this dialog, so they never answered it. Dismissing here
+                    // would throw their action away silently — the bug this method used to have.
+                    // ShowDialogAsync has already retried for ShowRetryWindow, so leave the request
+                    // standing for the next pass (LibraryPage re-runs the host on the next state
+                    // change) rather than pretending it was handled.
+                    return;
+                }
+
+                if (vm.PendingDialog == requested)
                 {
                     await vm.DismissDialogAsync();
                 }
@@ -71,12 +100,39 @@ public sealed class LibraryDialogHost
 
             if (vm.PendingDialog != LibraryDialog.None)
             {
+                // Shown but still pending after the chain limit: state must not stick.
                 await vm.DismissDialogAsync();
             }
         }
         finally
         {
             Gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Opens <paramref name="dialog"/>, retrying briefly while WinUI refuses because another
+    /// <c>ContentDialog</c> in the same window has not finished closing.
+    /// </summary>
+    /// <remarks>
+    /// Every dialog in this class goes through here rather than calling <c>ShowAsync</c> directly,
+    /// so the retry covers only the opening of the dialog: an exception from the action a dialog's
+    /// result triggers (an import, a removal) is not a "could not be shown" and must never cause
+    /// the dialog to reappear. See <see cref="ShowRetryWindow"/> for why this is needed at all.
+    /// </remarks>
+    private static async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
+    {
+        var deadline = DateTime.UtcNow + ShowRetryWindow;
+        while (true)
+        {
+            try
+            {
+                return await dialog.ShowAsync();
+            }
+            catch (Exception) when (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(ShowRetryDelay);
+            }
         }
     }
 
@@ -134,7 +190,7 @@ public sealed class LibraryDialogHost
         dialog.Content = Stack(Body(DialogContent.ImportUrlBody), box);
         dialog.Opened += (_, _) => box.Focus(FocusState.Programmatic);
 
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
             await vm.ImportUrlAsync(box.Text);
         }
@@ -155,7 +211,7 @@ public sealed class LibraryDialogHost
         dialog.Content = box;
         dialog.Opened += (_, _) => box.Focus(FocusState.Programmatic);
 
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
             await vm.CreateCollectionAndAddAsync(box.Text);
         }
@@ -187,25 +243,20 @@ public sealed class LibraryDialogHost
         panel.Children.Add(Body(preview.Message));
 
         var dialog = NewDialog(xamlRoot, preview.Title);
-        // Remove from Library is the default: the safe path is Enter (spec §4.5).
-        dialog.PrimaryButtonText = DialogContent.RemoveFromLibraryButton;
-        if (preview.AllowsDeletingStoredCopy)
-        {
-            dialog.SecondaryButtonText = DialogContent.RemoveAlsoStoredCopyButton;
-            dialog.SecondaryButtonStyle = (Style)XamlReader.Load(DestructiveButtonStyleXaml);
-        }
 
+        // One destructive button (maintainer decision, 2026-09-21): removal always deletes
+        // everything GIST holds, so there is no second, safer choice to offer. Cancel is the Enter
+        // default, as for Encrypt — the irreversible action must never be the one a stray Return
+        // key triggers.
+        dialog.PrimaryButtonText = DialogContent.RemoveButton;
+        dialog.PrimaryButtonStyle = (Style)XamlReader.Load(DestructiveButtonStyleXaml);
         dialog.CloseButtonText = DialogContent.CancelButton;
+        dialog.DefaultButton = ContentDialogButton.Close;
         dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 360 };
 
-        switch (await dialog.ShowAsync())
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
-            case ContentDialogResult.Primary:
-                await vm.RemoveAsync(deleteStoredCopy: false);
-                break;
-            case ContentDialogResult.Secondary:
-                await vm.RemoveAsync(deleteStoredCopy: true);
-                break;
+            await vm.RemoveAsync();
         }
     }
 
@@ -239,7 +290,7 @@ public sealed class LibraryDialogHost
         dialog.DefaultButton = ContentDialogButton.Close;
         dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 420 };
 
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
             await vm.EncryptAsync();
         }
@@ -257,7 +308,7 @@ public sealed class LibraryDialogHost
         dialog.CloseButtonText = DialogContent.OkButton;
         dialog.DefaultButton = ContentDialogButton.Close;
         dialog.Content = panel;
-        await dialog.ShowAsync();
+        await ShowDialogAsync(dialog);
     }
 
     // ── DRM / Error ────────────────────────────────────────────────────────
@@ -268,7 +319,7 @@ public sealed class LibraryDialogHost
         dialog.CloseButtonText = DialogContent.OkButton;
         dialog.DefaultButton = ContentDialogButton.Close;
         dialog.Content = Body(message);
-        await dialog.ShowAsync();
+        await ShowDialogAsync(dialog);
     }
 
     // ── Tag editor (§6) ────────────────────────────────────────────────────
@@ -361,7 +412,7 @@ public sealed class LibraryDialogHost
             box.Focus(FocusState.Programmatic);
         };
 
-        await dialog.ShowAsync();
+        await ShowDialogAsync(dialog);
     }
 
     private static FrameworkElement BuildTagChip(string tag, Func<Task> remove)
