@@ -10,25 +10,275 @@ fn file_ext(path: &Path) -> String {
         .to_lowercase()
 }
 
-/// Best-effort delete `path` and its BLAKE3 checksum sidecar (`<path>.blake3`,
-/// ADR-013 / `A4`), if either exists. Mirrors `Core::remove_items`'s existing
-/// file-cleanup policy exactly: a missing or unremovable file is logged at
-/// `debug!` and never fails the overall call, since by the time this runs the
-/// owning `library_items` row is already gone. A checksum sidecar with no
-/// corresponding blob (or vice versa) is harmless either way — this just
-/// avoids leaving one behind after its blob is gone.
-fn remove_file_and_checksum_sidecar(path: &str) {
-    if let Err(e) = std::fs::remove_file(path) {
-        tracing::debug!("gist-core: failed to delete file {}: {}", path, e);
+/// Extension of the BLAKE3 checksum sidecar `gist-store` writes beside every
+/// file it checksums (ADR-013 / `A4`): `<path>` → `<path>.blake3`.
+const CHECKSUM_SIDECAR_EXT: &str = "blake3";
+
+// ── Honest file-deletion outcomes (review Q10) ─────────────────────────────
+
+/// Why one file could not be deleted, at the coarsest granularity that is
+/// still actionable in a UI.
+///
+/// Deliberately carries **no path, filename, title or OS error string** — it
+/// crosses the FFI boundary into a result summary the user sees, and this
+/// project logs source paths at `debug!` only (see `CLAUDE.md`'s
+/// "Source paths" policy). The full error, with its path, is logged at
+/// `debug!` at the point of failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDeleteFailureKind {
+    /// Another open handle prevents deletion. The dominant real-world case on
+    /// Windows (`ERROR_SHARING_VIOLATION`/`ERROR_LOCK_VIOLATION`): an
+    /// antivirus scan, the search indexer, a backup agent or a reader app
+    /// holding the file open *without* delete-sharing. Almost always
+    /// transient — the file becomes deletable once the handle closes, which
+    /// is what [`Core::sweep_orphaned_files`] is for.
+    Locked,
+    /// The filesystem refused the delete on permission grounds (read-only
+    /// file/attribute, ACL denial).
+    Permission,
+    /// The file was already gone. Benign, not a fault: a checksum sidecar
+    /// written before ADR-013 landed never existed, and a user may have
+    /// cleaned up the storage directory by hand. Counted here so the caller
+    /// sees an honest "attempted vs deleted" tally rather than a silent gap,
+    /// but a UI should treat only `Locked`/`Permission`/`Other` as anything
+    /// worth reporting.
+    NotFound,
+    /// Anything else (I/O error, path too long for the platform, etc.).
+    Other,
+}
+
+impl FileDeleteFailureKind {
+    /// Classify a `std::fs::remove_file` error.
+    fn classify(e: &std::io::Error) -> Self {
+        // [PLATFORM: Windows] ─── begin ───────────────────────────────────
+        // Windows reports "another handle has this file open and did not
+        // grant FILE_SHARE_DELETE" as ERROR_SHARING_VIOLATION (32) or
+        // ERROR_LOCK_VIOLATION (33). Neither has a distinct `io::ErrorKind`
+        // that is stable across the Rust versions this project pins, and
+        // both currently decode to `PermissionDenied`, which would be
+        // actively misleading in the UI ("check your permissions" for a file
+        // that antivirus will release in a second). Raw code first, so the
+        // mapping below can never mask it.
+        #[cfg(windows)]
+        {
+            match e.raw_os_error() {
+                Some(32) | Some(33) => return FileDeleteFailureKind::Locked,
+                Some(5) => return FileDeleteFailureKind::Permission,
+                _ => {}
+            }
+        }
+        // [PLATFORM: Windows] ─── end ─────────────────────────────────────
+        match e.kind() {
+            std::io::ErrorKind::NotFound => FileDeleteFailureKind::NotFound,
+            std::io::ErrorKind::PermissionDenied => FileDeleteFailureKind::Permission,
+            _ => FileDeleteFailureKind::Other,
+        }
     }
-    let sidecar = format!("{path}.blake3");
-    if let Err(e) = std::fs::remove_file(&sidecar) {
-        tracing::debug!(
-            "gist-core: failed to delete checksum sidecar {}: {}",
-            sidecar,
-            e
+}
+
+/// What [`Core::remove_items_detailed`] actually managed to do.
+///
+/// The library rows are gone if this returns `Ok` (the DB delete is
+/// transactional and happens first); the file counts describe the
+/// **best-effort** cleanup that followed, which on Windows genuinely can
+/// fail while the removal itself succeeded. Reporting "removed" while a
+/// stored copy is still on disk is the dishonesty review finding Q10 is
+/// about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoveOutcome {
+    /// The ids that actually matched a row and were removed from the
+    /// database. Ids that matched nothing are silently absent (see
+    /// [`gist_store::Store::remove_items`]).
+    pub removed_ids: Vec<String>,
+    /// How many stored files were deleted: `<id>.json`, `<id>.tokens.json`,
+    /// their `.blake3` checksum sidecars, and — only when
+    /// `delete_source_files` is true — the ADR-006 sandboxed original copy
+    /// and its sidecar. Never counts the user's own file at `source_path`,
+    /// which is never touched.
+    pub files_deleted: u32,
+    /// How many of those deletions failed. Equals `failure_kinds.len()`.
+    pub files_failed: u32,
+    /// One entry per failed deletion, in attempt order, coarse kind only —
+    /// no paths, no titles. See [`FileDeleteFailureKind`].
+    pub failure_kinds: Vec<FileDeleteFailureKind>,
+}
+
+/// What [`Core::sweep_orphaned_files`] found and did. Counts only — the
+/// sweep never reports which files it touched.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SweepOutcome {
+    /// Files examined inside the storage directory (and its `originals/`
+    /// subdirectory). Includes files that were kept.
+    pub files_scanned: u32,
+    /// Orphaned files successfully deleted.
+    pub files_deleted: u32,
+    /// Orphaned files that could not be deleted this time. Equals
+    /// `failure_kinds.len()`; a later sweep will try again.
+    pub files_failed: u32,
+    /// One entry per failure, coarse kind only. See
+    /// [`FileDeleteFailureKind`].
+    pub failure_kinds: Vec<FileDeleteFailureKind>,
+}
+
+/// Accumulates per-file deletion results for [`Core::remove_items_detailed`]
+/// and [`Core::sweep_orphaned_files`] so both report the same shape.
+#[derive(Default)]
+struct DeleteTally {
+    deleted: u32,
+    failure_kinds: Vec<FileDeleteFailureKind>,
+}
+
+impl DeleteTally {
+    /// Best-effort delete one file, recording the outcome. Never returns an
+    /// error: this runs *after* the owning `library_items` row is already
+    /// gone, so failing the whole call here would misreport a removal that
+    /// genuinely happened. The path (and full OS error) go to `debug!` only,
+    /// per this project's source-path logging policy.
+    fn try_delete(&mut self, path: &str) {
+        match std::fs::remove_file(path) {
+            Ok(()) => self.deleted += 1,
+            Err(e) => {
+                tracing::debug!("gist-core: failed to delete file {}: {}", path, e);
+                self.failure_kinds.push(FileDeleteFailureKind::classify(&e));
+            }
+        }
+    }
+
+    /// Delete `path` and its BLAKE3 checksum sidecar (`<path>.blake3`,
+    /// ADR-013 / `A4`). A sidecar with no blob (or vice versa) is harmless
+    /// either way — this just avoids leaving one behind after its blob is
+    /// gone.
+    fn try_delete_with_sidecar(&mut self, path: &str) {
+        self.try_delete(path);
+        self.try_delete(&format!("{path}.{CHECKSUM_SIDECAR_EXT}"));
+    }
+
+    fn failed(&self) -> u32 {
+        self.failure_kinds.len() as u32
+    }
+}
+
+/// `<id>.json` → `<id>.tokens.json`, matching how
+/// `gist_store::Store::insert_item` names the two blobs. Falls back to
+/// appending (rather than replacing) the suffix for a path that doesn't end
+/// in `.json`, preserving the behaviour removal has always had.
+fn tokens_path_for(doc_path: &str) -> String {
+    doc_path
+        .strip_suffix(".json")
+        .map(|s| format!("{s}.tokens.json"))
+        .unwrap_or_else(|| format!("{doc_path}.tokens.json"))
+}
+
+/// Does `s` have the shape of a document id — a hyphenated UUID (v7, per
+/// `CLAUDE.md`'s "Document IDs" convention)? Shape only; this exists so the
+/// orphan sweep deletes nothing whose name it cannot positively identify as
+/// GIST-generated.
+fn looks_like_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+/// Names [`Core::sweep_orphaned_files`] may delete from the top level of the
+/// storage directory: `<uuid>.json`, `<uuid>.tokens.json` and the `.blake3`
+/// checksum sidecar of either. Everything else — a SQLite file and its
+/// `-wal`/`-shm` siblings, a key file, anything a host app or the user put
+/// there — fails this test and is left alone.
+fn is_sweepable_blob_name(name: &str) -> bool {
+    let base = name.strip_suffix(".blake3").unwrap_or(name);
+    let stem = match base.strip_suffix(".tokens.json") {
+        Some(stem) => stem,
+        None => match base.strip_suffix(".json") {
+            Some(stem) => stem,
+            None => return false,
+        },
+    };
+    looks_like_uuid(stem)
+}
+
+/// Names [`Core::sweep_orphaned_files`] may delete from
+/// `<storage_dir>/originals/`: a SHA-256-hex filename with an optional
+/// sanitised extension, exactly as `gist_store::Store::store_original_copy`
+/// writes it (ADR-006), plus its `.blake3` sidecar.
+fn is_sweepable_original_name(name: &str) -> bool {
+    let base = name.strip_suffix(".blake3").unwrap_or(name);
+    let (hash, ext) = match base.split_once('.') {
+        Some((hash, ext)) => (hash, Some(ext)),
+        None => (base, None),
+    };
+    let hash_ok = hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+    // `store_original_copy` runs `ext` through `sanitize_ext`, which reduces
+    // it to ASCII alphanumerics — so a multi-dot or otherwise odd tail is
+    // not something this app wrote, and is not swept.
+    let ext_ok = match ext {
+        None => true,
+        Some(ext) => !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric()),
+    };
+    hash_ok && ext_ok
+}
+
+/// One non-recursive pass over `dir`: delete every regular file that is
+/// *not* in `keep` and that `is_candidate` positively identifies as a
+/// GIST-generated file. See [`Core::sweep_orphaned_files`] for the full
+/// safety contract this implements.
+fn sweep_dir(
+    dir: &Path,
+    keep: &std::collections::HashSet<String>,
+    is_candidate: fn(&str) -> bool,
+    tally: &mut DeleteTally,
+    scanned: &mut u32,
+) -> Result<(), CoreError> {
+    match std::fs::symlink_metadata(dir) {
+        // A symlink/junction *as* the directory: never followed, so the
+        // sweep can never be redirected outside the storage directory by a
+        // link planted in it.
+        Ok(md) if md.file_type().is_symlink() => {
+            tracing::debug!("gist-core: sweep skipped {:?} (reparse point)", dir);
+            return Ok(());
+        }
+        Ok(md) if !md.is_dir() => return Ok(()),
+        Ok(_) => {}
+        // `originals/` only exists once a file-based import has happened.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(CoreError::Io(e)),
+    }
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        // `DirEntry::file_type` does not follow links, so a symlink or
+        // Windows junction reports `is_file() == false` here and is skipped
+        // entirely — neither deleted nor traversed. Directories are skipped
+        // for the same reason: this sweep never recurses and never removes
+        // a directory.
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            // A non-UTF-8 name cannot be one this app wrote (ids and content
+            // hashes are ASCII), so there is nothing to do but leave it.
+            continue;
+        };
+        *scanned += 1;
+        // Keep-list lookup is case-insensitive (see `sweep_orphaned_files`);
+        // the candidate-pattern check uses the name as it really is.
+        if keep.contains(&name.to_ascii_lowercase()) || !is_candidate(&name) {
+            continue;
+        }
+        let path = dir.join(&name);
+        debug_assert_eq!(
+            path.parent(),
+            Some(dir),
+            "sweep must only ever act on direct children of the directory it is scanning"
         );
+        tally.try_delete(&path.to_string_lossy());
     }
+
+    Ok(())
 }
 
 // ── Parse error (shared across image/doc parsers) ──────────────────────────
@@ -503,30 +753,173 @@ impl Core {
     /// `gist_store::Store::remove_items`'s doc comment for the exact
     /// semantics this delegates to).
     pub fn remove_items(&self, ids: &[String], delete_source_files: bool) -> Result<(), CoreError> {
+        self.remove_items_detailed(ids, delete_source_files)
+            .map(|_| ())
+    }
+
+    /// [`Core::remove_items`], but reporting what actually happened
+    /// (review finding Q10).
+    ///
+    /// Behaviourally identical to `remove_items` — same DB-first ordering,
+    /// same best-effort file cleanup, same ADR-006 rule that only the
+    /// sandboxed copy is ever deleted and never the user's own file — but it
+    /// returns a [`RemoveOutcome`] instead of `()`, so a caller can tell the
+    /// user "removed from your library, but 1 file could not be deleted
+    /// because something else has it open" rather than claiming a clean
+    /// removal. `remove_items` is this function with the outcome discarded,
+    /// so there is exactly one code path.
+    ///
+    /// This matters far more on Windows than on Apple platforms: antivirus,
+    /// the search indexer, backup agents and OneDrive routinely hold a file
+    /// open without granting `FILE_SHARE_DELETE`, which makes the delete
+    /// fail outright rather than unlinking a still-open file the way POSIX
+    /// does. A file left behind this way is reclaimed by
+    /// [`Core::sweep_orphaned_files`] on a later launch.
+    pub fn remove_items_detailed(
+        &self,
+        ids: &[String],
+        delete_source_files: bool,
+    ) -> Result<RemoveOutcome, CoreError> {
         let removed = self.store.remove_items(ids)?;
 
-        for item in removed {
-            remove_file_and_checksum_sidecar(&item.doc_path);
+        let mut tally = DeleteTally::default();
+        let mut removed_ids = Vec::with_capacity(removed.len());
 
-            let tokens_path = item
-                .doc_path
-                .strip_suffix(".json")
-                .map(|s| format!("{s}.tokens.json"))
-                .unwrap_or_else(|| format!("{}.tokens.json", item.doc_path));
-            remove_file_and_checksum_sidecar(&tokens_path);
+        for item in removed {
+            tally.try_delete_with_sidecar(&item.doc_path);
+            tally.try_delete_with_sidecar(&tokens_path_for(&item.doc_path));
 
             if delete_source_files {
                 if let Some(source_copy_path) = &item.source_copy_path {
-                    remove_file_and_checksum_sidecar(source_copy_path);
+                    tally.try_delete_with_sidecar(source_copy_path);
                 }
                 // else: no sandboxed copy exists for this item (URL import,
                 // or imported before ADR-006 landed) — nothing to delete.
                 // `item.source_path` (the user's real file) is never used
                 // here; see the doc comment above.
             }
+
+            removed_ids.push(item.id);
         }
 
-        Ok(())
+        Ok(RemoveOutcome {
+            removed_ids,
+            files_deleted: tally.deleted,
+            files_failed: tally.failed(),
+            failure_kinds: tally.failure_kinds,
+        })
+    }
+
+    /// Delete files in the storage directory that no library row references
+    /// any more, and report counts (review finding Q10).
+    ///
+    /// This is the companion to [`Core::remove_items_detailed`]'s honesty: a
+    /// blob that could not be deleted at removal time — because antivirus,
+    /// the indexer or another app had it open without delete-sharing, the
+    /// common Windows case — is reclaimed the next time this runs, typically
+    /// at app launch. Safe to call at any time, including when nothing is
+    /// orphaned.
+    ///
+    /// **What it will delete**, and nothing else:
+    /// - `<storage_dir>/<uuid>.json`, `<uuid>.tokens.json` and their
+    ///   `.blake3` checksum sidecars, where `<uuid>` is not a live row's id;
+    /// - `<storage_dir>/originals/<sha256-hex>[.<ext>]` and its `.blake3`
+    ///   sidecar, where no live row's `source_copy_path` names that file.
+    ///
+    /// **Safety rules, all enforced here rather than assumed:**
+    /// - A file referenced by *any* row is kept. Content-addressed originals
+    ///   (ADR-006) are shared between items imported from identical bytes,
+    ///   so "no longer referenced" means no row at all references it — the
+    ///   ADR-006 dedup residual can never be turned into data loss by this
+    ///   sweep.
+    /// - Only file names matching the generated patterns above are ever
+    ///   deleted. A SQLite database, its `-wal`/`-shm` siblings, a key file,
+    ///   a user's own file or anything else a host app happens to keep in
+    ///   the same directory does not match and is left alone.
+    /// - Only the storage directory itself and its `originals/`
+    ///   subdirectory are examined, non-recursively, and every path acted on
+    ///   is `dir.join(<single file name from that directory's listing>)`.
+    /// - Symlinks, Windows junctions and any other reparse point are skipped
+    ///   without being deleted or followed, at both the directory and file
+    ///   level, so a link planted inside the storage directory cannot make
+    ///   the sweep reach outside it.
+    /// - Directories are never removed.
+    ///
+    /// Failures are counted, not propagated: a file still locked at sweep
+    /// time just stays for the next sweep.
+    pub fn sweep_orphaned_files(&self) -> Result<SweepOutcome, CoreError> {
+        let storage_dir = self.store.storage_dir().to_path_buf();
+        let referenced = self.store.list_referenced_files()?;
+
+        // Keep-lists are built from file *names* within the two directories
+        // the sweep looks at, not full path strings: a row's stored path is
+        // whatever string the storage dir was when the row was written, so
+        // comparing names avoids any separator/prefix normalisation question
+        // (`C:\x` vs `C:\x\`, `\\?\C:\x`, …) becoming a data-loss bug. It is
+        // conservative in the only direction that is safe: an unrelated file
+        // that happens to share a referenced name is kept.
+        //
+        // Names are ASCII-lowercased on both sides, because Windows
+        // filesystems are case-insensitive: without this, a row recorded as
+        // `ABC.json` and a directory entry listed as `abc.json` would be the
+        // same file yet fail to match, and the sweep would delete a file
+        // that is still referenced. Every name this app generates is already
+        // lowercase (UUID and SHA-256 hex, fixed suffixes), so this only
+        // ever adds matches — i.e. only ever keeps more.
+        let mut keep_blobs: std::collections::HashSet<String> = Default::default();
+        let mut keep_originals: std::collections::HashSet<String> = Default::default();
+
+        let keep = |set: &mut std::collections::HashSet<String>, path: &str| {
+            if let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) {
+                let name = name.to_ascii_lowercase();
+                set.insert(format!("{name}.{CHECKSUM_SIDECAR_EXT}"));
+                set.insert(name);
+            }
+        };
+
+        for row in &referenced {
+            keep(&mut keep_blobs, &row.doc_path);
+            keep(&mut keep_blobs, &tokens_path_for(&row.doc_path));
+            if let Some(copy) = &row.source_copy_path {
+                keep(&mut keep_originals, copy);
+                // A copy path that (historically) points somewhere other
+                // than `originals/` still contributes its name to the
+                // keep-list — again, conservative in the safe direction.
+                keep(&mut keep_blobs, copy);
+            }
+        }
+
+        let mut tally = DeleteTally::default();
+        let mut scanned = 0u32;
+
+        sweep_dir(
+            &storage_dir,
+            &keep_blobs,
+            is_sweepable_blob_name,
+            &mut tally,
+            &mut scanned,
+        )?;
+        sweep_dir(
+            &storage_dir.join("originals"),
+            &keep_originals,
+            is_sweepable_original_name,
+            &mut tally,
+            &mut scanned,
+        )?;
+
+        tracing::debug!(
+            "gist-core: sweep scanned {} file(s), deleted {}, failed {}",
+            scanned,
+            tally.deleted,
+            tally.failed()
+        );
+
+        Ok(SweepOutcome {
+            files_scanned: scanned,
+            files_deleted: tally.deleted,
+            files_failed: tally.failed(),
+            failure_kinds: tally.failure_kinds,
+        })
     }
 
     // ── Collections ─────────────────────────────────────────────────────────
@@ -1183,6 +1576,622 @@ mod tests {
             .expect("start_rsvp must also succeed after encrypt through a read-capable Core");
         assert!(!rsvp_json.is_empty());
     }
+
+    // ── Path shapes, file locking, orphan sweep (review Q10) ────────────
+    //
+    // These cover what removal and import do to real files under path and
+    // sharing semantics that differ between platforms. Everything that is
+    // genuinely cross-platform is unguarded so it also runs on the ubuntu
+    // and macos CI legs; Windows-only behaviour (delete-sharing, reserved
+    // names, reparse points) is `#[cfg(windows)]` with the parent
+    // CLAUDE.md's platform-guard comment convention.
+
+    /// `(core, db_path, storage_dir)` rooted at `root`, mirroring how every
+    /// other test in this module builds a `Core`, but reusable for the path
+    /// shapes below where `root` is deliberately awkward.
+    fn core_rooted_at(root: &std::path::Path) -> (Core, std::path::PathBuf) {
+        std::fs::create_dir_all(root).unwrap();
+        let db = root.join("test.db");
+        let storage = root.join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+        (core, storage)
+    }
+
+    /// Every file a *fresh* (post-ADR-013) file-based import puts on disk
+    /// for one item: the two blobs, their two checksum sidecars, and the
+    /// sandboxed original copy plus its sidecar — i.e. what
+    /// `remove_items_detailed(.., true)` should report deleting.
+    const FILES_PER_FRESH_ITEM_WITH_SOURCE_COPY: u32 = 6;
+    /// The same, without the sandboxed copy (`delete_source_files: false`).
+    const FILES_PER_FRESH_ITEM: u32 = 4;
+
+    /// Long paths: Rust's std uses Windows' `\\?\` verbatim form internally
+    /// for absolute paths, so a storage directory and a source file well
+    /// past the legacy 260-character `MAX_PATH` work end to end without the
+    /// app doing anything special. This proves it rather than assuming it —
+    /// Q10 called the long-path case untested, and the packaged
+    /// `LocalState` path on Windows eats a large slice of the budget before
+    /// the library's own directories are appended.
+    ///
+    /// **This test found a real bug when first written (fixed in the same
+    /// change).** `std::fs` coped with everything, but `Core::init` itself
+    /// failed with SQLite `CannotOpen`: SQLite's Win32 VFS passes the
+    /// database path to `CreateFileW` unprefixed, so it stays bound by
+    /// `MAX_PATH` whatever Rust does around it. The whole library was
+    /// unopenable at a path where every blob beside it read and wrote fine.
+    /// See `gist_store::sqlite_path`.
+    #[test]
+    fn long_paths_past_legacy_max_path_import_search_and_remove_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut root = dir.path().to_path_buf();
+        while root.as_os_str().len() < 300 {
+            // 28 chars per component, comfortably inside the 255-character
+            // per-component limit that applies on every platform here.
+            root = root.join("a_directory_with_a_long_name");
+        }
+        let (core, storage) = core_rooted_at(&root);
+
+        let long_stem = "a_file_name_that_is_also_quite_long_".repeat(3);
+        let src = root.join(format!("{long_stem}.txt"));
+        std::fs::write(&src, b"Long paths must not silently break removal, quokka.").unwrap();
+        assert!(
+            src.as_os_str().len() > 260,
+            "the source path must exceed legacy MAX_PATH for this test to mean anything (got {})",
+            src.as_os_str().len()
+        );
+
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        let doc_path = storage.join(format!("{id}.json"));
+        assert!(doc_path.as_os_str().len() > 260);
+        assert!(
+            doc_path.exists(),
+            "the IR blob must be written at a >260-character path"
+        );
+
+        assert!(core.get_document(&id).is_ok());
+        assert!(core
+            .search_items("quokka", 10)
+            .unwrap()
+            .iter()
+            .any(|i| i.id == id));
+
+        let outcome = core.remove_items_detailed(&[id.clone()], true).unwrap();
+        assert_eq!(outcome.removed_ids, vec![id]);
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (FILES_PER_FRESH_ITEM_WITH_SOURCE_COPY, 0),
+            "every stored file must be deletable at a long path: {outcome:?}"
+        );
+        assert!(!doc_path.exists());
+        assert!(
+            src.exists(),
+            "GIST must never delete the user's original file (ADR-006)"
+        );
+    }
+
+    /// Unicode (multi-byte, non-BMP emoji, combining-mark-adjacent scripts)
+    /// and spaces in both the storage directory and the source file name.
+    /// Spaces catch any accidental shell-style path splitting; non-ASCII
+    /// catches an encoding assumption (Windows paths are UTF-16, Rust's are
+    /// UTF-8).
+    #[test]
+    fn unicode_and_space_containing_paths_import_and_remove_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .join("Ordner mit Leerzeichen — 日本語 — Ünïcødé 📚");
+        let (core, storage) = core_rooted_at(&root);
+
+        let stem = "My Book (draft 1) — 日本語 — çöpy 📖";
+        let src = root.join(format!("{stem}.txt"));
+        std::fs::write(&src, "A quokka wandered through the Ünïcødé prose.").unwrap();
+
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        let item = core
+            .list_items(0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.id == id)
+            .expect("the imported item must be listed");
+        assert_eq!(
+            item.title.as_deref(),
+            Some(stem),
+            "the title is the file stem, so it must survive the round trip through SQLite byte-for-byte"
+        );
+        assert_eq!(
+            item.source_path.as_deref(),
+            Some(src.to_string_lossy().as_ref()),
+            "the informational source path must round-trip unchanged"
+        );
+
+        let outcome = core.remove_items_detailed(&[id], true).unwrap();
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (FILES_PER_FRESH_ITEM_WITH_SOURCE_COPY, 0),
+            "{outcome:?}"
+        );
+        assert!(src.exists());
+        assert!(
+            std::fs::read_dir(storage.join("originals"))
+                .unwrap()
+                .next()
+                .is_none(),
+            "the originals directory should be empty after removing the only item"
+        );
+    }
+
+    /// The honest-outcome contract itself: which ids came out of the
+    /// database, and an exact file tally for each `delete_source_files`
+    /// state. An id that matches no row must not appear in `removed_ids`.
+    #[test]
+    fn remove_items_detailed_reports_removed_ids_and_an_exact_file_tally() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let keep_src = dir.path().join("kept.txt");
+        std::fs::write(&keep_src, b"Kept behind.").unwrap();
+        let kept = core.import_file(&keep_src, &NullObserver).unwrap();
+
+        let src = dir.path().join("removed.txt");
+        std::fs::write(&src, b"Removed, source copy kept.").unwrap();
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        let outcome = core
+            .remove_items_detailed(&[id.clone(), "not-a-real-id".to_string()], false)
+            .unwrap();
+        assert_eq!(
+            outcome.removed_ids,
+            vec![id],
+            "an unknown id must be absent from removed_ids, not reported as removed"
+        );
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (FILES_PER_FRESH_ITEM, 0),
+            "delete_source_files=false must delete the two blobs and their two sidecars only: {outcome:?}"
+        );
+        assert!(outcome.failure_kinds.is_empty());
+        assert!(
+            storage.join("originals").read_dir().unwrap().count() > 0,
+            "the sandboxed copy must survive delete_source_files=false"
+        );
+
+        let outcome = core.remove_items_detailed(&[kept], true).unwrap();
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (FILES_PER_FRESH_ITEM_WITH_SOURCE_COPY, 0),
+            "{outcome:?}"
+        );
+    }
+
+    /// A file that is already gone is reported as `NotFound`, not silently
+    /// counted as deleted — the "attempted vs deleted" tally has to be
+    /// honest in both directions. This is also the shape a pre-ADR-013 item
+    /// (no checksum sidecars) produces, which is why `NotFound` is
+    /// documented as benign rather than actionable.
+    #[test]
+    fn remove_items_detailed_reports_already_missing_files_as_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let src = dir.path().join("half_gone.txt");
+        std::fs::write(&src, b"Someone deleted my blob already.").unwrap();
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        let doc_path = storage.join(format!("{id}.json"));
+        std::fs::remove_file(&doc_path).unwrap();
+        std::fs::remove_file(format!("{}.blake3", doc_path.display())).unwrap();
+
+        let outcome = core.remove_items_detailed(&[id], false).unwrap();
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (2, 2),
+            "the tokens blob and its sidecar go; the two already-deleted files are reported: {outcome:?}"
+        );
+        assert!(
+            outcome
+                .failure_kinds
+                .iter()
+                .all(|k| *k == FileDeleteFailureKind::NotFound),
+            "{outcome:?}"
+        );
+    }
+
+    /// The sweep deletes GIST-generated files no row references, and leaves
+    /// everything else alone — including files belonging to a live item and
+    /// any file whose name it cannot positively identify as its own (a
+    /// SQLite database and its sidecars being the case that would be
+    /// catastrophic to get wrong).
+    #[test]
+    fn sweep_deletes_orphans_and_leaves_referenced_and_unknown_files_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let src = dir.path().join("live.txt");
+        std::fs::write(&src, b"A live item that must survive the sweep.").unwrap();
+        let live = core.import_file(&src, &NullObserver).unwrap();
+
+        // Orphans: shaped exactly like what this app writes, but referenced
+        // by no row (e.g. left behind by a removal whose delete failed).
+        let orphan_id = "01926f3a-7c2b-7a10-9f3d-2b6c5e4a1d88";
+        let orphans = [
+            storage.join(format!("{orphan_id}.json")),
+            storage.join(format!("{orphan_id}.json.blake3")),
+            storage.join(format!("{orphan_id}.tokens.json")),
+            storage.join(format!("{orphan_id}.tokens.json.blake3")),
+            storage
+                .join("originals")
+                .join(format!("{}.txt", "ab".repeat(32))),
+        ];
+        for path in &orphans {
+            std::fs::write(path, b"orphan").unwrap();
+        }
+
+        // Not ours, or not identifiable as ours: must never be deleted.
+        let bystanders = [
+            storage.join("gist.db"),
+            storage.join("gist.db-wal"),
+            storage.join("not-a-uuid.json"),
+            storage.join("notes.txt"),
+            storage.join("originals").join("README.md"),
+        ];
+        for path in &bystanders {
+            std::fs::write(path, b"not mine").unwrap();
+        }
+
+        let outcome = core.sweep_orphaned_files().unwrap();
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (orphans.len() as u32, 0),
+            "{outcome:?}"
+        );
+        assert!(outcome.files_scanned >= (orphans.len() + bystanders.len()) as u32);
+
+        for path in &orphans {
+            assert!(!path.exists(), "orphan {path:?} should have been swept");
+        }
+        for path in &bystanders {
+            assert!(path.exists(), "the sweep must not touch {path:?}");
+        }
+        assert!(storage.join(format!("{live}.json")).exists());
+        assert!(storage.join(format!("{live}.json.blake3")).exists());
+        assert!(storage.join(format!("{live}.tokens.json")).exists());
+        assert!(
+            core.get_document(&live).is_ok(),
+            "the live item must still be readable"
+        );
+
+        // Idempotent: a second sweep with nothing orphaned deletes nothing.
+        let again = core.sweep_orphaned_files().unwrap();
+        assert_eq!((again.files_deleted, again.files_failed), (0, 0));
+    }
+
+    /// ADR-006's dedup residual must not become data loss in the sweep: two
+    /// items imported from byte-identical content share one
+    /// content-addressed copy, so that copy stays while **any** row still
+    /// references it, and is only swept once the last one is gone.
+    #[test]
+    fn sweep_keeps_a_shared_original_copy_while_any_row_still_references_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let content = b"Identical bytes imported twice share one copy (ADR-006).";
+        let first_src = dir.path().join("first.txt");
+        let second_src = dir.path().join("second.txt");
+        std::fs::write(&first_src, content).unwrap();
+        std::fs::write(&second_src, content).unwrap();
+
+        let first = core.import_file(&first_src, &NullObserver).unwrap();
+        let second = core.import_file(&second_src, &NullObserver).unwrap();
+
+        let copy = the_one_sandboxed_copy(&storage);
+
+        // One row gone, the other still referencing the shared copy.
+        core.remove_items(&[first], false).unwrap();
+        let outcome = core.sweep_orphaned_files().unwrap();
+        assert_eq!(outcome.files_deleted, 0, "{outcome:?}");
+        assert!(
+            copy.exists(),
+            "a content-addressed copy referenced by a surviving row must never be swept"
+        );
+
+        // Last reference gone: now it is genuinely orphaned.
+        core.remove_items(&[second], false).unwrap();
+        let outcome = core.sweep_orphaned_files().unwrap();
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (2, 0),
+            "the unreferenced copy and its checksum sidecar: {outcome:?}"
+        );
+        assert!(!copy.exists());
+    }
+
+    /// The sweep must not follow a link out of the storage directory. On
+    /// Unix this is a symlink; the Windows equivalent (a junction or
+    /// symlink, both reparse points) is covered by its own guarded test
+    /// below, because creating one there needs Developer Mode or elevation.
+    // [PLATFORM: macOS] / [PLATFORM: Linux] ─── begin ───────────────────
+    #[cfg(unix)]
+    #[test]
+    fn sweep_does_not_follow_a_symlink_out_of_the_storage_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(&dir.path().join("library"));
+
+        // An outside directory holding a file whose *name* would otherwise
+        // match the sweep's delete patterns.
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let bait = outside.join("01926f3a-7c2b-7a10-9f3d-2b6c5e4a1d88.json");
+        std::fs::write(&bait, b"must survive").unwrap();
+
+        std::os::unix::fs::symlink(&outside, storage.join("originals")).unwrap();
+        std::os::unix::fs::symlink(&bait, storage.join("linked.json")).unwrap();
+
+        let outcome = core.sweep_orphaned_files().unwrap();
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (0, 0),
+            "{outcome:?}"
+        );
+        assert!(
+            bait.exists(),
+            "the sweep must never reach outside the storage directory"
+        );
+        assert!(outside.exists());
+    }
+    // [PLATFORM: macOS] / [PLATFORM: Linux] ─── end ─────────────────────
+
+    // [PLATFORM: Windows] ─── begin ─────────────────────────────────────
+    // Windows-only file semantics that have no POSIX equivalent, and are
+    // exactly what review finding Q10 says is untested: mandatory
+    // delete-sharing, reserved device names, trailing-dot components, and
+    // junctions as a second flavour of reparse point.
+
+    /// Open a file so that *deleting* it is refused while the handle lives —
+    /// `FILE_SHARE_READ` only, no `FILE_SHARE_DELETE`. This is what an
+    /// antivirus scanner, the search indexer, a backup agent or another
+    /// reader app typically does, and why "remove" can leave a file behind
+    /// on Windows when it never would on POSIX (where unlink succeeds
+    /// regardless of open handles). Note `std::fs::File::open` will **not**
+    /// reproduce it: Rust opens with all three share flags, including
+    /// delete.
+    #[cfg(windows)]
+    fn open_without_delete_sharing(path: &std::path::Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)
+            .expect("the blob must be openable before it is locked")
+    }
+
+    /// The core Q10 scenario. A stored file is held open by another handle
+    /// while the user removes the item:
+    ///
+    /// - the database row goes away (the removal genuinely happened),
+    /// - the file deletion fails,
+    /// - and that failure is **observable** — reported as `Locked`, not
+    ///   swallowed into a "removed successfully" that is untrue about the
+    ///   user's data.
+    ///
+    /// Then, once the handle is released, a sweep reclaims the file — so a
+    /// lock costs a deferred cleanup, never a permanent leak.
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_blob_is_reported_locked_the_row_still_goes_and_a_later_sweep_reclaims_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let src = dir.path().join("locked.txt");
+        std::fs::write(&src, b"Antivirus is reading this quokka right now.").unwrap();
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        let doc_path = storage.join(format!("{id}.json"));
+        let handle = open_without_delete_sharing(&doc_path);
+
+        let outcome = core.remove_items_detailed(&[id.clone()], true).unwrap();
+
+        // The removal itself happened, in full.
+        assert_eq!(outcome.removed_ids, vec![id.clone()]);
+        assert!(core.list_items(0, 10).unwrap().is_empty());
+        assert!(matches!(
+            core.get_document(&id),
+            Err(CoreError::NotFound(_))
+        ));
+
+        // The lock is visible, not silent.
+        assert_eq!(
+            outcome.files_failed, 1,
+            "exactly the locked blob should fail: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.failure_kinds,
+            vec![FileDeleteFailureKind::Locked],
+            "a delete refused by another handle must be Locked, not Permission (which would tell \
+             the user to go change ACLs for something antivirus will release in a second)"
+        );
+        assert_eq!(
+            outcome.files_deleted,
+            FILES_PER_FRESH_ITEM_WITH_SOURCE_COPY - 1,
+            "everything except the locked file should still be cleaned up: {outcome:?}"
+        );
+        assert!(
+            doc_path.exists(),
+            "the locked file is necessarily still there"
+        );
+
+        // A sweep while the handle is still open must also fail honestly,
+        // and must not lose the file.
+        let blocked = core.sweep_orphaned_files().unwrap();
+        assert_eq!(blocked.files_failed, 1, "{blocked:?}");
+        assert_eq!(blocked.failure_kinds, vec![FileDeleteFailureKind::Locked]);
+        assert!(doc_path.exists());
+
+        drop(handle);
+
+        let swept = core.sweep_orphaned_files().unwrap();
+        assert_eq!(
+            (swept.files_deleted, swept.files_failed),
+            (1, 0),
+            "once the handle is released the orphan must be reclaimed: {swept:?}"
+        );
+        assert!(!doc_path.exists());
+        assert!(
+            src.exists(),
+            "the user's own file is never in scope (ADR-006)"
+        );
+    }
+
+    /// Reserved device names (`CON`, `NUL`, `COM1`, …), trailing dots and
+    /// trailing/leading spaces are the classic Windows filename traps.
+    /// Which ones are creatable depends on the API path taken and the
+    /// Windows build, so this test does not assert *that* they can be
+    /// created — it asserts that wherever the OS **does** allow one, the
+    /// import either succeeds and then removes completely, or fails with a
+    /// clean typed error leaving **nothing** behind in storage. The thing
+    /// that must never happen is a half-state: a stored copy or blob with no
+    /// row, or a row whose files cannot be cleaned up.
+    ///
+    /// Observed on Windows 11 (26200) when written: `CON.txt`/`COM1.txt`/
+    /// `LPT1.txt`/`AUX.txt` and the space-padded names are creatable through
+    /// std's verbatim paths and import normally; `NUL.txt` opens the null
+    /// device and is skipped; a name ending in `.` keeps its literal dot, so
+    /// it has no file extension at all and is correctly refused as an
+    /// unsupported type (plain text carries no magic bytes to fall back on).
+    /// That refusal is a legitimate outcome, not a bug — but it must leave
+    /// no residue, which is what this asserts.
+    #[cfg(windows)]
+    #[test]
+    fn reserved_like_and_trailing_dot_source_names_round_trip_where_the_os_allows_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let candidates = [
+            "CON.txt",
+            "NUL.txt",
+            "COM1.txt",
+            "LPT1.txt",
+            "AUX.txt",
+            "trailing dot..txt",
+            "ends with a dot.txt.",
+            " leading space.txt",
+            "trailing space .txt",
+        ];
+
+        let mut exercised = 0;
+        let mut imported = 0;
+        for name in candidates {
+            let src = dir.path().join(name);
+            // Create *and* read back: a reserved name can "succeed" as a
+            // device rather than a file, which would make everything after
+            // it meaningless.
+            let content = format!("Reserved-name probe for {name}, quokka.");
+            if let Err(e) = std::fs::write(&src, &content) {
+                eprintln!("{name}: not creatable on this machine ({e}) — skipped");
+                continue;
+            }
+            if !matches!(std::fs::read(&src), Ok(b) if b == content.as_bytes()) {
+                // e.g. `NUL`, which swallows writes and reads back empty:
+                // it is a device, not a file, so there is nothing to import.
+                eprintln!("{name}: resolved to a device, not a file — skipped");
+                let _ = std::fs::remove_file(&src);
+                continue;
+            }
+
+            exercised += 1;
+            match core.import_file(&src, &NullObserver) {
+                Ok(id) => {
+                    imported += 1;
+                    assert!(
+                        core.get_document(&id).is_ok(),
+                        "{name}: must be readable back"
+                    );
+
+                    let outcome = core.remove_items_detailed(&[id], true).unwrap();
+                    assert_eq!(
+                        (outcome.files_deleted, outcome.files_failed),
+                        (FILES_PER_FRESH_ITEM_WITH_SOURCE_COPY, 0),
+                        "{name}: removal must clean up completely — {outcome:?}"
+                    );
+                }
+                // A refused import must be a clean refusal: no row, and
+                // nothing written under storage (the sandboxed copy is only
+                // made after a successful parse, ADR-006).
+                Err(e @ ImportError::UnsupportedType(_)) => {
+                    eprintln!("{name}: refused as unsupported ({e}) — checking for residue");
+                    assert!(core.list_items(0, 10).unwrap().is_empty());
+                    let sweep = core.sweep_orphaned_files().unwrap();
+                    assert_eq!(
+                        (sweep.files_scanned, sweep.files_deleted),
+                        (0, 0),
+                        "{name}: a refused import must leave no file behind — {sweep:?}"
+                    );
+                }
+                Err(e) => panic!("{name}: unexpected import failure: {e}"),
+            }
+
+            assert!(
+                src.exists(),
+                "{name}: the user's original must survive (ADR-006)"
+            );
+            std::fs::remove_file(&src).unwrap();
+        }
+
+        assert!(
+            exercised > 0 && imported > 0,
+            "no candidate name was creatable/importable, so this test proved nothing \
+             (exercised {exercised}, imported {imported})"
+        );
+        // Nothing may be left in storage after every probe was removed.
+        assert!(storage
+            .join("originals")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    /// The Windows half of "never follow a link out of the storage
+    /// directory": a junction (`IO_REPARSE_TAG_MOUNT_POINT`) rather than a
+    /// POSIX symlink. Creating one needs Developer Mode or elevation, so the
+    /// test skips itself when the OS refuses rather than failing on an
+    /// unprivileged machine — it is a real assertion where it can run, and
+    /// the guarantee is also covered by the unix test above.
+    #[cfg(windows)]
+    #[test]
+    fn sweep_does_not_follow_a_junction_or_symlink_out_of_the_storage_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(&dir.path().join("library"));
+
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let bait = outside.join("01926f3a-7c2b-7a10-9f3d-2b6c5e4a1d88.json");
+        std::fs::write(&bait, b"must survive").unwrap();
+
+        if std::os::windows::fs::symlink_dir(&outside, storage.join("originals")).is_err() {
+            eprintln!(
+                "skipping: creating a directory symlink needs Developer Mode or elevation on \
+                 this machine (the same guarantee is asserted by the unix test)"
+            );
+            return;
+        }
+
+        let outcome = core.sweep_orphaned_files().unwrap();
+        assert_eq!(
+            (outcome.files_deleted, outcome.files_failed),
+            (0, 0),
+            "{outcome:?}"
+        );
+        assert!(
+            bait.exists(),
+            "the sweep must never reach outside the storage directory through a reparse point"
+        );
+    }
+    // [PLATFORM: Windows] ─── end ───────────────────────────────────────
 
     /// A bulk call spanning a real id and an unknown one must report both
     /// outcomes individually rather than losing the real id's success
