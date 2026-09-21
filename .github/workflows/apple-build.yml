@@ -7,7 +7,14 @@ on:
   pull_request:
     paths:
       - 'apps/apple/**'
-      - 'crates/gist-ffi/**'
+      # The xcframework compiles every core crate (gist-ffi depends on gist-core, gist-store, the
+      # parsers, ...), so a change to any of them must be compiled and tested against Apple, not just
+      # changes inside gist-ffi. (Found in W2: the SQLite upgrade and the tag-query fix in gist-store
+      # never triggered this job.)
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
       - 'tools/gen-bindings.sh'
       - 'tools/build-core-xcframework.sh'
       - '.github/workflows/apple-build.yml'
