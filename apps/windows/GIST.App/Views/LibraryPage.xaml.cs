@@ -45,6 +45,7 @@ public sealed partial class LibraryPage : Page
     private bool _syncingSearch;
     private bool _updatePending;
     private bool _handlingDialog;
+    private bool _refocusListOnRebuild;
 
     public LibraryPage()
     {
@@ -54,6 +55,9 @@ public sealed partial class LibraryPage : Page
         ItemsList.RightTapped += OnListRightTapped;
         // Escape must be seen even when the AutoSuggestBox's own text box handles it.
         SearchBox.AddHandler(KeyDownEvent, new KeyEventHandler(OnSearchKeyDown), true);
+        // ListViewItem consumes Enter itself, so a plain KeyDown handler on the list never sees it: listen for
+        // already-handled events too (Enter on a row must open it; proven by the FlaUI Enter test).
+        ItemsList.AddHandler(KeyDownEvent, new KeyEventHandler(OnListKeyDown), true);
     }
 
     // ── Lifetime ───────────────────────────────────────────────────────────
@@ -303,6 +307,18 @@ public sealed partial class LibraryPage : Page
         }
 
         PushSelection();
+
+        if (_refocusListOnRebuild)
+        {
+            _refocusListOnRebuild = false;
+            // Rows are realised after this pass; focus once layout has produced containers, otherwise WinUI parks
+            // focus on the first control of the window (the nav pane toggle).
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            {
+                ItemsList.UpdateLayout();
+                ItemsList.Focus(FocusState.Keyboard);
+            });
+        }
     }
 
     private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -386,6 +402,9 @@ public sealed partial class LibraryPage : Page
         _syncingSearch = true;
         try { SearchBox.Text = string.Empty; }
         finally { _syncingSearch = false; }
+        // Clearing the query swaps the list back to the full set, which rebuilds the rows and would drop focus
+        // set now; RebuildList restores it once the rebuild has happened.
+        _refocusListOnRebuild = _vm.SearchText.Length > 0;
         _vm.SearchText = string.Empty;
         ItemsList.Focus(FocusState.Keyboard);
     }
@@ -520,6 +539,9 @@ public sealed partial class LibraryPage : Page
         finally
         {
             _handlingDialog = false;
+            // A dialog requested while this one was closing was ignored by the guard above; pick it up now
+            // instead of leaving PendingDialog stuck until some unrelated state change.
+            if (_vm is { PendingDialog: not LibraryDialog.None }) DispatcherQueue.TryEnqueue(() => UpdateView());
         }
     }
 
