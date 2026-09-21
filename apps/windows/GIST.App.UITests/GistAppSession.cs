@@ -17,6 +17,7 @@ public sealed class GistAppSession : IDisposable
     private const string AppEnvVar = "GIST_DATA_ROOT";
 
     private readonly UIA3Automation _automation;
+    public UIA3Automation Automation => _automation;
     private readonly Application _app;
     private readonly Process _proc;
 
@@ -36,9 +37,9 @@ public sealed class GistAppSession : IDisposable
     }
 
     /// <summary>Creates a scratch root, lets <paramref name="prepare"/> populate it, then launches the app.</summary>
-    public static async Task<GistAppSession> StartAsync(Func<string, Task>? prepare = null, TimeSpan? windowTimeout = null)
+    public static async Task<GistAppSession> StartAsync(Func<string, Task>? prepare = null, TimeSpan? windowTimeout = null, string? existingRoot = null)
     {
-        var root = Path.Combine(Path.GetTempPath(), "gist-uitest-" + Guid.NewGuid().ToString("N"));
+        var root = existingRoot ?? Path.Combine(Path.GetTempPath(), "gist-uitest-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         Application? app = null;
         Process? proc = null;
@@ -131,17 +132,24 @@ public sealed class GistAppSession : IDisposable
         catch (Exception) { return false; }
     }
 
+    /// <summary>When set, Dispose kills the app but leaves the scratch root for a follow-up session (restart tests).
+    /// The test that sets it owns deleting the root, via <see cref="DeleteRoot"/> in a finally block.</summary>
+    public bool KeepRoot { get; set; }
+
     public void Dispose()
     {
-        KillAndClean(_app, Root);
+        KillAndClean(_app, KeepRoot ? null : Root);
         _proc.Dispose();
         _automation.Dispose();
     }
 
-    private static void KillAndClean(Application? app, string root)
+    public static void DeleteRoot(string root) => KillAndClean(null, root);
+
+    private static void KillAndClean(Application? app, string? root)
     {
         try { if (app is not null && !app.HasExited) app.Kill(); } catch (Exception) { }
         try { app?.Dispose(); } catch (Exception) { }
+        if (root is null) return;
         for (var i = 0; i < 15; i++)
         {
             try { if (Directory.Exists(root)) Directory.Delete(root, true); return; }
