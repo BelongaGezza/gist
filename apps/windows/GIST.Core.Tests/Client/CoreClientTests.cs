@@ -322,6 +322,19 @@ public sealed class CoreClientTests : IDisposable
         Assert.Equal(new EncryptItemsSummaryShape(0, 1, 0), Shape(second));
     }
 
+    [Fact]
+    public async Task EncryptItems_failure_reports_scrubbed_first_errors_without_ids_or_paths()
+    {
+        using var client = await NewReadyClientAsync();
+
+        var summary = await client.EncryptItemsAsync(new[] { "no-such-id-123" });
+
+        Assert.Equal(new EncryptItemsSummaryShape(0, 0, 1), Shape(summary));
+        var line = Assert.Single(summary.FirstErrors);
+        Assert.Equal("An item could no longer be found in the library.", line);
+        Assert.DoesNotContain("no-such-id-123", line);
+    }
+
     /// <summary>
     /// The read-after-encrypt guarantee ADR-014 exists for: an item encrypted through this client
     /// must still be readable through the <em>same</em> client, because production opens the store

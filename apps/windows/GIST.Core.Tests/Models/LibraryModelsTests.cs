@@ -136,4 +136,25 @@ public sealed class LibraryModelsTests
         Assert.True(EncryptItemsSummary.Empty.IsEmpty);
         Assert.False(new EncryptItemsSummary(1, 0, 0).IsEmpty);
     }
+
+    [Theory]
+    [InlineData("item not found: C:\\Users\\bob\\secret.txt", "An item could no longer be found in the library.")]
+    [InlineData("io: The system cannot find the path C:\\Users\\bob\\x.json", "An item's files could not be read or written.")]
+    [InlineData("sqlite: disk I/O error", "The library database reported an error.")]
+    [InlineData("decryption failed (wrong key or corrupted data) for D:\\a\\b", "An item's stored data appears to be damaged.")]
+    [InlineData("something new and path-y /home/x/y", "An item could not be encrypted.")]
+    [InlineData(null, "An item could not be encrypted.")]
+    public void EncryptItemsSummary_ScrubFailure_returns_fixed_text_never_the_raw_message(string? raw, string expected)
+    {
+        var text = EncryptItemsSummary.ScrubFailure(raw);
+        Assert.Equal(expected, text);
+        Assert.DoesNotContain("\\", text);
+    }
+
+    [Fact]
+    public void EncryptItemsSummary_FirstErrors_defaults_to_empty()
+    {
+        Assert.Empty(new EncryptItemsSummary(1, 0, 0).FirstErrors);
+        Assert.Empty(EncryptItemsSummary.Empty.FirstErrors);
+    }
 }

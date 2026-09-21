@@ -9,6 +9,47 @@ namespace Gist.Core.Models;
 /// <param name="FailedCount">Items the core could not encrypt.</param>
 public sealed record EncryptItemsSummary(int EncryptedCount, int AlreadyEncryptedCount, int FailedCount)
 {
+    /// <summary>Most first-error lines kept for the result dialog.</summary>
+    public const int MaxFirstErrors = 3;
+
+    /// <summary>
+    /// Up to <see cref="MaxFirstErrors"/> fixed-text reasons for failed items (spec §4.5 "+ first
+    /// errors"). Produced by <see cref="ScrubFailure"/>, so never a path, title or raw core message.
+    /// </summary>
+    public IReadOnlyList<string> FirstErrors { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Maps a raw per-item core error string (a Rust <c>Display</c>, which can embed a path, item id
+    /// or OS error text) to fixed, presentable text by its stable leading kind tag. Anything
+    /// unrecognised becomes a generic line; the raw text is never returned.
+    /// </summary>
+    public static string ScrubFailure(string? raw)
+    {
+        var text = raw ?? string.Empty;
+        if (text.StartsWith("item not found", StringComparison.Ordinal))
+        {
+            return "An item could no longer be found in the library.";
+        }
+
+        if (text.StartsWith("io:", StringComparison.Ordinal))
+        {
+            return "An item's files could not be read or written.";
+        }
+
+        if (text.StartsWith("sqlite:", StringComparison.Ordinal))
+        {
+            return "The library database reported an error.";
+        }
+
+        if (text.StartsWith("decryption failed", StringComparison.Ordinal)
+            || text.StartsWith("checksum mismatch", StringComparison.Ordinal))
+        {
+            return "An item's stored data appears to be damaged.";
+        }
+
+        return "An item could not be encrypted.";
+    }
+
     public static EncryptItemsSummary Empty { get; } = new(0, 0, 0);
 
     public bool IsEmpty => EncryptedCount == 0 && AlreadyEncryptedCount == 0 && FailedCount == 0;
