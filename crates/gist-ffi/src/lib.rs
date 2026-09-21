@@ -232,6 +232,98 @@ impl From<gist_core::EncryptItemOutcome> for FfiEncryptItemResult {
     }
 }
 
+// ── Removal / sweep outcomes (review Q10) ───────────────────────────────────
+
+/// Mirrors `gist_core::FileDeleteFailureKind` as a uniffi-exportable enum —
+/// why one stored file could not be deleted, at the coarsest granularity
+/// that is still actionable in a UI.
+///
+/// Carries no path, filename or OS error text by design: these values are
+/// shown to the user in a result summary, and this project logs source paths
+/// at `debug!` only. Every variant is a genuine failure worth surfacing —
+/// "the file was already gone" is not one of them and is counted separately
+/// as `files_missing`, so a pre-ADR-013 item with no checksum sidecars
+/// reports zero failures rather than looking broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiFileDeleteFailureKind {
+    Locked,
+    Permission,
+    Other,
+}
+
+impl From<gist_core::FileDeleteFailureKind> for FfiFileDeleteFailureKind {
+    fn from(k: gist_core::FileDeleteFailureKind) -> Self {
+        match k {
+            gist_core::FileDeleteFailureKind::Locked => FfiFileDeleteFailureKind::Locked,
+            gist_core::FileDeleteFailureKind::Permission => FfiFileDeleteFailureKind::Permission,
+            gist_core::FileDeleteFailureKind::Other => FfiFileDeleteFailureKind::Other,
+        }
+    }
+}
+
+/// Result of `GistCore::remove_items_detailed` — what the removal actually
+/// managed to do, so a UI never reports "removed" while a stored copy is
+/// still on disk (review Q10). See `gist_core::RemoveOutcome`.
+#[derive(uniffi::Record)]
+pub struct FfiRemoveOutcome {
+    /// Ids that matched a row and were removed from the database. Ids that
+    /// matched nothing are absent.
+    pub removed_ids: Vec<String>,
+    /// Stored files deleted: the `.json`/`.tokens.json` blobs, their
+    /// `.blake3` checksum sidecars, and (only when `delete_source_files` is
+    /// true) the ADR-006 sandboxed original copy and its sidecar. Never the
+    /// user's own file.
+    pub files_deleted: u32,
+    /// Files that were already gone, so there was nothing to delete. **Not
+    /// a failure** — the ordinary case is an item imported before ADR-013
+    /// added checksum sidecars, which has no `.blake3` files to remove. Do
+    /// not surface this as a problem; it exists so the tally adds up.
+    pub files_missing: u32,
+    /// How many deletions genuinely failed. Equals `failure_kinds.len()`.
+    /// **This is the only count worth showing the user as a warning.**
+    pub files_failed: u32,
+    /// One coarse kind per failed deletion, in attempt order.
+    pub failure_kinds: Vec<FfiFileDeleteFailureKind>,
+}
+
+impl From<gist_core::RemoveOutcome> for FfiRemoveOutcome {
+    fn from(o: gist_core::RemoveOutcome) -> Self {
+        FfiRemoveOutcome {
+            removed_ids: o.removed_ids,
+            files_deleted: o.files_deleted,
+            files_missing: o.files_missing,
+            files_failed: o.files_failed,
+            failure_kinds: o.failure_kinds.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Result of `GistCore::sweep_orphaned_files` — counts only, never which
+/// files were touched. See `gist_core::SweepOutcome`.
+#[derive(uniffi::Record)]
+pub struct FfiSweepOutcome {
+    pub files_scanned: u32,
+    pub files_deleted: u32,
+    /// Files that vanished between this sweep listing the directory and
+    /// acting on it. Rare, benign, not a failure — same meaning as
+    /// `FfiRemoveOutcome.files_missing`.
+    pub files_missing: u32,
+    pub files_failed: u32,
+    pub failure_kinds: Vec<FfiFileDeleteFailureKind>,
+}
+
+impl From<gist_core::SweepOutcome> for FfiSweepOutcome {
+    fn from(o: gist_core::SweepOutcome) -> Self {
+        FfiSweepOutcome {
+            files_scanned: o.files_scanned,
+            files_deleted: o.files_deleted,
+            files_missing: o.files_missing,
+            files_failed: o.files_failed,
+            failure_kinds: o.failure_kinds.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 // ── GistCore object ──────────────────────────────────────────────────────────
 
 #[derive(uniffi::Object)]
@@ -425,6 +517,50 @@ impl GistCore {
         ffi_catch!({
             self.inner
                 .remove_items(&ids, delete_source_files)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// `remove_items`, but reporting what actually happened (review Q10).
+    ///
+    /// Additive: `remove_items` above keeps its exact signature and
+    /// behaviour (it is this call with the outcome discarded), so existing
+    /// callers — including Apple's `CoreClient` — are unaffected.
+    ///
+    /// Use this where the UI shows a removal result. On Windows a stored
+    /// file can genuinely fail to delete while the library row is gone
+    /// (antivirus, the search indexer, a backup agent or another app holding
+    /// it open without `FILE_SHARE_DELETE`), and reporting a clean removal
+    /// in that case is a lie about the user's data. Files left behind this
+    /// way are reclaimed by `sweep_orphaned_files` on a later launch.
+    pub fn remove_items_detailed(
+        &self,
+        ids: Vec<String>,
+        delete_source_files: bool,
+    ) -> Result<FfiRemoveOutcome, GistError> {
+        ffi_catch!({
+            self.inner
+                .remove_items_detailed(&ids, delete_source_files)
+                .map(FfiRemoveOutcome::from)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Delete storage-directory files that no library row references any
+    /// more, returning counts only (review Q10). Intended to run at app
+    /// launch, as the cleanup pass for anything `remove_items_detailed`
+    /// could not delete at the time.
+    ///
+    /// Never deletes a file any row still references (including a
+    /// content-addressed ADR-006 original shared by several items), never
+    /// touches anything outside the storage directory, and never follows a
+    /// symlink or Windows junction out of it. See
+    /// `gist_core::Core::sweep_orphaned_files` for the full contract.
+    pub fn sweep_orphaned_files(&self) -> Result<FfiSweepOutcome, GistError> {
+        ffi_catch!({
+            self.inner
+                .sweep_orphaned_files()
+                .map(FfiSweepOutcome::from)
                 .map_err(GistError::from)
         })
     }
