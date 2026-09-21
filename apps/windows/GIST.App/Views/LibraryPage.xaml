@@ -1,18 +1,77 @@
 <Page x:Class="Gist.App.Views.LibraryPage"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:local="using:Gist.App.Views">
     <Grid Margin="24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
         <TextBlock Text="Library" Style="{StaticResource TitleTextBlockStyle}" />
-        <!-- Empty state (spec section 4.4). The Import button is added in W2 when CoreClient is wired. -->
-        <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
+
+        <!-- Loading -->
+        <StackPanel x:Name="LoadingPanel" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12"
+                    AutomationProperties.AutomationId="LibraryLoading">
+            <ProgressRing IsActive="True" Width="40" Height="40" />
+            <TextBlock Text="Loading your library" HorizontalAlignment="Center"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+
+        <!-- Item list -->
+        <ListView x:Name="ItemsList" Grid.Row="1" SelectionMode="None" Visibility="Collapsed"
+                  AutomationProperties.AutomationId="LibraryList" AutomationProperties.Name="Library items">
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="local:LibraryRow">
+                    <Grid Padding="4,8" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="{x:Bind Title}" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind Authors}" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <FontIcon Grid.Column="1" Glyph="&#xE72E;" FontSize="14" VerticalAlignment="Center"
+                                  Visibility="{x:Bind LockVisibility}" AutomationProperties.Name="Encrypted"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </Grid>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <!-- Empty state (spec section 4.4). The Import button is added in W2. -->
+        <StackPanel x:Name="EmptyPanel" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8"
+                    Visibility="Collapsed" AutomationProperties.AutomationId="LibraryEmpty">
             <FontIcon Glyph="&#xE8F1;" FontSize="48" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <TextBlock Text="No books yet" Style="{StaticResource SubtitleTextBlockStyle}" HorizontalAlignment="Center" />
             <TextBlock Text="Import a .txt, .epub, or .docx file to get started"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
+        </StackPanel>
+
+        <!-- Blocking: encryption key cannot be recovered (ADR-016). Deliberately no destructive action. -->
+        <StackPanel x:Name="CorruptPanel" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10"
+                    MaxWidth="480" Visibility="Collapsed" AutomationProperties.AutomationId="LibraryKeyCorrupt">
+            <FontIcon Glyph="&#xE72E;" FontSize="48" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock Text="Encrypted items can't be unlocked" Style="{StaticResource SubtitleTextBlockStyle}"
+                       HorizontalAlignment="Center" TextWrapping="Wrap" />
+            <TextBlock Text="GIST couldn't recover the key that protects your encrypted items. Nothing has been deleted and no new key has been created. Try again, or restore your GIST data from a backup."
+                       TextWrapping="Wrap" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <Button Content="Retry" Click="OnRetry" HorizontalAlignment="Center" Style="{StaticResource AccentButtonStyle}"
+                    AutomationProperties.AutomationId="RetryCorrupt" />
+        </StackPanel>
+
+        <!-- Retryable failure (key store or store temporarily unavailable, or a generic error). -->
+        <StackPanel x:Name="ErrorPanel" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10"
+                    MaxWidth="480" Visibility="Collapsed" AutomationProperties.AutomationId="LibraryError">
+            <FontIcon Glyph="&#xE783;" FontSize="48" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock x:Name="ErrorTitle" Style="{StaticResource SubtitleTextBlockStyle}"
+                       HorizontalAlignment="Center" TextWrapping="Wrap" />
+            <TextBlock x:Name="ErrorDetail" TextWrapping="Wrap" TextAlignment="Center"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <Button Content="Retry" Click="OnRetry" HorizontalAlignment="Center" Style="{StaticResource AccentButtonStyle}"
+                    AutomationProperties.AutomationId="RetryError" />
         </StackPanel>
     </Grid>
 </Page>

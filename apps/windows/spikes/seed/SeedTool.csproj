@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Dev/test-only seed tool for GIST.App/verify-library.ps1: imports a file into a scratch GIST_DATA_ROOT
+       through GIST.Core (real DPAPI key, real store). Never shipped. Not part of GIST.sln.
+       Needs the generated bindings and staged native DLL (tools/gen-bindings-cs.sh). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\GIST.Core\GIST.Core.csproj" />
+  </ItemGroup>
+</Project>
