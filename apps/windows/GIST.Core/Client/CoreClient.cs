@@ -649,6 +649,7 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
             var encrypted = 0;
             var already = 0;
             var failed = 0;
+            var firstErrors = new List<string>(EncryptItemsSummary.MaxFirstErrors);
             foreach (var item in result.Value)
             {
                 switch (item.Outcome)
@@ -661,11 +662,21 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
                         break;
                     default:
                         failed++;
+                        if (firstErrors.Count < EncryptItemsSummary.MaxFirstErrors)
+                        {
+                            // The raw string can embed ids/paths; keep only scrubbed fixed text.
+                            var line = EncryptItemsSummary.ScrubFailure(item.Error);
+                            if (!firstErrors.Contains(line))
+                            {
+                                firstErrors.Add(line);
+                            }
+                        }
+
                         break;
                 }
             }
 
-            summary = new EncryptItemsSummary(encrypted, already, failed);
+            summary = new EncryptItemsSummary(encrypted, already, failed) { FirstErrors = firstErrors };
             await OnUiAsync(() => LastError = null).ConfigureAwait(false);
         }
 
