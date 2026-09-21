@@ -382,8 +382,12 @@ public sealed class LibraryViewModel : LibraryViewModelBase
 
         BeginUserOperation();
         PendingDialog = LibraryDialog.None;
-        await Core.RemoveItemsAsync(ids, deleteStoredCopy).ConfigureAwait(false);
+        var result = await Core.RemoveItemsAsync(ids, deleteStoredCopy).ConfigureAwait(false);
         CaptureOutcome();
+
+        // Only genuine failures warn; FilesMissing (e.g. pre-ADR-013 items with no sidecars) is
+        // benign and stays invisible. The removal itself succeeded either way.
+        LastRemoveWarning = RemoveWarning.For(result);
         ClearSelection();
         await AfterLibraryMutationAsync().ConfigureAwait(false);
     }
