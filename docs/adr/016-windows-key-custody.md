@@ -199,3 +199,6 @@ tamper tests simulate the failure *signal*, not a real master-key loss, and no t
 provoked from outside the process — the classifier's transient mapping is tested directly instead);
 ARM64; integration with the uniffi `KeyProvider` callback; behaviour on a filesystem without ACL
 support.
+
+## Decision 2026-09-21 - recovery of encrypted items
+No recovery mechanism in v1.0 (maintainer decision). DPAPI (CurrentUser) keys do not survive a profile reset, a Windows reinstall or a move to another PC, and encrypted items become permanently unreadable in those cases. Mitigations: (1) Encrypt is opt-in per item and new imports stay plaintext (ADR-014); (2) the Encrypt confirmation dialog states the irrecoverability plainly; (3) originals in the user's own files are never touched, so the source material remains. A passphrase-protected key backup/export is a v1.1 candidate and would likely need a key-file format revision; nothing in the current format blocks adding it later.

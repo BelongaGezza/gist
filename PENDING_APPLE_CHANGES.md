@@ -41,6 +41,13 @@ this file when it contains entries.
 **Action:** on macOS, add a test that a failed import still shows its error after the follow-up refresh; if it fails, mirror the Windows split.
 
 ## Pending Apple Change — 2026-09-21
+**File:** `Cargo.lock` + `crates/gist-store/Cargo.toml` (rusqlite 0.31.0 -> 0.40.2, libsqlite3-sys 0.28.0 -> 0.38.2, bundled SQLite 3.45.0 -> 3.53.2). No Swift or Xcode file edited.
+**Change required:** none in Swift; verify only. `gist-store` needed zero source changes, but the bundled SQLite C amalgamation is recompiled for every Apple slice, and existing users' libraries on macOS have never been opened under the new SQLite here.
+**Reason:** this bumps the C library that holds every user's library database and its FTS5 index. Windows/Linux/CI cover the Rust side; the Apple slices (arm64/x86_64 macOS, arm64 iOS + simulator) and the real `~/Library/Application Support/GIST` store do not.
+**Related commit/PR:** chore/rusqlite-0.40-compat (supersedes Dependabot #48)
+**Action:** on macOS run `./tools/build-core-xcframework.sh` (confirm every slice's bundled SQLite compiles and the xcframework size delta is sane), then `xcodegen generate` + `xcodebuild build`/`test` (scheme `GISTmacOS`) — 49 tests, including the `CoreClient` ones that drive a real `GistCore`. Then, most importantly, **launch the debug build against the real existing `~/Library/Application Support/GIST` store** and confirm the library still renders, search still returns results (type a partial word — the FTS5 prefix path), and an item opens in RSVP/Flow View. Note the result in `PLATFORM_VERIFICATION.md` and delete this block.
+
+## Pending Apple Change — 2026-09-21
 **File:** `Cargo.lock` (aes-gcm 0.10.3 -> 0.11.1, transitive aes pinned at 0.9.2), `crates/gist-store/src/lib.rs`
 **Change required:** none in Swift; verify only. Item encryption at rest now runs on aes-gcm 0.11 (aead 0.6). A known-answer test proves a blob written by 0.10.3 still decrypts, but the Swift app has never been run against it.
 **Reason:** existing users' encrypted items must stay readable after this ships.
