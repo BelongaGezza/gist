@@ -216,7 +216,7 @@ Goals: answer R1, make the environment reproducible.
 | ~~.NET 8 vs .NET 10 LTS~~ resolved: .NET 10 | done W0 |
 | ~~ARM64 as a v1.0 requirement or fast-follow~~ resolved: **v1.0 requirement** (maintainer, 2026-09-20). Open sub-items: runtime-test hardware/runner by end of W1; MSIX per-arch vs bundle (ADR-017) | decided; sub-items W1 |
 | Mirror the pinned bindgen fork under a project-controlled repo (Q6) | Day 1 of W1 |
-| Recovery-key export for encrypted items (Q9) | Before Encrypt ships in W2 |
+| ~~Recovery-key export for encrypted items (Q9)~~ resolved 2026-09-21 (maintainer): **no recovery in v1; the Encrypt dialog warns plainly** that items cannot be recovered if the Windows profile/PC is lost or reset, that Encrypt is optional per item, and that originals are never touched. Recovery export is a v1.1 candidate (may change the key-file format, `GKP2`) | decided |
 | Adopt the pacing FFI (§4.3) on Apple in the same release | Next macOS session |
 
 ---
