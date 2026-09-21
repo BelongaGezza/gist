@@ -21,8 +21,8 @@ public static class AppServices
     /// <summary>The main window (set by App); owner for pickers.</summary>
     public static Microsoft.UI.Xaml.Window? MainWindow { get; set; }
 
-    /// <summary>TODO(W2): swap for Gist.App.Dialogs.LibraryDialogHost once merged.</summary>
-    internal static Views.ILibraryDialogHost DialogHost { get; set; } = new Views.StubLibraryDialogHost();
+    /// <summary>The real dialog layer (Gist.App.Dialogs.LibraryDialogHost via an adapter).</summary>
+    internal static Views.ILibraryDialogHost DialogHost { get; set; } = new Views.AppLibraryDialogHost();
 
     public static CoreClient Core { get; private set; } = null!;
 
