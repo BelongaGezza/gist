@@ -572,7 +572,11 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
     /// <param name="deleteSourceFiles">
     /// Whether to also delete GIST's own sandboxed ADR-006 copy under
     /// <c>&lt;storageDir&gt;/originals/</c>. <b>The user's real file is never touched either way</b>
-    /// — that is the whole point of copy-on-import, and there is a test for it.
+    /// — that is the whole point of copy-on-import, and there is a test for it. The Windows UI
+    /// always passes <see langword="true"/> (removal is a complete delete, maintainer decision
+    /// 2026-09-21); the parameter survives because Apple still offers the older two-button dialog.
+    /// A copy shared with a surviving item is kept by the core regardless — see
+    /// <see cref="RemoveResult.SharedCopiesKept"/>.
     /// </param>
     /// <returns>
     /// What the removal did. A file that could not be deleted is reported in the result
@@ -608,7 +612,7 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
             mapped = new RemoveResult(
                 o.RemovedIds ?? Array.Empty<string>(),
                 (int)o.FilesDeleted, (int)o.FilesMissing, (int)o.FilesFailed,
-                MapKinds(o.FailureKinds));
+                MapKinds(o.FailureKinds), (int)o.SharedCopiesKept);
             if (mapped.HasFileFailures)
             {
                 // Retry on the next idle refresh (see StartBackgroundSweep).

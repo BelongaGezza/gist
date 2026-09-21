@@ -76,6 +76,87 @@ public sealed class RemovalOutcomeTests : IDisposable
         Assert.Null(client.LastError);
     }
 
+    /// <summary>
+    /// Removal is a complete delete (maintainer decision, 2026-09-21): GIST's own stored copy goes
+    /// with the item, every time. The user's file is verified byte-for-byte, not merely present.
+    /// </summary>
+    [Fact]
+    public async Task Removal_deletes_the_stored_copy_and_leaves_the_users_own_file_byte_identical()
+    {
+        var client = await NewReadyClientAsync();
+        var (id, original) = await ImportAsync(client, "complete", "The user's own file.");
+        var storedCopy = _workspace.PredictSandboxedCopyPath(original);
+        var originalBytes = File.ReadAllBytes(original);
+        Assert.True(File.Exists(storedCopy));
+
+        var result = await client.RemoveItemsAsync(new[] { id }, deleteSourceFiles: true);
+
+        Assert.Equal(new[] { id }, result.RemovedIds);
+        Assert.Equal(0, result.FilesFailed);
+        Assert.Equal(0, result.SharedCopiesKept);
+        Assert.Empty(FilesOf(id));
+        Assert.False(File.Exists(storedCopy), "the stored copy must go with the item");
+        Assert.Equal(originalBytes, File.ReadAllBytes(original));
+    }
+
+    /// <summary>
+    /// ADR-006's content-addressed dedup, at the client boundary: two items imported from
+    /// byte-identical files share one stored copy, so removing the first must keep it — reported as
+    /// <see cref="RemoveResult.SharedCopiesKept"/>, which is deliberately <b>not</b> a failure and
+    /// <b>not</b> a missing file, so no warning is raised. Removing the second deletes it.
+    /// </summary>
+    [Fact]
+    public async Task A_stored_copy_shared_with_another_item_is_kept_reported_and_never_warns()
+    {
+        var client = await NewReadyClientAsync();
+        const string Shared = "One set of bytes, two library items.";
+        var (first, firstFile) = await ImportAsync(client, "sharer-one", Shared);
+        var (second, secondFile) = await ImportAsync(client, "sharer-two", Shared);
+
+        var storedCopy = _workspace.PredictSandboxedCopyPath(firstFile);
+        Assert.Equal(storedCopy, _workspace.PredictSandboxedCopyPath(secondFile));
+        Assert.True(File.Exists(storedCopy));
+
+        var kept = await client.RemoveItemsAsync(new[] { first }, deleteSourceFiles: true);
+        Assert.True(File.Exists(storedCopy), "the surviving item still references this copy");
+        Assert.Equal(1, kept.SharedCopiesKept);
+        Assert.Equal(0, kept.FilesFailed);
+        Assert.Equal(0, kept.FilesMissing);
+        Assert.False(kept.HasFileFailures, "a deliberately-kept shared copy must raise no warning");
+        Assert.Null(RemoveWarning.For(kept));
+
+        var last = await client.RemoveItemsAsync(new[] { second }, deleteSourceFiles: true);
+        Assert.Equal(0, last.SharedCopiesKept);
+        Assert.Equal(0, last.FilesFailed);
+        Assert.False(File.Exists(storedCopy), "the last item sharing it is gone, so the copy goes too");
+        Assert.True(File.Exists(firstFile) && File.Exists(secondFile));
+    }
+
+    /// <summary>
+    /// Both sharers removed in one call: nothing survives to reference the copy, so it is deleted —
+    /// once, not once per item, and with no "already gone" noise in the tally.
+    /// </summary>
+    [Fact]
+    public async Task Removing_both_sharers_in_one_call_deletes_the_shared_copy_exactly_once()
+    {
+        var client = await NewReadyClientAsync();
+        const string Shared = "Batch-removed shared bytes.";
+        var (first, firstFile) = await ImportAsync(client, "batch-one", Shared);
+        var (second, secondFile) = await ImportAsync(client, "batch-two", Shared);
+        var storedCopy = _workspace.PredictSandboxedCopyPath(firstFile);
+
+        var result = await client.RemoveItemsAsync(new[] { first, second }, deleteSourceFiles: true);
+
+        Assert.Equal(2, result.RemovedIds.Count);
+        Assert.Equal(0, result.SharedCopiesKept);
+        Assert.Equal(0, result.FilesFailed);
+        Assert.Equal(0, result.FilesMissing);
+        Assert.False(File.Exists(storedCopy));
+        Assert.Empty(FilesOf(first));
+        Assert.Empty(FilesOf(second));
+        Assert.True(File.Exists(firstFile) && File.Exists(secondFile));
+    }
+
     [Fact]
     public async Task Pre_ADR013_shaped_item_without_checksum_sidecars_removes_with_no_warning()
     {
@@ -92,7 +173,7 @@ public sealed class RemovalOutcomeTests : IDisposable
         }
 
         vm.SetSelection(new[] { id });
-        await vm.RemoveAsync(deleteStoredCopy: false);
+        await vm.RemoveAsync();
 
         Assert.Null(vm.LastRemoveWarning);
         Assert.Null(vm.LastError);
@@ -114,7 +195,7 @@ public sealed class RemovalOutcomeTests : IDisposable
         using var hold = new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.None);
 
         vm.SetSelection(new[] { id });
-        await vm.RemoveAsync(deleteStoredCopy: true);
+        await vm.RemoveAsync();
 
         // The row is gone: that is the success. The failed file is only a warning.
         Assert.Empty(vm.DisplayedItems);
@@ -291,7 +372,7 @@ public sealed class RemovalOutcomeTests : IDisposable
         using (new FileStream(lockedPath, FileMode.Open, FileAccess.Read, FileShare.None))
         {
             vm.SetSelection(new[] { id });
-            await vm.RemoveAsync(deleteStoredCopy: false);
+            await vm.RemoveAsync();
         }
 
         Assert.NotNull(vm.LastRemoveWarning);

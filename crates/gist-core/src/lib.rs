@@ -117,6 +117,16 @@ pub struct RemoveOutcome {
     /// no paths, no titles. Never contains a "missing file" entry; see
     /// `files_missing`. See [`FileDeleteFailureKind`].
     pub failure_kinds: Vec<FileDeleteFailureKind>,
+    /// How many removed items had their ADR-006 stored copy **deliberately
+    /// kept** because another library row that survived this removal still
+    /// references the same content-addressed file.
+    ///
+    /// **Not a failure and not a missing file** — the third counter exists
+    /// precisely so neither of those has to lie. No deletion was attempted,
+    /// so nothing can have failed; the file is still there on purpose, so it
+    /// is not missing. Removing the last item that shares the file deletes it
+    /// then. See [`gist_store::RemovedItem::source_copy_still_referenced`].
+    pub shared_copies_kept: u32,
 }
 
 /// What [`Core::sweep_orphaned_files`] found and did. Counts only — the
@@ -187,6 +197,38 @@ impl DeleteTally {
 
     fn failed(&self) -> u32 {
         self.failure_kinds.len() as u32
+    }
+}
+
+/// Is `path` inside `storage_dir`, resolving `..`, `.` and (on Windows)
+/// junctions/symlinks first?
+///
+/// Removal is the one place that deletes a path read back out of the
+/// database rather than one it just computed, and since 2026-09-21 it does so
+/// unconditionally (ADR-006 addendum). A `source_copy_path` column is only
+/// ever written by [`gist_store::Store::store_original_copy`], whose own
+/// filename is traversal-safe (`F23`) — but *the column is not the
+/// filename*, and a corrupted, hand-edited or otherwise tampered row could
+/// name anything at all, including a file the user cares about. This is the
+/// check that makes that impossible rather than merely unlikely.
+///
+/// Both sides are canonicalised, so the two paths are compared in one form
+/// (on Windows that means both carry the `\\?\` verbatim prefix, which a
+/// plain string comparison would otherwise get wrong) and a reparse point
+/// planted inside `originals/` cannot redirect a delete outside it.
+///
+/// A path that cannot be canonicalised — overwhelmingly "it isn't there" —
+/// returns `true`: there is nothing to delete, and the caller's ordinary
+/// `NotFound` handling should record it as *missing* rather than have it
+/// silently disappear from the tally.
+fn is_inside(storage_dir: &Path, path: &str) -> bool {
+    let Ok(storage) = std::fs::canonicalize(storage_dir) else {
+        // No storage directory to be inside of: refuse rather than guess.
+        return false;
+    };
+    match std::fs::canonicalize(path) {
+        Ok(candidate) => candidate.starts_with(&storage),
+        Err(_) => true,
     }
 }
 
@@ -776,6 +818,21 @@ impl Core {
     /// an item with no sandboxed copy (a URL import, or one imported before
     /// ADR-006 landed) simply has nothing to delete here.
     ///
+    /// **Shared stored copies are never deleted out from under a survivor**
+    /// (ADR-006 addendum, 2026-09-21). Copies are content-addressed, so two
+    /// items imported from byte-identical files share one file on disk. When
+    /// `delete_source_files` is true, a stored copy is deleted only once the
+    /// *last* row referencing it goes — so removing one of two sharers keeps
+    /// the file, removing both in one call deletes it, and removing the
+    /// second one later deletes it then. See
+    /// [`RemoveOutcome::shared_copies_kept`].
+    ///
+    /// **A stored-copy path that does not resolve inside the storage
+    /// directory is refused, not deleted** (see [`is_inside`]) — a
+    /// corrupted or tampered row cannot make removal reach a file elsewhere
+    /// on the user's disk. Such a refusal appears in no counter, for the same
+    /// reason `source_path` does not: it is not one of GIST's own files.
+    ///
     /// File deletion is best-effort: a missing or unremovable file is
     /// logged at `debug!` (per this project's source-path logging policy)
     /// and does not fail the overall call, since the library metadata is
@@ -816,6 +873,13 @@ impl Core {
 
         let mut tally = DeleteTally::default();
         let mut removed_ids = Vec::with_capacity(removed.len());
+        let mut shared_copies_kept = 0u32;
+        // Stored copies handled already in *this* batch. Removing both items
+        // that share one content-addressed copy means two rows name the same
+        // file: without this, the second one would re-attempt a delete of a
+        // file the first already removed and report it as `files_missing`,
+        // which is bookkeeping noise about a perfectly clean removal.
+        let mut copies_handled: std::collections::HashSet<String> = Default::default();
 
         for item in removed {
             tally.try_delete_with_sidecar(&item.doc_path);
@@ -823,7 +887,32 @@ impl Core {
 
             if delete_source_files {
                 if let Some(source_copy_path) = &item.source_copy_path {
-                    tally.try_delete_with_sidecar(source_copy_path);
+                    if !copies_handled.insert(source_copy_path.to_ascii_lowercase()) {
+                        // Already dealt with for an earlier item in this same
+                        // batch — the two share one file.
+                    } else if !is_inside(self.store.storage_dir(), source_copy_path) {
+                        // Not one of GIST's own files (see `is_inside`).
+                        // Refused outright, and deliberately counted in
+                        // nothing: it was never GIST's to delete, exactly
+                        // like `source_path`.
+                        tracing::debug!(
+                            "gist-core: refusing to delete stored copy outside storage: {}",
+                            source_copy_path
+                        );
+                    } else if item.source_copy_still_referenced {
+                        // ADR-006 dedup: another surviving row points at this
+                        // exact content-addressed file. Deleting it here would
+                        // take away that item's stored copy too. Counted, not
+                        // attempted — so it lands in neither `files_failed`
+                        // nor `files_missing`.
+                        shared_copies_kept += 1;
+                        tracing::debug!(
+                            "gist-core: kept shared stored copy {} (still referenced)",
+                            source_copy_path
+                        );
+                    } else {
+                        tally.try_delete_with_sidecar(source_copy_path);
+                    }
                 }
                 // else: no sandboxed copy exists for this item (URL import,
                 // or imported before ADR-006 landed) — nothing to delete.
@@ -840,6 +929,7 @@ impl Core {
             files_missing: tally.missing,
             files_failed: tally.failed(),
             failure_kinds: tally.failure_kinds,
+            shared_copies_kept,
         })
     }
 
@@ -2320,7 +2410,463 @@ mod tests {
             "the item must still be readable after the sweep"
         );
     }
+
+    /// The complete-delete path meeting the Windows case that makes removal
+    /// fallible at all: the ADR-006 stored copy is held open without
+    /// delete-sharing while the user removes its only item.
+    ///
+    /// The removal must still happen, the locked copy must be reported
+    /// `Locked` (so the UI's "in use by another program … will retry next
+    /// start" wording is literally true), and the next sweep — once the
+    /// handle is gone — must reclaim it. This is what makes it honest to
+    /// drop the old "Remove from Library" choice: a stored copy left behind
+    /// by a lock is deferred cleanup, never a permanent leak.
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_stored_copy_is_reported_locked_and_reclaimed_by_a_later_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let src = dir.path().join("locked_copy.txt");
+        std::fs::write(&src, b"Antivirus is holding the stored copy open.").unwrap();
+        let before = sha256_hex(&src);
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        let copy_path = the_one_sandboxed_copy(&storage);
+        let handle = open_without_delete_sharing(&copy_path);
+
+        let outcome = core.remove_items_detailed(&[id.clone()], true).unwrap();
+
+        assert_eq!(outcome.removed_ids, vec![id]);
+        assert_eq!(
+            outcome.failure_kinds,
+            vec![FileDeleteFailureKind::Locked],
+            "a stored copy another handle holds open must read as Locked: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.shared_copies_kept, 0,
+            "a locked copy is a failure, never a deliberately-kept shared copy: {outcome:?}"
+        );
+        assert!(
+            copy_path.exists(),
+            "the locked copy is necessarily still there"
+        );
+
+        drop(handle);
+
+        let swept = core.sweep_orphaned_files().unwrap();
+        assert!(
+            !copy_path.exists(),
+            "the sweep must reclaim the now-unlocked orphaned copy: {swept:?}"
+        );
+        assert!(src.exists() && sha256_hex(&src) == before);
+    }
     // [PLATFORM: Windows] ─── end ───────────────────────────────────────
+
+    // ── ADR-006 shared stored copies (complete-delete semantics) ─────────
+    // Stored copies are content-addressed, so two items imported from
+    // byte-identical files share one file on disk. Since 2026-09-21 removal
+    // always deletes GIST's stored copy, which makes "who else still points
+    // at this file?" a data-loss question rather than a tidiness one. These
+    // tests are deliberately adversarial: every one of them also re-checks,
+    // by SHA-256, that the user's own original files are untouched.
+
+    /// SHA-256 of a file's bytes, lower-case hex. Used instead of a bare
+    /// `exists()` check so a removal that truncated, emptied or rewrote a
+    /// user's original file could not pass.
+    fn sha256_hex(path: &std::path::Path) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(std::fs::read(path).expect("file must be readable"));
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// Every non-sidecar file under `<storage>/originals/`.
+    fn stored_copies(storage: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let dir = storage.join("originals");
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) != Some("blake3"))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Two items imported from two *differently named* files with identical
+    /// bytes, which is exactly what makes ADR-006's content-addressed dedup
+    /// give them one shared stored copy. Returns
+    /// `(core, storage, [id_a, id_b], [src_a, src_b], shared_copy)`.
+    #[allow(clippy::type_complexity)]
+    fn two_items_sharing_one_stored_copy(
+        dir: &std::path::Path,
+    ) -> (
+        Core,
+        std::path::PathBuf,
+        [String; 2],
+        [std::path::PathBuf; 2],
+        std::path::PathBuf,
+    ) {
+        let (core, storage) = core_rooted_at(dir);
+
+        // Identical bytes, different file names: same SHA-256, so
+        // `store_original_copy` dedups to one file.
+        let bytes = b"Two library items, one quokka, one set of bytes on disk.";
+        let src_a = dir.join("first name.txt");
+        let src_b = dir.join("second name.txt");
+        std::fs::write(&src_a, bytes).unwrap();
+        std::fs::write(&src_b, bytes).unwrap();
+
+        let id_a = core.import_file(&src_a, &NullObserver).unwrap();
+        let id_b = core.import_file(&src_b, &NullObserver).unwrap();
+        assert_ne!(id_a, id_b, "two imports must produce two distinct items");
+
+        let copies = stored_copies(&storage);
+        assert_eq!(
+            copies.len(),
+            1,
+            "precondition: identical bytes must dedup to one stored copy (ADR-006), found {copies:?}"
+        );
+        let shared = copies.into_iter().next().unwrap();
+
+        (core, storage, [id_a, id_b], [src_a, src_b], shared)
+    }
+
+    /// **The rule this whole change turns on.** Removing one of two items
+    /// that share a stored copy must keep the file, because the survivor
+    /// still references it — and must say so honestly: kept, not failed,
+    /// not missing.
+    #[test]
+    fn removing_one_of_two_sharers_keeps_the_shared_stored_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage, [id_a, id_b], [src_a, src_b], shared) =
+            two_items_sharing_one_stored_copy(dir.path());
+        let (hash_a, hash_b) = (sha256_hex(&src_a), sha256_hex(&src_b));
+
+        let outcome = core.remove_items_detailed(&[id_a.clone()], true).unwrap();
+
+        assert_eq!(outcome.removed_ids, vec![id_a]);
+        assert!(
+            shared.exists(),
+            "the surviving item's stored copy must not be deleted on the other item's behalf"
+        );
+        assert_eq!(
+            outcome.shared_copies_kept, 1,
+            "the kept copy must be reported as kept: {outcome:?}"
+        );
+        assert_eq!(
+            (outcome.files_failed, outcome.files_missing),
+            (0, 0),
+            "a deliberately-kept shared copy is neither a failure nor a missing file: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.files_deleted, FILES_PER_FRESH_ITEM,
+            "only the removed item's own blobs and sidecars should be deleted: {outcome:?}"
+        );
+        assert!(
+            outcome.failure_kinds.is_empty(),
+            "nothing was even attempted for the shared copy: {outcome:?}"
+        );
+
+        // The survivor is genuinely intact, not merely listed.
+        assert!(core.get_document(&id_b).is_ok());
+
+        // And a sweep must agree: a referenced file is never an orphan.
+        let swept = core.sweep_orphaned_files().unwrap();
+        assert_eq!(
+            (swept.files_deleted, swept.files_failed),
+            (0, 0),
+            "the sweep must also keep a copy a live row still references: {swept:?}"
+        );
+        assert!(shared.exists());
+
+        // Neither user file was touched, by content not just existence.
+        assert_eq!(sha256_hex(&src_a), hash_a);
+        assert_eq!(sha256_hex(&src_b), hash_b);
+        assert!(
+            storage.join("originals").exists(),
+            "the originals directory itself must never be removed"
+        );
+    }
+
+    /// Removing both sharers **in one batch** must delete the shared copy:
+    /// the "still referenced?" question is asked after the whole batch has
+    /// been applied, so nothing survives to reference it.
+    #[test]
+    fn removing_both_sharers_in_one_batch_deletes_the_shared_stored_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage, [id_a, id_b], [src_a, src_b], shared) =
+            two_items_sharing_one_stored_copy(dir.path());
+        let (hash_a, hash_b) = (sha256_hex(&src_a), sha256_hex(&src_b));
+        let shared_sidecar = std::path::PathBuf::from(format!("{}.blake3", shared.display()));
+
+        let outcome = core
+            .remove_items_detailed(&[id_a.clone(), id_b.clone()], true)
+            .unwrap();
+
+        assert_eq!(outcome.removed_ids.len(), 2, "{outcome:?}");
+        assert!(
+            !shared.exists(),
+            "with no row left referencing it, the shared copy must go"
+        );
+        assert!(
+            !shared_sidecar.exists(),
+            "its checksum sidecar must go with it (ADR-013)"
+        );
+        assert_eq!(
+            outcome.shared_copies_kept, 0,
+            "nothing was kept — both sharers went: {outcome:?}"
+        );
+        assert_eq!(
+            (outcome.files_failed, outcome.files_missing),
+            (0, 0),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            outcome.files_deleted,
+            // Two items' blobs + sidecars, plus the one shared copy + its
+            // sidecar — deleted once, not once per item.
+            FILES_PER_FRESH_ITEM * 2 + 2,
+            "the shared copy must be deleted exactly once: {outcome:?}"
+        );
+
+        assert!(core.list_items(0, 10).unwrap().is_empty());
+        assert_eq!(sha256_hex(&src_a), hash_a);
+        assert_eq!(sha256_hex(&src_b), hash_b);
+    }
+
+    /// The same two items removed **one call at a time**. The first removal
+    /// keeps the copy; the second — now the last referencing row — deletes
+    /// it. This is the case a naive "delete whatever this row points at"
+    /// implementation gets wrong in the direction that loses a live item's
+    /// data, and the case a naive "never delete a shared copy" gets wrong in
+    /// the direction that leaks forever.
+    #[test]
+    fn removing_sharers_one_at_a_time_deletes_the_copy_only_with_the_last_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _storage, [id_a, id_b], [src_a, src_b], shared) =
+            two_items_sharing_one_stored_copy(dir.path());
+        let (hash_a, hash_b) = (sha256_hex(&src_a), sha256_hex(&src_b));
+
+        let first = core.remove_items_detailed(&[id_a], true).unwrap();
+        assert_eq!(first.shared_copies_kept, 1, "{first:?}");
+        assert!(shared.exists(), "one sharer left — keep it");
+
+        let second = core.remove_items_detailed(&[id_b], true).unwrap();
+        assert_eq!(
+            second.shared_copies_kept, 0,
+            "the last sharer's removal must delete, not keep: {second:?}"
+        );
+        assert_eq!(
+            (second.files_failed, second.files_missing),
+            (0, 0),
+            "{second:?}"
+        );
+        assert!(
+            !shared.exists(),
+            "the last referencing row is gone, so the copy must go with it"
+        );
+
+        assert_eq!(sha256_hex(&src_a), hash_a);
+        assert_eq!(sha256_hex(&src_b), hash_b);
+    }
+
+    /// A mixed batch: two sharers plus an unrelated item plus an unknown id.
+    /// Removing one sharer alongside the unrelated item must delete the
+    /// unrelated item's own copy while keeping the shared one — i.e. the
+    /// shared-copy rule is per file, not a blanket "keep everything when
+    /// anything is shared".
+    #[test]
+    fn a_mixed_batch_keeps_only_the_still_shared_copy_and_deletes_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage, [id_a, id_b], [src_a, src_b], shared) =
+            two_items_sharing_one_stored_copy(dir.path());
+
+        let src_solo = dir.path().join("solo.txt");
+        std::fs::write(&src_solo, b"Nobody else shares these bytes.").unwrap();
+        let id_solo = core.import_file(&src_solo, &NullObserver).unwrap();
+
+        let solo_copy = stored_copies(&storage)
+            .into_iter()
+            .find(|p| p != &shared)
+            .expect("the unrelated item must have its own distinct stored copy");
+
+        let hashes = [
+            sha256_hex(&src_a),
+            sha256_hex(&src_b),
+            sha256_hex(&src_solo),
+        ];
+
+        let outcome = core
+            .remove_items_detailed(
+                &[id_a.clone(), id_solo.clone(), "not-a-real-id".to_string()],
+                true,
+            )
+            .unwrap();
+
+        let mut removed = outcome.removed_ids.clone();
+        removed.sort();
+        let mut expected = vec![id_a, id_solo];
+        expected.sort();
+        assert_eq!(
+            removed, expected,
+            "an unknown id must not be reported removed"
+        );
+
+        assert_eq!(
+            outcome.shared_copies_kept, 1,
+            "exactly the shared copy is kept: {outcome:?}"
+        );
+        assert!(shared.exists(), "still referenced by the surviving item");
+        assert!(!solo_copy.exists(), "the unrelated item's own copy must go");
+        assert_eq!(
+            (outcome.files_failed, outcome.files_missing),
+            (0, 0),
+            "{outcome:?}"
+        );
+
+        assert!(core.get_document(&id_b).is_ok());
+        for (src, hash) in [&src_a, &src_b, &src_solo].into_iter().zip(hashes) {
+            assert_eq!(sha256_hex(src), hash, "{src:?} must be byte-identical");
+        }
+    }
+
+    /// After a complete removal, nothing anywhere in the storage tree may
+    /// still refer to the removed item — no blob, no tokens blob, no
+    /// checksum sidecar, no stored copy — while the *shared* copy the
+    /// survivor needs is still there. Walks the directory rather than
+    /// checking the handful of paths the implementation happens to know
+    /// about, so a file written by some other code path would still be
+    /// caught.
+    #[test]
+    fn no_residue_referencing_a_removed_item_remains_in_the_storage_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage, [id_a, id_b], [src_a, src_b], shared) =
+            two_items_sharing_one_stored_copy(dir.path());
+        let hash_a = sha256_hex(&src_a);
+
+        core.remove_items_detailed(&[id_a.clone()], true).unwrap();
+
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        walk(&storage, &mut files);
+
+        for path in &files {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            assert!(
+                !name.contains(&id_a),
+                "a file still named after the removed item survived: {path:?} (all: {files:?})"
+            );
+        }
+
+        // The one thing that *must* remain: the copy the survivor shares.
+        assert!(
+            files.iter().any(|p| p == &shared),
+            "the shared stored copy must survive for the other item: {files:?}"
+        );
+        assert!(
+            files
+                .iter()
+                .any(|p| p.file_name().unwrap().to_string_lossy().contains(&id_b)),
+            "the surviving item's own blobs must still be there: {files:?}"
+        );
+        assert_eq!(sha256_hex(&src_a), hash_a);
+    }
+
+    /// A stored copy whose *recorded* name looks like a path-traversal
+    /// attempt must never make removal act outside the storage directory.
+    ///
+    /// `store_original_copy` already sanitises the extension it builds the
+    /// name from (`F23`), so this attacks the layer above it instead: a row
+    /// whose `source_copy_path` column has been rewritten by hand to a
+    /// traversal path pointing at a real file outside storage — the shape a
+    /// corrupted or tampered database would have. Removal must not delete
+    /// that file.
+    #[test]
+    fn a_traversal_shaped_stored_copy_path_never_deletes_outside_the_storage_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let (core, storage) = core_rooted_at(&root);
+        let db = root.join("test.db");
+
+        // A file well outside the storage directory, standing in for
+        // anything on the user's disk.
+        let outside = dir.path().join("precious.txt");
+        std::fs::write(&outside, b"Not GIST's to delete.").unwrap();
+        let outside_hash = sha256_hex(&outside);
+
+        let src = dir.path().join("traversal.txt");
+        std::fs::write(&src, b"An item whose copy path gets rewritten.").unwrap();
+        let src_hash = sha256_hex(&src);
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        // Rewrite the row's stored-copy path to a traversal string that
+        // resolves to `outside`.
+        let traversal = storage
+            .join("originals")
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("precious.txt");
+        assert_eq!(
+            std::fs::canonicalize(&traversal).unwrap(),
+            std::fs::canonicalize(&outside).unwrap(),
+            "precondition: the traversal path must really resolve to the outside file"
+        );
+
+        // Tamper with the row exactly as a corrupted database would. Done on
+        // a second connection so the `Core`'s own store never wrote it — the
+        // point is that removal cannot trust this column, not that some code
+        // path produces it.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let changed = conn
+                .execute(
+                    "UPDATE library_items SET source_copy_path = ?1 WHERE id = ?2",
+                    rusqlite::params![traversal.to_string_lossy().as_ref(), &id],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "the tampering must actually have hit the row");
+        }
+
+        let outcome = core.remove_items_detailed(&[id], true).unwrap();
+
+        assert!(
+            outside.exists() && sha256_hex(&outside) == outside_hash,
+            "removal must never delete a file outside the storage directory, \
+             whatever a row's stored-copy path says: {outcome:?}"
+        );
+        assert!(
+            src.exists() && sha256_hex(&src) == src_hash,
+            "the user's own file is never touched either"
+        );
+
+        // And the sweep must not act on it either: its keep-list and its
+        // candidate patterns are both name-based and confined to the two
+        // directories it scans.
+        let swept = core.sweep_orphaned_files().unwrap();
+        assert!(
+            outside.exists() && sha256_hex(&outside) == outside_hash,
+            "the sweep must not reach outside the storage directory either: {swept:?}"
+        );
+    }
 
     /// A bulk call spanning a real id and an unknown one must report both
     /// outcomes individually rather than losing the real id's success
