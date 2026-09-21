@@ -56,32 +56,50 @@ public sealed class RemovePreviewTests
         Assert.Equal(expected, RemovePreview.ForLibrary(Items(count)).Title);
 
     /// <summary>
-    /// The irreversibility line is a spec requirement (§4.5 <b>[+]</b>), and it has to say the
-    /// thing that is actually true: neither button touches the user's own file (ADR-006, §10 item 1).
+    /// The irreversibility line is a spec requirement (§4.5 <b>[+]</b>), and since 2026-09-21 it
+    /// has to describe a complete delete: the item <em>and</em> GIST's stored copy go, from this
+    /// PC, permanently — while the file the user imported is not touched (ADR-006, §10 item 1).
+    /// Both halves are asserted so neither can be quietly dropped.
     /// </summary>
-    [Fact]
-    public void Library_preview_always_carries_the_irreversibility_line_and_offers_the_stored_copy_button()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    public void Library_preview_says_the_delete_is_complete_permanent_and_spares_the_users_own_file(int count)
     {
-        var preview = RemovePreview.ForLibrary(Items(3));
+        var preview = RemovePreview.ForLibrary(Items(count));
 
-        Assert.True(preview.AllowsDeletingStoredCopy);
+        Assert.Contains("permanently deletes", preview.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("stored cop", preview.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("from this PC", preview.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("can't be undone", preview.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("original", preview.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("never touched", preview.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("original file", preview.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not touched", preview.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The line agrees with itself about how many items are going.</summary>
+    [Fact]
+    public void Library_irreversibility_line_is_singular_only_for_one_item()
+    {
+        Assert.Equal(RemovePreview.LibraryIrreversibleLineOne, RemovePreview.ForLibrary(Items(1)).Message);
+        Assert.Equal(RemovePreview.LibraryIrreversibleLineMany, RemovePreview.ForLibrary(Items(2)).Message);
+        Assert.Contains("this item", RemovePreview.LibraryIrreversibleLineOne, StringComparison.Ordinal);
+        Assert.Contains("these items", RemovePreview.LibraryIrreversibleLineMany, StringComparison.Ordinal);
     }
 
     /// <summary>
     /// A collection removal is a different operation and must read like one: it names the
-    /// collection, offers no destructive second button, and says the items stay in the library (§5).
+    /// collection and says the items stay in the library (§5). It is <b>not</b> destructive, so the
+    /// complete-delete wording must never leak into it.
     /// </summary>
     [Fact]
-    public void Collection_preview_names_the_collection_and_offers_no_delete_button()
+    public void Collection_preview_names_the_collection_and_never_reads_as_a_delete()
     {
         var preview = RemovePreview.ForCollection(Items(2), "Reading List");
 
         Assert.Equal("Remove 2 items from “Reading List”?", preview.Title);
-        Assert.False(preview.AllowsDeletingStoredCopy);
         Assert.Contains("stay in your library", preview.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("permanently", preview.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("can't be undone", preview.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, RemovePreview.ForCollection(Items(1), "X").Count);
         Assert.Equal(
             "Remove 1 item from “X”?",

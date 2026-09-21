@@ -22,8 +22,9 @@ public class DialogContentTests
     public void Wording_matches_the_spec()
     {
         Assert.Equal("This book is DRM-protected and can't be imported.", DialogContent.DrmMessage);
-        Assert.Equal("Also Delete Stored Copy", DialogContent.RemoveAlsoStoredCopyButton);
-        Assert.DoesNotContain("Original", DialogContent.RemoveAlsoStoredCopyButton);
+        // One destructive removal button, not the old "Remove from Library" / "Also Delete Stored
+        // Copy" pair (maintainer decision, 2026-09-21 — see ADR-006's addendum).
+        Assert.Equal("Remove", DialogContent.RemoveButton);
         Assert.StartsWith("GIST fetches the page", DialogContent.ImportUrlBody);
     }
 

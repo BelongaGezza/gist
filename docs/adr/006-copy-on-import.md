@@ -85,4 +85,83 @@ for such items.
   on the file surviving), but would need reference counting — e.g. skip
   deletion while another `library_items` row still has the same
   `source_copy_path` — before any future feature relies on that file
-  persisting for a surviving item.
+  persisting for a surviving item. **Closed by the 2026-09-21 addendum below.**
+
+---
+
+## Addendum, 2026-09-21 — removal is a complete delete, and shared copies are reference-checked
+
+Two decisions, taken together because the first makes the second load-bearing.
+
+### 1. Removing an item always deletes GIST's stored copy
+
+**Status:** accepted (maintainer decision). Applies to the Windows shell now;
+Apple has not adopted it yet — see `PENDING_APPLE_CHANGES.md`.
+
+The Library used to offer two removal choices — "Remove from Library" (keep
+GIST's stored copy) and "Also Delete Stored Copy". That choice was misleading
+rather than useful: the startup orphan sweep (`Core::sweep_orphaned_files`)
+deletes any `originals/` copy no library row references, so "keep" only meant
+"until the next launch". The two buttons differed in *when* the copy went, not
+whether it went.
+
+Removing an item now always deletes **everything GIST holds** for it:
+
+- the `library_items` row and everything cascading from it — tokens, FTS
+  entries, reading progress, collection membership, tag links;
+- the `<id>.json` and `<id>.tokens.json` blobs (ADR-007) and their `.blake3`
+  checksum sidecars (ADR-013);
+- GIST's sandboxed stored copy under `originals/` and its sidecar.
+
+**And never the user's own file.** That guarantee — the reason this ADR
+exists — is unchanged, and is precisely what makes a one-button complete
+delete safe to offer. `source_ref` remains informational; only
+`source_copy_ref` is ever deleted.
+
+`Core::remove_items`/`remove_items_detailed` keep their `delete_source_files`
+parameter, so Apple's existing two-button dialog still compiles and behaves
+exactly as before. The Windows client always passes `true`.
+
+### 2. A shared stored copy is deleted only with the last item referencing it
+
+This closes the "known limitation — dedup vs. deletion" recorded above, which
+stops being merely theoretical once removal deletes the stored copy
+unconditionally.
+
+`Store::remove_items` now evaluates, **inside the same transaction and after
+every id in the batch has been deleted**, whether each removed row's
+`source_copy_path` is still named by a row that survived, and reports it as
+`RemovedItem::source_copy_still_referenced`. `Core::remove_items_detailed`
+skips deleting a copy that is still referenced and counts it in
+`RemoveOutcome::shared_copies_kept` — deliberately a third counter, because a
+kept copy is neither a failed deletion nor a missing file, and folding it into
+either would make a clean removal look broken in the UI.
+
+Asking the question after the whole batch is applied gives the intended
+semantics for free:
+
+| Action | Shared copy |
+|---|---|
+| Remove one of two sharers | kept (`shared_copies_kept: 1`) |
+| Remove both sharers in one call | deleted, exactly once |
+| Remove the second sharer later | deleted |
+
+Paths are compared by lower-cased file name, matching how the orphan sweep
+builds its keep-list: a row's stored path is whatever string `storage_dir` was
+when the row was written, so prefix/separator normalisation (`C:\x` vs `C:\x\`,
+`\\?\C:\x`) and Windows' case-insensitive filesystems must not be able to turn
+into data loss. Both choices are conservative in the only safe direction —
+they can make a file look *more* referenced, never less.
+
+### 3. Defensive containment check
+
+Removal is now the one place that unconditionally deletes a path read back out
+of the database rather than one it just computed. `store_original_copy`'s own
+filename is traversal-safe (`F23`), but *the column is not the filename*: a
+corrupted or tampered row could name anything on the user's disk. `gist-core`
+therefore canonicalises both the recorded path and `storage_dir` and refuses
+to delete anything that does not resolve inside the storage directory. A
+refusal is logged at `debug!` and counted in nothing, for the same reason
+`source_ref` is not counted: it is not one of GIST's own files. Canonicalising
+also means a symlink or junction planted inside `originals/` cannot redirect a
+delete outside it.

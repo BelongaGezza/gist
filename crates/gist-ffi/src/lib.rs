@@ -274,6 +274,11 @@ pub struct FfiRemoveOutcome {
     /// true) the ADR-006 sandboxed original copy and its sidecar. Never the
     /// user's own file.
     pub files_deleted: u32,
+    /// How many stored copies were kept on purpose because another item that
+    /// survived this removal shares the same content-addressed file (ADR-006
+    /// dedup). **Not a failure and not a missing file** — no deletion was
+    /// attempted. Removing the last item that shares the file deletes it.
+    pub shared_copies_kept: u32,
     /// Files that were already gone, so there was nothing to delete. **Not
     /// a failure** — the ordinary case is an item imported before ADR-013
     /// added checksum sidecars, which has no `.blake3` files to remove. Do
@@ -291,6 +296,7 @@ impl From<gist_core::RemoveOutcome> for FfiRemoveOutcome {
         FfiRemoveOutcome {
             removed_ids: o.removed_ids,
             files_deleted: o.files_deleted,
+            shared_copies_kept: o.shared_copies_kept,
             files_missing: o.files_missing,
             files_failed: o.files_failed,
             failure_kinds: o.failure_kinds.into_iter().map(Into::into).collect(),

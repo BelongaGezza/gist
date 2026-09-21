@@ -207,8 +207,7 @@ public class LibraryClickThroughTests
 
             // Tag editor: add "novel" to a single item.
             d.Select(Mango);
-            d.InvokeCommand("LibraryPage_TagsButton");
-            var dlg = d.Dialog(Mango);
+            var dlg = d.OpenDialog("LibraryPage_TagsButton", Mango);
             Assert.Contains(LibraryDriver.DialogTexts(dlg), t => t == "reference"); // its seeded tag is listed
             var box = LibraryDriver.Poll(() => dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit)), "tag text box").AsTextBox();
             box.Text = "novel";
@@ -275,15 +274,21 @@ public class LibraryClickThroughTests
             Assert.True(File.Exists(appleCopy), "seed should have produced the sandboxed copy");
 
             d.Select(Apple, Mango);
-            d.InvokeCommand("LibraryPage_RemoveButton");
-            var dlg = d.Dialog("Remove 2 items?");
+            var dlg = d.OpenDialog("LibraryPage_RemoveButton", "Remove 2 items?");
             var texts = LibraryDriver.DialogTexts(dlg);
             Assert.Contains(Apple, texts);
             Assert.Contains(Mango, texts);
-            Assert.Contains(texts, t => t.Contains("This can't be undone", StringComparison.Ordinal));
-            Assert.Contains(texts, t => t.Contains("Your original files are never touched", StringComparison.Ordinal));
-            Assert.Equal("Remove from Library", LibraryDriver.DialogPart(dlg, "PrimaryButton").Name);
-            Assert.Equal("Also Delete Stored Copy", LibraryDriver.DialogPart(dlg, "SecondaryButton").Name);
+            Assert.Contains(texts, t => t.Contains("permanently deletes these items", StringComparison.Ordinal));
+            Assert.Contains(texts, t => t.Contains("stored copies of them, from this PC", StringComparison.Ordinal));
+            Assert.Contains(texts, t => t.Contains("It can't be undone", StringComparison.Ordinal));
+            Assert.Contains(texts, t => t.Contains("original files you imported are not touched", StringComparison.Ordinal));
+
+            // One destructive button, no second choice (maintainer decision, 2026-09-21).
+            Assert.Equal("Remove", LibraryDriver.DialogPart(dlg, "PrimaryButton").Name);
+            var buttons = dlg.FindAllDescendants(cf => cf.ByControlType(ControlType.Button))
+                .Select(b => b.Name ?? "").ToArray();
+            Assert.DoesNotContain("Also Delete Stored Copy", buttons);
+            Assert.DoesNotContain("Remove from Library", buttons);
 
             Assert.Equal("Cancel", d.ClickPart(dlg, "CloseButton"));
             d.WaitDialogGone("Remove 2 items?");
@@ -294,38 +299,14 @@ public class LibraryClickThroughTests
         }
     }
 
+    /// <summary>
+    /// Removal is a complete delete (maintainer decision, 2026-09-21). This replaces the pair of tests that used to
+    /// drive "Remove from Library" (keep the stored copy) and "Also Delete Stored Copy" separately: there is one
+    /// button now, and everything GIST holds for the item goes — the row, its blobs and sidecars, and GIST's own
+    /// stored copy — while the file the user imported is verified byte-for-byte unchanged.
+    /// </summary>
     [UiFact]
-    public async Task Remove_from_Library_keeps_the_stored_copy_and_the_original()
-    {
-        using var c = await LaunchAsync();
-        var d = c.D;
-        var apple = c.Lib.ByFile("apple-orchard.txt");
-        var copy = LibrarySeed.PredictSandboxedCopyPath(c.S.Root, apple.SourcePath);
-        var originalHash = Sha(apple.SourcePath);
-        Assert.True(File.Exists(copy));
-
-        d.Select(Apple);
-        d.InvokeCommand("LibraryPage_RemoveButton");
-        var dlg = d.Dialog("Remove 1 item?");
-        Assert.Equal("Remove from Library", d.ClickPart(dlg, "PrimaryButton"));
-        d.WaitDialogGone("Remove 1 item?");
-        d.WaitForTitles(t => t.Length == 4 && !t.Contains(Apple), "row removed");
-
-        Assert.Equal(0, c.S.CloseCleanly(TimeSpan.FromSeconds(10)));
-        // Check the disk BEFORE opening a CoreClient: opening one runs the startup orphan sweep, which (by design,
-        // sweep_orphaned_files) reclaims a stored copy no row references any more - i.e. this one.
-        Assert.True(File.Exists(copy), "'Remove from Library' must keep GIST's stored copy until the next start");
-        Assert.True(File.Exists(apple.SourcePath), "the user's original must never be touched");
-        Assert.Equal(originalHash, Sha(apple.SourcePath));
-        using var core = await LibrarySeed.OpenAsync(c.S.Root);
-        Assert.DoesNotContain(core.Items, i => i.Id == apple.Id);
-        Assert.Equal(4, core.Items.Count);
-        await core.WaitForSweepAsync();
-        Assert.True(File.Exists(apple.SourcePath), "even the sweep never touches the user's original");
-    }
-
-    [UiFact]
-    public async Task Also_Delete_Stored_Copy_removes_the_copy_but_never_the_original()
+    public async Task Remove_deletes_everything_GIST_holds_and_never_the_users_original()
     {
         using var c = await LaunchAsync();
         var d = c.D;
@@ -333,23 +314,68 @@ public class LibraryClickThroughTests
         var other = c.Lib.ByFile("zebra-notes.txt");
         var copy = LibrarySeed.PredictSandboxedCopyPath(c.S.Root, apple.SourcePath);
         var otherCopy = LibrarySeed.PredictSandboxedCopyPath(c.S.Root, other.SourcePath);
+        var storageDir = Gist.Core.Storage.GistStoragePaths.ForRoot(c.S.Root).StorageDir;
         var originalHash = Sha(apple.SourcePath);
         Assert.True(File.Exists(copy));
 
         d.Select(Apple);
-        d.InvokeCommand("LibraryPage_RemoveButton");
-        var dlg = d.Dialog("Remove 1 item?");
-        Assert.Equal("Also Delete Stored Copy", d.ClickPart(dlg, "SecondaryButton"));
+        var dlg = d.OpenDialog("LibraryPage_RemoveButton", "Remove 1 item?");
+        Assert.Equal("Remove", d.ClickPart(dlg, "PrimaryButton"));
         d.WaitDialogGone("Remove 1 item?");
         d.WaitForTitles(t => t.Length == 4 && !t.Contains(Apple), "row removed");
 
         Assert.Equal(0, c.S.CloseCleanly(TimeSpan.FromSeconds(10)));
-        using var core = await LibrarySeed.OpenAsync(c.S.Root);
-        Assert.DoesNotContain(core.Items, i => i.Id == apple.Id);
-        Assert.False(File.Exists(copy), "'Also Delete Stored Copy' removes GIST's stored copy");
+
+        // Check the disk BEFORE opening a CoreClient: opening one runs the startup orphan sweep, so a file still
+        // present here was deleted by the removal itself, not reclaimed later.
+        Assert.False(File.Exists(copy), "Remove must delete GIST's stored copy, not defer it to the next start");
+        Assert.Empty(Directory.GetFiles(storageDir, apple.Id + "*", SearchOption.AllDirectories));
         Assert.True(File.Exists(otherCopy), "an unrelated item's stored copy is untouched");
         Assert.True(File.Exists(apple.SourcePath), "the user's original must never be touched");
         Assert.Equal(originalHash, Sha(apple.SourcePath));
+
+        using var core = await LibrarySeed.OpenAsync(c.S.Root);
+        Assert.DoesNotContain(core.Items, i => i.Id == apple.Id);
+        Assert.Equal(4, core.Items.Count);
+        await core.WaitForSweepAsync();
+        Assert.True(File.Exists(apple.SourcePath), "even the sweep never touches the user's original");
+        Assert.Equal(originalHash, Sha(apple.SourcePath));
+    }
+
+    /// <summary>
+    /// Three dialogs back to back with no settle between them, and the last one's action must really happen.
+    /// </summary>
+    /// <remarks>
+    /// The suite used to sleep 600 ms after every dialog close because WinUI keeps a ContentDialog "open" for a short
+    /// tail after it leaves the UIA tree, and things done in that tail went missing. The sleep is gone; this test is
+    /// what keeps it gone. Two distinct problems lived in that window and both are now fixed at their own level: the
+    /// app's dialog host swallowing a failed <c>ShowAsync</c> and then dismissing the request (fixed in
+    /// <c>LibraryDialogHost</c>), and a synthetic UIA invoke not reaching the button at all (handled by
+    /// <c>LibraryDriver.OpenDialog</c>, which polls and re-invokes rather than sleeping).
+    /// </remarks>
+    [UiFact]
+    public async Task Two_dialogs_in_quick_succession_both_open()
+    {
+        using var c = await LaunchAsync();
+        var d = c.D;
+
+        d.Select(Apple);
+        var first = d.OpenDialog("LibraryPage_RemoveButton", "Remove 1 item?");
+        d.ClickPart(first, "CloseButton");
+        d.WaitDialogGone("Remove 1 item?");
+
+        // No settle: the second request lands inside the window that used to swallow it.
+        var second = d.OpenDialog("LibraryPage_ImportUrlButton", "Import URL");
+        Assert.Contains(LibraryDriver.DialogTexts(second), t => t.StartsWith("GIST fetches the page", StringComparison.Ordinal));
+        d.ClickPart(second, "CloseButton");
+        d.WaitDialogGone("Import URL");
+
+        // And the dropped-action shape specifically: re-open Remove immediately and let it act. If the request were
+        // swallowed the dialog would never appear and nothing would be removed.
+        var third = d.OpenDialog("LibraryPage_RemoveButton", "Remove 1 item?");
+        Assert.Equal("Remove", d.ClickPart(third, "PrimaryButton"));
+        d.WaitDialogGone("Remove 1 item?");
+        d.WaitForTitles(t => t.Length == 4 && !t.Contains(Apple), "the immediately re-opened dialog really removed the item");
     }
 
     // ── 5b. Remove warning (stored file could not be deleted) + orphan sweep ──
@@ -376,8 +402,7 @@ public class LibraryClickThroughTests
                 hold = new FileStream(blob, FileMode.Open, FileAccess.Read, FileShare.None);
 
                 d.Select(Apple);
-                d.InvokeCommand("LibraryPage_RemoveButton");
-                d.ClickPart(d.Dialog("Remove 1 item?"), "PrimaryButton"); // Remove from Library
+                d.ClickPart(d.OpenDialog("LibraryPage_RemoveButton", "Remove 1 item?"), "PrimaryButton"); // the single "Remove" button
                 d.WaitDialogGone("Remove 1 item?");
 
                 // (a) the row goes even though the file could not be deleted.
@@ -436,8 +461,7 @@ public class LibraryClickThroughTests
         var apple = c.Lib.ByFile("apple-orchard.txt");
 
         d.Select(Zebra);
-        d.InvokeCommand("LibraryPage_EncryptButton");
-        var dlg = d.Dialog("Encrypt 1 item?");
+        var dlg = d.OpenDialog("LibraryPage_EncryptButton", "Encrypt 1 item?");
         var texts = LibraryDriver.DialogTexts(dlg);
         Assert.Contains(texts, t => t.StartsWith("There is no way to recover encrypted items", StringComparison.Ordinal));
         Assert.Contains("Warning: encrypted items cannot be recovered", texts);
@@ -455,8 +479,7 @@ public class LibraryClickThroughTests
 
         // Encrypt the already-encrypted item together with a plain one: the summary must say so.
         d.Select(Zebra, Apple);
-        d.InvokeCommand("LibraryPage_EncryptButton");
-        var dlg2 = d.Dialog("Encrypt 2 items?");
+        var dlg2 = d.OpenDialog("LibraryPage_EncryptButton", "Encrypt 2 items?");
         d.ClickPart(dlg2, "PrimaryButton");
         var result2 = d.Dialog("Encryption finished");
         var t2 = string.Join(" | ", LibraryDriver.DialogTexts(result2));
@@ -467,8 +490,7 @@ public class LibraryClickThroughTests
 
         // And a lone already-encrypted item reports no new encryption.
         d.Select(Zebra);
-        d.InvokeCommand("LibraryPage_EncryptButton");
-        d.ClickPart(d.Dialog("Encrypt 1 item?"), "PrimaryButton");
+        d.ClickPart(d.OpenDialog("LibraryPage_EncryptButton", "Encrypt 1 item?"), "PrimaryButton");
         var result3 = d.Dialog("Encryption finished");
         var t3 = string.Join(" | ", LibraryDriver.DialogTexts(result3));
         Assert.Contains("already encrypted", t3);
@@ -510,8 +532,7 @@ public class LibraryClickThroughTests
 
         using var c = await LaunchAsync();
         var d = c.D;
-        d.InvokeCommand("LibraryPage_ImportUrlButton");
-        var dlg = d.Dialog("Import URL");
+        var dlg = d.OpenDialog("LibraryPage_ImportUrlButton", "Import URL");
         var import = LibraryDriver.DialogPart(dlg, "PrimaryButton");
         Assert.Equal("Import", import.Name);
         Assert.False(import.Properties.IsEnabled.Value, "Import must be disabled while the field is blank");

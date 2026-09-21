@@ -72,11 +72,15 @@ also get PNGs of the empty / seeded / corrupt-key states for the visual pass.
 
 ## 7. Remove
 
-- [ ] [automated: Remove_dialog_lists_titles_states_irreversibility_and_Cancel_changes_nothing] Dialog lists the selected titles and the "can't be undone" text; Cancel changes nothing.
-- [ ] [automated: Remove_from_Library_keeps_the_stored_copy_and_the_original] "Remove from Library": row gone, stored copy still on disk until the next start, original untouched.
-- [ ] [automated: Also_Delete_Stored_Copy_removes_the_copy_but_never_the_original] "Also Delete Stored Copy": stored copy gone, original untouched.
+Removal is a **complete delete** (maintainer decision, 2026-09-21): one "Remove" button, no second choice. See §4.5 of
+the UI spec and ADR-006's addendum.
+
+- [ ] [automated: Remove_dialog_lists_titles_states_irreversibility_and_Cancel_changes_nothing] Dialog lists the selected titles, says it permanently deletes the items *and* GIST's stored copies from this PC, that it can't be undone, and that the original files you imported are not touched; the only buttons are Remove and Cancel; Cancel changes nothing.
+- [ ] [automated: Remove_deletes_everything_GIST_holds_and_never_the_users_original] "Remove": row gone, stored copy gone *immediately* (not deferred to the next start), no file named after the item left anywhere under the storage directory, an unrelated item's stored copy untouched, and the user's original byte-for-byte unchanged (SHA-256) both before and after the next start's sweep.
 - [ ] [automated: Removal_with_a_locked_stored_file_warns_dismissibly_and_the_next_start_sweeps_the_orphan] A file another program holds open: row removed, warning bar with generic wording (no path/title), its close button dismisses it, and the next start sweeps the orphan.
-- [ ] [manual only] Remove dialog appearance: destructive button styling on "Also Delete Stored Copy", default button is the safe one, "and N more" for >5 titles, warning bar look and placement above the header.
+- [ ] [automated: Two_dialogs_in_quick_succession_both_open] Dialogs opened back to back with no pause all appear, and the last one's action really happens (no silently dropped request).
+- [ ] [manual only] Remove dialog appearance: destructive styling on "Remove", **Cancel is the Enter default**, "and N more" for >5 titles, warning bar look and placement above the header.
+- [ ] [manual only] Shared stored copy: import the same file twice under two names, remove one item — the other still opens and reads normally, and no warning bar appears. (Covered by unit tests at three levels; this is the eyes-on confirmation.)
 
 ## 8. Encrypt
 
@@ -102,6 +106,14 @@ also get PNGs of the empty / seeded / corrupt-key states for the visual pass.
 
 ## Known behaviour to be aware of
 
-- "Remove from Library" keeps GIST's stored copy only until the next launch: the startup orphan sweep deletes any
-  stored copy no library row references. The only difference between the two Remove buttons is therefore *when* the copy
-  goes. The original file is never touched by either.
+- **Remove is a complete delete and always has been, in effect.** Windows briefly offered "Remove from Library" and
+  "Also Delete Stored Copy"; the first only kept GIST's stored copy until the next launch, because the startup orphan
+  sweep deletes any stored copy no library row references. The two buttons therefore differed only in *when* the copy
+  went, which made the choice misleading. Since 2026-09-21 there is one "Remove" button that deletes everything GIST
+  holds straight away. The file you imported is never touched, and never was.
+- **A stored copy shared by two items is kept until the last of them is removed.** Two imports of byte-identical files
+  share one content-addressed file (ADR-006), so removing one of them deliberately leaves that file on disk for the
+  other. This is not a failure and shows no warning bar.
+- **Apple still has the two-button dialog** ("Remove from Library" / "Also Delete Original File", the second of which is
+  additionally mislabelled — it deletes only the sandboxed copy). Adopting the Windows semantics there is logged in
+  `PENDING_APPLE_CHANGES.md`.

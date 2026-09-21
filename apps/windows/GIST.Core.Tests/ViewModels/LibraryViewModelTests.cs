@@ -404,7 +404,7 @@ public sealed class LibraryViewModelTests : IDisposable
 
         Assert.Equal(2, preview.Count);
         Assert.Equal("Remove 2 items?", preview.Title);
-        Assert.True(preview.AllowsDeletingStoredCopy);
+        Assert.Equal(RemovePreview.LibraryIrreversibleLineMany, preview.Message);
         Assert.Equal(2, preview.Titles.Count);
         Assert.Contains("alpha", preview.Titles);
         Assert.Contains("beta", preview.Titles);
@@ -412,16 +412,14 @@ public sealed class LibraryViewModelTests : IDisposable
     }
 
     /// <summary>
-    /// The security-relevant one (spec §10 item 1, ADR-006): "Remove from Library" leaves GIST's
-    /// stored copy alone, "Also Delete Stored Copy" deletes it — and <b>neither</b> touches the
-    /// file the user imported from. The stored copy's path is recomputed independently rather than
-    /// asked of the core, so this asserts against what is genuinely on disk.
+    /// The security-relevant one (spec §10 item 1, ADR-006, maintainer decision 2026-09-21):
+    /// Remove is a <b>complete delete</b> — GIST's stored copy goes with the item, every time,
+    /// with no second choice — and it <b>never</b> touches the file the user imported from. The
+    /// stored copy's path is recomputed independently rather than asked of the core, so this
+    /// asserts against what is genuinely on disk.
     /// </summary>
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Remove_deletes_the_stored_copy_only_when_asked_and_never_the_original(
-        bool deleteStoredCopy)
+    [Fact]
+    public async Task Remove_always_deletes_the_stored_copy_and_never_the_original()
     {
         var vm = await NewLoadedViewModelAsync();
         var original = WriteTextFile("keepme.txt", "The user's own file.");
@@ -432,16 +430,55 @@ public sealed class LibraryViewModelTests : IDisposable
         Assert.True(File.Exists(storedCopy), "copy-on-import should have written a stored copy");
 
         vm.SetSelection(new[] { id! });
-        await vm.RemoveAsync(deleteStoredCopy);
+        await vm.RemoveAsync();
 
         Assert.Empty(vm.DisplayedItems);
         Assert.Empty(vm.SelectedIds);
         Assert.Null(vm.LastError);
-        Assert.Equal(deleteStoredCopy, !File.Exists(storedCopy));
+        Assert.False(File.Exists(storedCopy), "Remove must delete GIST's stored copy");
+        Assert.Null(vm.LastRemoveWarning);
 
-        // The invariant that matters either way.
+        // The invariant that matters most.
         Assert.True(File.Exists(original), "GIST must never delete the user's own file");
         Assert.Equal("The user's own file.", File.ReadAllText(original));
+    }
+
+    /// <summary>
+    /// ADR-006's content-addressed dedup means two imports of byte-identical files share one
+    /// stored copy. Removing one of them must keep that file for the survivor — and must not warn,
+    /// because nothing failed. Removing the second one then deletes it.
+    /// </summary>
+    [Fact]
+    public async Task Remove_keeps_a_stored_copy_another_item_still_shares_until_the_last_one_goes()
+    {
+        var vm = await NewLoadedViewModelAsync();
+
+        // Identical bytes, different names: one content-addressed stored copy, two items.
+        const string Shared = "One set of bytes, two library items.";
+        var firstFile = WriteTextFile("first.txt", Shared);
+        var secondFile = WriteTextFile("second.txt", Shared);
+        var first = await vm.ImportFileAsync(firstFile);
+        var second = await vm.ImportFileAsync(secondFile);
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+
+        var storedCopy = _workspace.PredictSandboxedCopyPath(firstFile);
+        Assert.Equal(storedCopy, _workspace.PredictSandboxedCopyPath(secondFile));
+        Assert.True(File.Exists(storedCopy));
+
+        vm.SetSelection(new[] { first! });
+        await vm.RemoveAsync();
+
+        Assert.True(File.Exists(storedCopy), "the surviving item still needs the shared stored copy");
+        // A deliberately-kept shared copy is not a failure, so it must raise no warning.
+        Assert.Null(vm.LastRemoveWarning);
+
+        vm.SetSelection(new[] { second! });
+        await vm.RemoveAsync();
+
+        Assert.False(File.Exists(storedCopy), "the last item sharing it is gone, so the copy goes too");
+        Assert.Null(vm.LastRemoveWarning);
+        Assert.True(File.Exists(firstFile) && File.Exists(secondFile), "neither original is touched");
     }
 
     [Fact]
@@ -450,7 +487,7 @@ public sealed class LibraryViewModelTests : IDisposable
         var vm = await NewLoadedViewModelAsync();
         await vm.ImportFileAsync(WriteTextFile("a.txt", "One."));
 
-        await vm.RemoveAsync(deleteStoredCopy: true);
+        await vm.RemoveAsync();
 
         Assert.Single(vm.DisplayedItems);
         Assert.Null(vm.LastError);
