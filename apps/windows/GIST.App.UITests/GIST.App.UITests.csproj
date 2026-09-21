@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- FlaUI (UIA3) end-to-end tests that launch the built, unpackaged GIST.exe against a scratch
+       GIST_DATA_ROOT. Skipped unless GIST_RUN_UI_TESTS=1 (they need an interactive desktop session).
+       Needs the generated bindings and staged native DLL (tools/gen-bindings-cs.sh), like GIST.Core.Tests. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Gist.App.UITests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="FlaUI.Core" />
+    <PackageReference Include="FlaUI.UIA3" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <ProjectReference Include="../GIST.Core/GIST.Core.csproj" />
+    <!-- Build-order only: guarantees GIST.exe exists before tests run; nothing from it is referenced. -->
+    <ProjectReference Include="../GIST.App/GIST.App.csproj" ReferenceOutputAssembly="false" Private="false" SkipGetTargetFrameworkProperties="true" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="$(MSBuildThisFileDirectory)../native/x64/gist_ffi.dll" Link="gist_ffi.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             Condition="Exists('$(MSBuildThisFileDirectory)../native/x64/gist_ffi.dll')" />
+  </ItemGroup>
+</Project>

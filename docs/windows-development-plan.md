@@ -145,6 +145,7 @@ Goals: answer R1, make the environment reproducible.
 - Port `LibraryFiltering`/sort and their tests; FTS partial-word regression test.
 - **Q10 (review):** Windows path and file-locking tests for remove/import — long (>260) paths, UNC, Unicode and space-containing paths, reserved names, trailing dots, a file held open by another process, OneDrive placeholders — in Rust (`gist-core`) and `GIST.Core.Tests`; enable long-path support in the app manifest; surface partial-delete failures over FFI or sweep orphaned copies on next launch, so the UI never reports "removed" while a stored copy remains (this is a Rust change shared with Apple: log it in `PENDING_APPLE_CHANGES.md`).
 - **Q11 (review, start of W2):** FlaUI smoke test against the hello/skeleton app on this machine, then on a real `windows-latest` runner; enable Developer Mode (needs UAC) and verify MSIX install/run. Until it is green on a runner, CI UI automation is treated as unproven and W6 planning must not assume it.
+  - Status 2026-09-21: local FlaUI smoke is green (`apps/windows/GIST.App.UITests`, 3 tests, opt-in via `GIST_RUN_UI_TESTS=1`, 7/7 consecutive runs passed on this machine); runner run and MSIX/Developer Mode still outstanding; window screenshots come out black in this session.
 - **Exit:** everything in spec §4 works; corresponding tests green; manual pass through spec §10 items 1–3, 8.
 
 ### W3 — Sidebar, collections, tags, themes (1.5–2 weeks)
