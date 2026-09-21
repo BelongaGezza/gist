@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 gist-model = { path = "../gist-model" }
-rusqlite = { version = "0.31", features = ["bundled", "backup", "serde_json"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup", "serde_json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
