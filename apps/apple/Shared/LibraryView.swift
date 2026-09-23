@@ -382,19 +382,20 @@ struct LibraryView: View {
                 isPresented: $showRemoveConfirm
             ) {
                 Button("Cancel", role: .cancel) {}
-                Button("Remove from Library") {
-                    let ids = Array(selection)
-                    selection.removeAll()
-                    Task { await core.removeItems(ids: ids, deleteSourceFiles: false) }
-                }
-                Button("Also Delete Original File", role: .destructive) {
+                Button("Remove", role: .destructive) {
                     let ids = Array(selection)
                     selection.removeAll()
                     Task { await core.removeItems(ids: ids, deleteSourceFiles: true) }
                 }
             } message: {
+                // Matches the Windows wording exactly (`RemovePreview.LibraryIrreversibleLine`,
+                // docs/windows-ui-spec.md §4.5/§10 item 1) -- removal is now a single, complete
+                // delete of everything GIST holds for the item, never the user's own file. See
+                // ADR-006's 2026-09-21 addendum for why the old two-button choice was dropped.
                 Text(
-                    "\"Remove from Library\" only removes GIST's record and its sandboxed copy — your original file, wherever it lives, is never touched. \"Also Delete Original File\" additionally deletes GIST's own imported copy (see ADR-006); it never deletes the original either."
+                    selection.count == 1
+                        ? "This permanently deletes this item, and GIST's stored copy of it, from this PC. It can't be undone. The original file you imported is not touched."
+                        : "This permanently deletes these items, and GIST's stored copies of them, from this PC. It can't be undone. The original files you imported are not touched."
                 )
             }
             .alert(

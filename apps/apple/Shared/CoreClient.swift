@@ -97,13 +97,26 @@ final class CoreClient: ObservableObject {
     }
 
     func refresh() async {
+        await reloadItems(clearErrorOnSuccess: true)
+    }
+
+    /// Reloads `items`. `clearErrorOnSuccess` is false when this reload is the
+    /// tail end of another operation (import, remove, encrypt) that has
+    /// already published its own outcome -- a successful reload must not wipe
+    /// a failure the user hasn't seen yet, or the DRM alert (and any other
+    /// error) would never appear. Mirrors the Windows `CoreClient` split
+    /// (`RefreshAsync`/`ReloadItemsAsync`) -- see PENDING_APPLE_CHANGES.md's
+    /// 2026-09-21 entry for the bug this fixes.
+    private func reloadItems(clearErrorOnSuccess: Bool) async {
         guard let core else { return }
         isLoading = true
         defer { isLoading = false }
         do {
             let ffiItems = try core.listItems(offset: 0, limit: 500)
             items = mapItems(ffiItems)
-            error = nil
+            if clearErrorOnSuccess {
+                error = nil
+            }
         } catch {
             self.error = "\(error)"
         }
@@ -154,7 +167,7 @@ final class CoreClient: ObservableObject {
         } catch {
             self.error = "\(error)"
         }
-        await refresh()
+        await reloadItems(clearErrorOnSuccess: false)
     }
 
     /// Imports a web page by URL via `Core::import_url`, following the same
@@ -177,7 +190,7 @@ final class CoreClient: ObservableObject {
         } catch {
             self.error = "\(error)"
         }
-        await refresh()
+        await reloadItems(clearErrorOnSuccess: false)
     }
 
     // MARK: - Collections & tags
@@ -321,7 +334,7 @@ final class CoreClient: ObservableObject {
         } catch {
             self.error = "\(error)"
         }
-        await refresh()
+        await reloadItems(clearErrorOnSuccess: false)
     }
 
     /// Fetches an RSVP session for `itemId` and decodes it. `startRsvp` is a
@@ -419,7 +432,7 @@ final class CoreClient: ObservableObject {
             self.error = "\(error)"
             failed = ids.count
         }
-        await refresh()
+        await reloadItems(clearErrorOnSuccess: false)
         return EncryptItemsSummary(
             encryptedCount: encrypted,
             alreadyEncryptedCount: alreadyEncrypted,
