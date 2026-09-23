@@ -83,6 +83,10 @@ struct LibraryView: View {
     @State private var showRemoveConfirm = false
     @State private var showEncryptConfirm = false
     @State private var encryptSummary: EncryptItemsSummary?
+    /// Only ever set when `RemoveItemsSummary.hasFailures` -- a clean removal
+    /// (the common case) does not interrupt the user with a dialog just to
+    /// say it worked. See `CoreClient.removeItems`'s doc comment.
+    @State private var removeWarning: RemoveItemsSummary?
     @State private var showUrlImportAlert = false
     @State private var urlToImport = ""
     @State private var showNewCollectionAlert = false
@@ -385,7 +389,10 @@ struct LibraryView: View {
                 Button("Remove", role: .destructive) {
                     let ids = Array(selection)
                     selection.removeAll()
-                    Task { await core.removeItems(ids: ids, deleteSourceFiles: true) }
+                    Task {
+                        let summary = await core.removeItems(ids: ids, deleteSourceFiles: true)
+                        if summary.hasFailures { removeWarning = summary }
+                    }
                 }
             } message: {
                 // Matches the Windows wording exactly (`RemovePreview.LibraryIrreversibleLine`,
@@ -422,6 +429,17 @@ struct LibraryView: View {
                 Button("OK", role: .cancel) { encryptSummary = nil }
             } message: {
                 Text(encryptSummary?.message ?? "")
+            }
+            .alert(
+                "Some Files Could Not Be Deleted",
+                isPresented: Binding(
+                    get: { removeWarning != nil },
+                    set: { if !$0 { removeWarning = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { removeWarning = nil }
+            } message: {
+                Text(removeWarning?.message ?? "")
             }
     }
 
