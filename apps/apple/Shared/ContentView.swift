@@ -48,7 +48,14 @@ struct ContentView: View {
             // root, which reads as a bug (right title, wrong content behind it).
             navigationPath.removeAll()
         }
-        .task { await core.refresh() }
+        .task {
+            // Reclaim anything a previous removal's best-effort file delete
+            // left behind (PENDING_APPLE_CHANGES.md's W2/Q10 adoption entry)
+            // before the library loads, so a freshly-launched app never
+            // shows stale leftover storage. Runs once per launch.
+            await core.sweepOrphanedFiles()
+            await core.refresh()
+        }
         .tint(themeManager.resolvedTheme.accent)
         .background(themeManager.resolvedTheme.background)
         .preferredColorScheme(
