@@ -102,6 +102,23 @@ final class GISTTests: XCTestCase {
         XCTAssertEqual(client.items.first?.sourcePath, fixture.path)
     }
 
+    /// Regression test for the bug `PENDING_APPLE_CHANGES.md`'s 2026-09-21
+    /// entry flagged: `importFile`/`removeItems`/`importUrl`/`encryptItems`
+    /// all set `error` on failure, then unconditionally called a trailing
+    /// `refresh()` whose *success* path cleared `error` again -- wiping a
+    /// real failure before the UI ever showed it. The Windows port found and
+    /// fixed the identical shape (`RefreshAsync`/`ReloadItemsAsync`);
+    /// mirrored here as `CoreClient.refresh()`/`reloadItems(clearErrorOnSuccess:)`.
+    func testImportFailureErrorSurvivesTheFollowUpRefresh() async throws {
+        let missingFile = tempDir.appendingPathComponent("does-not-exist.txt")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingFile.path))
+
+        await client.importFile(url: missingFile)
+
+        XCTAssertNotNil(client.error, "a failed import must still report an error after its trailing refresh")
+        XCTAssertTrue(client.items.isEmpty)
+    }
+
     // MARK: - Search
 
     func testSearchFindsImportedItemByContent() async throws {
@@ -180,6 +197,63 @@ final class GISTTests: XCTestCase {
             "deleteSourceFiles: false should leave GIST's sandboxed copy in place"
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.path))
+    }
+
+    /// Covers the 2026-09-21 ADR-006 addendum's shared-copy reference check,
+    /// adopted automatically through `gist-core` with no Swift change (see
+    /// `PENDING_APPLE_CHANGES.md`'s `feat/w2-complete-delete` entry — this is
+    /// the "add a Swift test mirroring the shared-copy case" action item).
+    /// Two imports of byte-identical content dedup to one ADR-006 stored
+    /// copy; removing one item must not delete a copy the other surviving
+    /// item still references, but must delete it once the last referencing
+    /// item is removed.
+    func testRemoveItemsKeepsSharedCopyUntilLastReferencingItemIsRemoved() async throws {
+        let sourceContent = try importableFixtureURL()
+        let firstImport = tempDir.appendingPathComponent("shared-copy-a.txt")
+        let secondImport = tempDir.appendingPathComponent("shared-copy-b.txt")
+        try FileManager.default.copyItem(at: sourceContent, to: firstImport)
+        try FileManager.default.copyItem(at: sourceContent, to: secondImport)
+
+        await client.importFile(url: firstImport)
+        await client.importFile(url: secondImport)
+        XCTAssertNil(client.error)
+        XCTAssertEqual(client.items.count, 2, "both imports should have succeeded")
+
+        let copyPath = try predictedSandboxedCopyPath(forContentAt: firstImport)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: copyPath.path),
+            "identical content should dedup to one ADR-006 stored copy"
+        )
+
+        guard let firstItem = client.items.first(where: { $0.sourcePath == firstImport.path }) else {
+            XCTFail("expected the first import to be present")
+            return
+        }
+        await client.removeItems(ids: [firstItem.id], deleteSourceFiles: true)
+
+        XCTAssertNil(client.error)
+        XCTAssertEqual(client.items.count, 1, "the second item, still referencing the shared copy, must survive")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: copyPath.path),
+            "the shared copy must survive removal while another item still references it"
+        )
+
+        guard let secondItem = client.items.first else {
+            XCTFail("expected the second import to remain")
+            return
+        }
+        await client.removeItems(ids: [secondItem.id], deleteSourceFiles: true)
+
+        XCTAssertNil(client.error)
+        XCTAssertTrue(client.items.isEmpty)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: copyPath.path),
+            "the shared copy should be deleted once the last referencing item is removed"
+        )
+        // Neither user-facing original file is ever touched, regardless of
+        // dedup/reference-count bookkeeping on GIST's own sandboxed copy.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstImport.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: secondImport.path))
     }
 
     // MARK: - Per-item encryption (ADR-014)

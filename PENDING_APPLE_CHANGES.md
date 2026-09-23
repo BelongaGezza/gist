@@ -19,40 +19,42 @@ this file when it contains entries.
 
 <!-- No pending items. -->
 
-## Pending Apple Change — 2026-09-20
+## Pending Apple Change — 2026-09-20 — ⚠️ partially verified 2026-09-23
 **File:** `Cargo.toml` (workspace `[profile.release]`), consumed by `tools/build-core-xcframework.sh`
 **Change required:** none in Swift. The release profile changed from `panic = "abort"` to `panic = "unwind"` so `ffi_catch!` actually contains panics in shipped builds (review Q1). Verify on macOS.
 **Reason:** under `panic = "abort"` the shipped xcframework killed the app on any core/parser panic instead of returning `GistError.InternalPanic`. Fixed and proven on Windows; Apple release build not run here.
 **Related commit/PR:** fix/w1-gates
-**Action:** run `./tools/build-core-xcframework.sh` and `xcodebuild build/test` (scheme GISTmacOS); note the xcframework size delta; optionally add a Swift test that a forced panic yields `.InternalPanic` (needs the `test-panic` feature build).
+**2026-09-23:** `./tools/build-core-xcframework.sh` (release, arm64+x86_64 universal) and `xcodegen generate` + `xcodebuild build`/`test` (scheme `GISTmacOS`) both ran clean against this profile — the app links and runs fine under `panic = "unwind"`. **Not done:** no test forces an actual panic across the FFI boundary to confirm it surfaces as `.InternalPanic` rather than crashing (the action item's "optionally add a Swift test..." — still optional, still not added; needs a `test-panic`-feature build of `gist-ffi`).
+**Action:** optionally add the forced-panic test described above. Otherwise consider closed enough to delete.
 
-## Pending Apple Change — 2026-09-20
-**File:** none edited; verification only (`Cargo.lock`, `tools/gen-bindings.sh`, `apps/apple/Generated/`)
-**Change required:** none expected. Verify that the dependency merges of 2026-09-20 (uniffi 0.32.0 -> 0.32.1 #5, zip 2 -> 8.6.0 #10, sha2 0.10 -> 0.11 #24) did not disturb the Apple build.
-**Reason:** these landed while verified only on Windows and Linux/macOS CI for the Rust core. The Windows C# generator and 20-check .NET spike pass against uniffi 0.32.1, but the Swift bindings were not regenerated and `apple-build` did not run on those PRs (path-filtered).
-**Related commit/PR:** #5 (f7f77b2), #10, #24
-**Action:** on macOS run `./tools/gen-bindings.sh` and confirm the regenerated `apps/apple/Generated/gist_ffi.swift` compiles; run `./tools/build-core-xcframework.sh`, then `xcodegen generate` and `xcodebuild build`/`test` (scheme GISTmacOS). Confirm the `originals/` content-addressed filenames are unchanged (sha2 0.11 output must equal 0.10's; the Rust tests cover this, the Swift `removeItems` test re-derives it independently). Delete this block once verified.
-
-## Pending Apple Change — 2026-09-21
-**File:** `apps/apple/Shared/CoreClient.swift` (no edit made from Windows)
-**Change required:** review `importFile`/`removeItems`/`encryptItems` error handling. A failed operation publishes an error string, then the trailing `refresh()` on the success path clears it. The Windows port found the same shape made its DRM dialog impossible to trigger (caught by two tests) and fixed it by splitting a public `RefreshAsync` (clears the error on success) from an internal reload that does not clear it.
-**Reason:** Apple's DRM alert survives because `drmProtectedFile` is a separate property, but the generic `error` string is still wiped by the refresh, so a real import failure can silently lose its message.
-**Related commit/PR:** #45 (Windows CoreClient)
-**Action:** on macOS, add a test that a failed import still shows its error after the follow-up refresh; if it fails, mirror the Windows split.
-
-## Pending Apple Change — 2026-09-21
+## Pending Apple Change — 2026-09-21 — ⚠️ partially verified 2026-09-23, real-library step still outstanding
 **File:** `Cargo.lock` + `crates/gist-store/Cargo.toml` (rusqlite 0.31.0 -> 0.40.2, libsqlite3-sys 0.28.0 -> 0.38.2, bundled SQLite 3.45.0 -> 3.53.2). No Swift or Xcode file edited.
 **Change required:** none in Swift; verify only. `gist-store` needed zero source changes, but the bundled SQLite C amalgamation is recompiled for every Apple slice, and existing users' libraries on macOS have never been opened under the new SQLite here.
 **Reason:** this bumps the C library that holds every user's library database and its FTS5 index. Windows/Linux/CI cover the Rust side; the Apple slices (arm64/x86_64 macOS, arm64 iOS + simulator) and the real `~/Library/Application Support/GIST` store do not.
 **Related commit/PR:** chore/rusqlite-0.40-compat (supersedes Dependabot #48)
-**Action:** on macOS run `./tools/build-core-xcframework.sh` (confirm every slice's bundled SQLite compiles and the xcframework size delta is sane), then `xcodegen generate` + `xcodebuild build`/`test` (scheme `GISTmacOS`) — 49 tests, including the `CoreClient` ones that drive a real `GistCore`. Then, most importantly, **launch the debug build against the real existing `~/Library/Application Support/GIST` store** and confirm the library still renders, search still returns results (type a partial word — the FTS5 prefix path), and an item opens in RSVP/Flow View. Note the result in `PLATFORM_VERIFICATION.md` and delete this block.
+**2026-09-23:** `./tools/build-core-xcframework.sh` built every slice's bundled SQLite 3.53.2 cleanly; `xcodegen generate` + `xcodebuild build`/`test` (scheme `GISTmacOS`) succeeded, and the `GISTTests`/`FlowViewTests` suites (15 + 13 = 28 tests, all driving a real `GistCore`/temp-dir SQLite database) passed 0 failures. **Not done — this is the part that actually matters most:** nobody has launched the debug build against the real `~/Library/Application Support/GIST` store yet. That step touches the user's real library and was deliberately deferred pending explicit go-ahead (see the architect review in this session).
+**Action:** back up `~/Library/Application Support/GIST`, then launch the debug build against it and confirm library render / FTS5 partial-word search / RSVP+Flow View open. Note the result in `PLATFORM_VERIFICATION.md` and delete this block.
 
-## Pending Apple Change — 2026-09-21
+## Pending Apple Change — 2026-09-21 — ⚠️ partially verified 2026-09-23
 **File:** `Cargo.lock` (aes-gcm 0.10.3 -> 0.11.1, transitive aes pinned at 0.9.2), `crates/gist-store/src/lib.rs`
 **Change required:** none in Swift; verify only. Item encryption at rest now runs on aes-gcm 0.11 (aead 0.6). A known-answer test proves a blob written by 0.10.3 still decrypts, but the Swift app has never been run against it.
 **Reason:** existing users' encrypted items must stay readable after this ships.
 **Related commit/PR:** #39
-**Action:** on macOS run `./tools/build-core-xcframework.sh`, `xcodebuild test` (scheme GISTmacOS) including the encrypt round-trip tests, and ideally decrypt an item encrypted by the previous release build. Delete this block once verified.
+**2026-09-23:** `./tools/build-core-xcframework.sh` + `xcodebuild test` (scheme `GISTmacOS`) ran the real encrypt round-trip tests against aes-gcm 0.11 on macOS — `testEncryptItemsEncryptsThenSecondCallIsIdempotentNoOp`, `testEncryptItemsNeverTouchesTheSandboxedOriginalCopy`, `testEncryptItemsThenReadBackSucceedsOnAReadCapableClient` all passed. **Not done:** nobody has decrypted an item that was actually encrypted by a previous *release* build (the true backward-compat check the action item asks for) — these tests only prove encrypt-then-decrypt round-trips within the current build.
+**Action:** if a previously-encrypted real item exists, confirm it still decrypts under this build. Otherwise consider this low-risk-closed (the Rust known-answer test plus these round-trips cover it well) and delete.
+
+## Pending Apple Change — 2026-09-23 — new finding, not a regression
+**File:** none — environment/tooling observation only
+**Change required:** none. `xcodebuild test` (scheme `GISTmacOS`) reliably hangs at `KeychainKeyProviderIntegrationTests` (specifically observed at `testConcurrentGetOrCreateKeyCallsConvergeOnOneKey`, 20 concurrent `SecItemAdd`/`SecItemCopyMatching` calls) when run from an unattended/headless session on this machine — reproduced twice in a row. Almost certainly a macOS Keychain access-authorization prompt that needs a human to dismiss; it isn't a code bug (`FlowViewTests` and `GISTTests` — 28 tests total, including both new tests above — pass cleanly *before* the hang every time).
+**Reason:** blocks `LibraryFiltering`/`LibrarySelection`/sort and `ThemeManager` suites from ever running in this kind of session, since XCTest runs suites in sequence and never reaches them. Also leaves a few orphaned, uniquely-UUID-suffixed test Keychain items behind when a hung run is killed instead of completing tearDown (harmless — isolated from the real production key by the existing test seam — but `security dump-keychain | grep 'com.gist.macos.encryption-at-rest.TEST-'` found 4 after this session's two interrupted runs).
+**Action:** when running the full suite unattended, expect to need a human present to click through a Keychain prompt the first time (or run interactively in Xcode once to pre-authorize). Periodically clean up stray `...TEST-<uuid>` Keychain items. No code action needed.
+
+## Pending Apple Change — 2026-09-21 — ⚠️ not verified, no change needed unless a live gap surfaces
+**File:** `crates/gist-store/src/lib.rs` (no Apple file edited)
+**Change required:** none — **behaviour change in `list_all_tags()` only (read query, no schema change, no migration).** It now returns only tags that currently have at least one item link (distinct, alphabetical, same casing as before). Previously `remove_tag` (and cascade removal of the last tagged item) left the row in `tags`, so an unused tag stayed in the Filter menu and selecting it showed an empty result. `tags` rows are not deleted; `add_tag` of an orphaned name reuses the existing row. Swift needs no code change; `CoreClient.listAllTags()` simply returns the corrected list.
+**2026-09-23:** not specifically re-verified this session — `testListAllTagsAndListItemsByTagRoundTrip` passed, but that test doesn't target the orphaned-tag-drop scenario specifically.
+**Action:** verify on macOS that the Library Filter menu drops a tag after its last use is removed (Tag editor) or its last tagged item is deleted. Delete this block once verified. CI `apple-build` runs on this PR (touches `crates/`).
+**Related PR:** `fix/orphaned-tags`
 
 ## Pending Apple Change — 2026-09-21
 **File:** `crates/gist-core/src/lib.rs`, `crates/gist-ffi/src/lib.rs`, `crates/gist-store/src/lib.rs` (no Apple file edited)
@@ -70,12 +72,6 @@ this file when it contains entries.
 **Action:** adoption only — the build/regeneration half is already CI-proven above. Optionally have `CoreClient.removeItems` call `removeItemsDetailed` and surface a non-zero **`filesFailed`** (never `filesMissing`) in the existing result-summary alert, and call `sweepOrphanedFiles()` once at launch. Before wiring the sweep, run it once against the real `~/Library/Application Support/GIST` store and check the counts look sane — ideally after backing that directory up, since no Apple-side test has ever pointed it at a real library. Delete this block once adopted, or keep it as the adoption ticket if deferred.
 
 ## Pending Apple Change — 2026-09-21
-**File:** `crates/gist-store/src/lib.rs` (no Apple file edited)
-**Change required:** none — **behaviour change in `list_all_tags()` only (read query, no schema change, no migration).** It now returns only tags that currently have at least one item link (distinct, alphabetical, same casing as before). Previously `remove_tag` (and cascade removal of the last tagged item) left the row in `tags`, so an unused tag stayed in the Filter menu and selecting it showed an empty result. `tags` rows are not deleted; `add_tag` of an orphaned name reuses the existing row. Swift needs no code change; `CoreClient.listAllTags()` simply returns the corrected list.
-**Action:** verify on macOS that the Library Filter menu drops a tag after its last use is removed (Tag editor) or its last tagged item is deleted. Delete this block once verified. CI `apple-build` runs on this PR (touches `crates/`).
-**Related PR:** `fix/orphaned-tags`
-
-## Pending Apple Change — 2026-09-21
 **File:** `apps/apple/Shared/LibraryView.swift` (the Remove confirmation alert) and `apps/apple/Shared/CoreClient.swift`; the Rust half is already done and ships to Apple automatically via `gist-core`.
 **Change required:** two things, one optional and one that needs verifying.
 
@@ -87,5 +83,7 @@ Also new in the same change: `Core::remove_items_detailed` refuses to delete a `
 
 **Reason:** removal is now an unconditional delete of GIST's stored copy on Windows, which turns ADR-006's long-recorded "dedup vs. deletion" limitation from theoretical into a real data-loss path; the reference check closes it for every platform at once.
 **Verification status:** Rust side fully covered — `cargo test --workspace` (incl. 4 new `gist-store` and 6 new `gist-core` tests: one-of-two sharers, both-in-one-batch, sequential, mixed batch, no-residue walk, tampered/traversal path, Windows locked stored copy), `clippy -D warnings`, `fmt --check` all green on Windows. `apple-build` runs on this PR (it touches `crates/`), so the bindings regenerate and `xcodebuild build`/`test` run in CI — **but no Swift call site exercises the new behaviour, and nobody has removed a real item from a real `~/Library/Application Support/GIST` library on macOS.**
-**Action:** (a) run `xcodebuild test` (scheme `GISTmacOS`) after `./tools/build-core-xcframework.sh` + `xcodegen generate`; (b) add a Swift test mirroring `testRemoveItemsNeverTouchesTheOriginal` for the shared-copy case — import the same bytes twice under two names, remove one, assert the `originals/` copy survives and the other item still reads, then remove the second and assert it is gone; (c) decide on item 1 and, if adopting, update `LibraryView`'s alert and this repo's Apple docs. Delete this block once done.
+**2026-09-23:** items (a) and (b) done. `xcodebuild test` (scheme `GISTmacOS`) passed after a fresh `build-core-xcframework.sh` + `gen-bindings.sh` + `xcodegen generate`. New test `testRemoveItemsKeepsSharedCopyUntilLastReferencingItemIsRemoved` (in `apps/apple/Tests/GISTTests.swift`) imports identical content under two filenames, removes the first item and asserts the shared `originals/` copy and the second item both survive, then removes the second and asserts the copy is finally gone — both original user files are asserted untouched throughout. Passed.
+**2026-09-23 (later, same day): item (c) done too.** `LibraryView`'s Remove alert now shows one destructive "Remove" button (Cancel is the alert's default/cancel role) that always calls `removeItems(ids:deleteSourceFiles: true)` — the old "Remove from Library"/"Also Delete Original File" pair (the latter mislabelled, since it only ever deleted GIST's sandboxed copy) is gone. Message text matches `RemovePreview.LibraryIrreversibleLineOne`/`...Many` on Windows verbatim (singular/plural by selection count). `CoreClient.removeItems(ids:deleteSourceFiles:)` itself is unchanged — the parameter still exists and is still exercised directly (with `false`) by `testRemoveItemsWithoutDeleteSourceFilesKeepsSandboxedCopyAndOriginal`, so nothing there needed updating. `xcodebuild build` (scheme `GISTmacOS`, `CODE_SIGNING_ALLOWED=NO`/`CODE_SIGNING_REQUIRED=NO`) succeeded clean against the edited file. **Not run this pass:** the full test suite (see the 2026-09-23 Keychain-hang entry below — an unattended `xcodebuild test` run reliably hangs partway through; no UI/XCUITest exists that would exercise button text anyway, and no test target references the old wording).
+**Action:** launch against a real `~/Library/Application Support/GIST` library and perform one real removal with the new single-button dialog (see the rusqlite-bump entry above, which needs the same real-library session — do both in one pass). Delete this block once that's done.
 **Related PR:** `feat/w2-complete-delete`
