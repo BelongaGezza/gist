@@ -799,4 +799,15 @@ pub mod test_support {
     pub fn ffi_panic_probe() -> Result<(), GistError> {
         ffi_catch!({ panic!("ffi_panic_probe: deliberate panic") })
     }
+
+    /// The same probe, exposed across the uniffi boundary so a Swift test can
+    /// prove the *whole* chain (Rust panic -> `ffi_catch!` -> uniffi Swift
+    /// binding -> `GistError.InternalPanic` thrown in Swift), not just the
+    /// Rust-internal half the `panic_containment` example already covers.
+    /// `#[cfg(feature = "test-panic")]` keeps this out of every build that
+    /// doesn't opt in, so it never reaches a shipped xcframework.
+    #[uniffi::export]
+    pub fn ffi_panic_probe_uniffi() -> Result<(), GistError> {
+        ffi_panic_probe()
+    }
 }
