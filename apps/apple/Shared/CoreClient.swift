@@ -159,15 +159,53 @@ final class CoreClient: ObservableObject {
     /// GIST's sandboxed ADR-006 copy is also deleted (the user's real,
     /// original file is never touched either way — see CLAUDE.md's
     /// copy-on-import note).
-    func removeItems(ids: [String], deleteSourceFiles: Bool) async {
-        guard let core else { return }
+    ///
+    /// Calls `GistCore.removeItemsDetailed` (PENDING_APPLE_CHANGES.md's
+    /// 2026-09-21 W2/Q10 adoption entry) rather than the discarded-outcome
+    /// `removeItems`, so a partial failure -- something else has a stored
+    /// file open, most commonly on an SMB/AFP share or a `uchg`/`schg` flag
+    /// -- can be told apart from a clean removal instead of silently
+    /// reporting "removed" either way. Only `filesFailed` is ever surfaced
+    /// as a warning; `filesMissing` (legacy items with no ADR-013 checksum
+    /// sidecar) and `sharedCopiesKept` (ADR-006 dedup) are bookkeeping, not
+    /// problems -- see `FfiRemoveOutcome`'s doc comment.
+    @discardableResult
+    func removeItems(ids: [String], deleteSourceFiles: Bool) async -> RemoveItemsSummary {
+        guard let core else {
+            return RemoveItemsSummary(removedCount: 0, filesFailedCount: 0)
+        }
+        var removedCount = 0
+        var filesFailed = 0
         do {
-            try core.removeItems(ids: ids, deleteSourceFiles: deleteSourceFiles)
+            let outcome = try core.removeItemsDetailed(ids: ids, deleteSourceFiles: deleteSourceFiles)
+            removedCount = outcome.removedIds.count
+            filesFailed = Int(outcome.filesFailed)
             error = nil
         } catch {
             self.error = "\(error)"
         }
         await reloadItems(clearErrorOnSuccess: false)
+        return RemoveItemsSummary(removedCount: removedCount, filesFailedCount: filesFailed)
+    }
+
+    /// Reclaims any ADR-006 stored copy or `.json`/`.tokens.json` blob a
+    /// previous removal's best-effort file delete could not clean up (see
+    /// `removeItems`'s doc comment for why that can happen), plus anything
+    /// else orphaned in the storage directory. Intended to run once per app
+    /// launch (`GISTApp`'s `.task`), silently -- a failure here is logged to
+    /// `error` like any other operation but is not something worth
+    /// interrupting the user's session over. Never deletes a file a library
+    /// row still references.
+    @discardableResult
+    func sweepOrphanedFiles() async -> Int {
+        guard let core else { return 0 }
+        do {
+            let outcome = try core.sweepOrphanedFiles()
+            return Int(outcome.filesDeleted)
+        } catch {
+            self.error = "\(error)"
+            return 0
+        }
     }
 
     /// Imports a web page by URL via `Core::import_url`, following the same
@@ -496,6 +534,29 @@ struct EncryptItemsSummary {
             parts.append("\(failedCount) failed")
         }
         return parts.isEmpty ? "No items were selected." : parts.joined(separator: ", ") + "."
+    }
+}
+
+/// Summary of a bulk `CoreClient.removeItems` call, for a warning alert.
+/// Deliberately carries only `filesFailedCount` beyond the removed count --
+/// `FfiRemoveOutcome.filesMissing`/`sharedCopiesKept` are bookkeeping, never
+/// worth surfacing as a problem (see `FfiRemoveOutcome`'s doc comment).
+struct RemoveItemsSummary {
+    let removedCount: Int
+    let filesFailedCount: Int
+
+    /// Whether this summary is worth showing an alert for at all. A clean
+    /// removal (the common case) should not interrupt the user with a
+    /// dialog just to say "it worked."
+    var hasFailures: Bool { filesFailedCount > 0 }
+
+    /// e.g. "1 file for the removed item could not be deleted (something
+    /// else may have it open). It has been reclaimed from your library --
+    /// GIST will retry deleting the leftover file automatically."
+    var message: String {
+        "\(filesFailedCount) file\(filesFailedCount == 1 ? "" : "s") for the removed item\(removedCount == 1 ? "" : "s") "
+            + "could not be deleted (something else may have it open). "
+            + "It has been reclaimed from your library — GIST will retry deleting the leftover file\(filesFailedCount == 1 ? "" : "s") automatically."
     }
 }
 
