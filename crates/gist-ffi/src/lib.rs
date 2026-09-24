@@ -185,6 +185,77 @@ pub struct FfiCollection {
     pub created_at: i64,
 }
 
+// ── Annotations (ADR-003) ────────────────────────────────────────────────────
+
+/// Mirrors `gist_core::AnnotationKind` (re-exported from `gist-model`) as a
+/// uniffi-exportable enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiAnnotationKind {
+    Highlight,
+    Note,
+    Bookmark,
+}
+
+impl From<gist_core::AnnotationKind> for FfiAnnotationKind {
+    fn from(k: gist_core::AnnotationKind) -> Self {
+        match k {
+            gist_core::AnnotationKind::Highlight => FfiAnnotationKind::Highlight,
+            gist_core::AnnotationKind::Note => FfiAnnotationKind::Note,
+            gist_core::AnnotationKind::Bookmark => FfiAnnotationKind::Bookmark,
+        }
+    }
+}
+
+impl From<FfiAnnotationKind> for gist_core::AnnotationKind {
+    fn from(k: FfiAnnotationKind) -> Self {
+        match k {
+            FfiAnnotationKind::Highlight => gist_core::AnnotationKind::Highlight,
+            FfiAnnotationKind::Note => gist_core::AnnotationKind::Note,
+            FfiAnnotationKind::Bookmark => gist_core::AnnotationKind::Bookmark,
+        }
+    }
+}
+
+/// Mirrors `gist_core::Annotation` (re-exported from `gist-model`) as a
+/// uniffi-exportable record. `start`/`len` are `u64` (not `usize`, which
+/// uniffi doesn't support) — same convention `list_items`'s `offset`/`limit`
+/// already use. `prefix_hash`/`quote_hash` are `u64` directly; uniffi
+/// supports unsigned 64-bit scalars natively, unlike `gist-store`'s SQLite
+/// layer, which has to bit-cast them through `i64` (see that crate's
+/// `create_annotation`).
+#[derive(uniffi::Record)]
+pub struct FfiAnnotation {
+    pub id: String,
+    pub item_id: String,
+    pub kind: FfiAnnotationKind,
+    pub block_id: String,
+    pub start: u64,
+    pub len: u64,
+    pub prefix_hash: u64,
+    pub quote_hash: u64,
+    pub note_text: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl From<gist_core::Annotation> for FfiAnnotation {
+    fn from(a: gist_core::Annotation) -> Self {
+        FfiAnnotation {
+            id: a.id,
+            item_id: a.item_id,
+            kind: a.kind.into(),
+            block_id: a.block_id,
+            start: a.start as u64,
+            len: a.len as u64,
+            prefix_hash: a.prefix_hash,
+            quote_hash: a.quote_hash,
+            note_text: a.note_text,
+            created_at: a.created_at,
+            updated_at: a.updated_at,
+        }
+    }
+}
+
 // ── Per-item encryption (ADR-014) ──────────────────────────────────────────
 
 /// Mirrors `gist_store::EncryptOutcome` as a uniffi-exportable enum.
@@ -702,6 +773,87 @@ impl GistCore {
                     content_encrypted: i.content_encrypted,
                 })
                 .collect())
+        })
+    }
+
+    /// Create a new annotation (highlight/note/bookmark), anchored per
+    /// ADR-003 as `(block_id, start, len, prefix_hash, quote_hash)`. Returns
+    /// the generated annotation id. `prefix_hash`/`quote_hash` must be
+    /// computed by the caller (the reading view) — this call only persists
+    /// them, it never computes or verifies a hash itself.
+    /// See `gist_core::Core::create_annotation`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_annotation(
+        &self,
+        item_id: String,
+        kind: FfiAnnotationKind,
+        block_id: String,
+        start: u64,
+        len: u64,
+        prefix_hash: u64,
+        quote_hash: u64,
+        note_text: Option<String>,
+    ) -> Result<String, GistError> {
+        ffi_catch!({
+            self.inner
+                .create_annotation(
+                    &item_id,
+                    kind.into(),
+                    &block_id,
+                    start as usize,
+                    len as usize,
+                    prefix_hash,
+                    quote_hash,
+                    note_text.as_deref(),
+                )
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Return all annotations for one item, newest first.
+    /// See `gist_core::Core::list_annotations_for_item`.
+    pub fn list_annotations_for_item(
+        &self,
+        item_id: String,
+    ) -> Result<Vec<FfiAnnotation>, GistError> {
+        ffi_catch!({
+            let annotations = self
+                .inner
+                .list_annotations_for_item(&item_id)
+                .map_err(GistError::from)?;
+            Ok(annotations.into_iter().map(FfiAnnotation::from).collect())
+        })
+    }
+
+    /// Update an annotation's note text (e.g. editing a `Note`'s body, or
+    /// clearing it by passing `None`). Never touches the anchor fields.
+    /// See `gist_core::Core::update_annotation_note`.
+    pub fn update_annotation_note(
+        &self,
+        id: String,
+        note_text: Option<String>,
+    ) -> Result<(), GistError> {
+        ffi_catch!({
+            self.inner
+                .update_annotation_note(&id, note_text.as_deref())
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Delete a single annotation. See `gist_core::Core::delete_annotation`.
+    pub fn delete_annotation(&self, id: String) -> Result<(), GistError> {
+        ffi_catch!({ self.inner.delete_annotation(&id).map_err(GistError::from) })
+    }
+
+    /// Delete one or more annotations; unknown ids are silently skipped.
+    /// Returns the number of annotations actually deleted.
+    /// See `gist_core::Core::delete_annotations`.
+    pub fn delete_annotations(&self, ids: Vec<String>) -> Result<u64, GistError> {
+        ffi_catch!({
+            self.inner
+                .delete_annotations(&ids)
+                .map(|n| n as u64)
+                .map_err(GistError::from)
         })
     }
 
