@@ -159,6 +159,57 @@ pub struct Token {
     pub char_offset: usize,
 }
 
+// ── Annotation (ADR-003) ─────────────────────────────────────────────────────
+
+/// The three annotation kinds GIST supports (M3 scope: highlights, notes,
+/// bookmarks). Only `Note` carries user-authored text
+/// (`Annotation::note_text`); a `Bookmark` reuses the same
+/// `(block_id, start, len, ...)` anchor shape as `Highlight` with `len`
+/// conventionally `0` (a point, not a span) rather than inventing a second
+/// anchor representation just for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnnotationKind {
+    Highlight,
+    Note,
+    Bookmark,
+}
+
+/// A user annotation anchored to a span of text per ADR-003:
+/// `(block_id, start, len, prefix_hash, quote_hash)`, with re-anchoring on
+/// hash mismatch. This type is the durable data shape only — the
+/// anchoring/re-anchoring algorithm (verify both hashes on load; on a
+/// `prefix_hash` mismatch, search for `quote_hash` within the same block; if
+/// that also fails, mark the annotation orphaned and surface it in the UI)
+/// is reading-view logic and out of scope for this backend slice. Kept
+/// I/O-free like every other type in this crate — must stay compilable to
+/// `wasm32-unknown-unknown`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Annotation {
+    pub id: String,
+    pub item_id: String,
+    pub kind: AnnotationKind,
+    /// The stable id of the `Section`/block this annotation anchors to
+    /// (ADR-003's `block_id`).
+    pub block_id: String,
+    /// Byte offset into the block's plain text at anchoring time.
+    pub start: usize,
+    /// Length in bytes of the anchored span (conventionally `0` for a
+    /// `Bookmark`'s point anchor).
+    pub len: usize,
+    /// FNV-1a of the 30 characters preceding `start` — detects shifted
+    /// context on re-anchoring (ADR-003).
+    pub prefix_hash: u64,
+    /// FNV-1a of the anchored span's own text (ADR-003).
+    pub quote_hash: u64,
+    /// User-authored note text. Populated only for `AnnotationKind::Note`
+    /// by convention — enforced by callers (`gist-store`'s CRUD), not by
+    /// this type, since a plain `Option<String>` round-trips through
+    /// serde/uniffi more simply than a payload-carrying enum variant would.
+    pub note_text: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 // ── Document ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

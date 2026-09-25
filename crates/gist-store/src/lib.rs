@@ -45,6 +45,12 @@ pub enum StoreError {
     /// ADR-013's backfill policy for what happens when one doesn't.
     #[error("checksum mismatch for {path}: file appears corrupted on disk")]
     ChecksumMismatch { path: String },
+    /// The `annotations.kind` column held something other than
+    /// `"highlight"`/`"note"`/`"bookmark"` — a corrupt row, since every
+    /// write path (`Store::create_annotation`) only ever writes one of
+    /// those three via `annotation_kind_to_sql`.
+    #[error("invalid annotation kind stored in database: {0}")]
+    InvalidAnnotationKind(String),
 }
 
 // ── Encryption at rest (ADR-011) ─────────────────────────────────────────────
@@ -267,7 +273,9 @@ fn sqlite_path(db_path: &Path) -> PathBuf {
 // No schema change accompanies the at-rest checksums added in the same
 // release as this comment (ADR-013 / `A4`) — see that ADR for why a sidecar
 // file, not a column, was chosen; `SCHEMA_VERSION` is unaffected.
-const SCHEMA_VERSION: i64 = 5;
+// v6 added the `annotations` table (ADR-003) — see Store::open's migration
+// block.
+const SCHEMA_VERSION: i64 = 6;
 
 // ── LibraryItem (lightweight row, not the full Document) ──────────────────
 
@@ -618,6 +626,39 @@ impl Store {
                  COMMIT;",
             )?;
             tracing::info!("gist-store: migrated schema to version 5 (content_encrypted)");
+        }
+
+        // v5 → v6: annotations (highlights/notes/bookmarks), anchored per
+        // ADR-003 as (block_id, start, len, prefix_hash, quote_hash).
+        // `start`/`len` are named `start_offset`/`len_bytes` in SQL only to
+        // sidestep any ambiguity with SQL keywords — the Rust-side
+        // `gist_model::Annotation` struct still uses `start`/`len`, matching
+        // ADR-003's own field names exactly. `prefix_hash`/`quote_hash` are
+        // FNV-1a `u64`s stored as `INTEGER` (SQLite's signed 64-bit type) via
+        // an `as i64`/`as u64` bit-pattern cast, which is lossless in both
+        // directions — see `annotation_kind_to_sql`/`_from_sql` and
+        // `create_annotation` below.
+        if version < 6 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS annotations (
+                     id           TEXT PRIMARY KEY,
+                     item_id      TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+                     kind         TEXT NOT NULL,
+                     block_id     TEXT NOT NULL,
+                     start_offset INTEGER NOT NULL,
+                     len_bytes    INTEGER NOT NULL,
+                     prefix_hash  INTEGER NOT NULL,
+                     quote_hash   INTEGER NOT NULL,
+                     note_text    TEXT,
+                     created_at   INTEGER NOT NULL,
+                     updated_at   INTEGER NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_annotations_item_id ON annotations(item_id);
+                 PRAGMA user_version = 6;
+                 COMMIT;",
+            )?;
+            tracing::info!("gist-store: migrated schema to version 6 (annotations)");
         }
 
         Ok(Self {
@@ -1446,6 +1487,170 @@ impl Store {
         Ok(items)
     }
 
+    // ── Annotations (ADR-003: block_id/start/len/prefix_hash/quote_hash) ─
+
+    /// Create a new annotation and return its generated id.
+    /// `prefix_hash`/`quote_hash` are FNV-1a digests computed by the caller
+    /// (the reading view, which has the block's plain text available) per
+    /// ADR-003 — this method only persists whatever it's given, it never
+    /// computes or verifies a hash itself.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_annotation(
+        &self,
+        item_id: &str,
+        kind: gist_model::AnnotationKind,
+        block_id: &str,
+        start: usize,
+        len: usize,
+        prefix_hash: u64,
+        quote_hash: u64,
+        note_text: Option<&str>,
+    ) -> Result<String, StoreError> {
+        let id = Uuid::now_v7().to_string();
+        let now_ms = now_millis();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "INSERT INTO annotations
+             (id, item_id, kind, block_id, start_offset, len_bytes, prefix_hash,
+              quote_hash, note_text, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                id,
+                item_id,
+                annotation_kind_to_sql(kind),
+                block_id,
+                start as i64,
+                len as i64,
+                prefix_hash as i64,
+                quote_hash as i64,
+                note_text,
+                now_ms,
+                now_ms,
+            ],
+        )?;
+        Ok(id)
+    }
+
+    /// Return all annotations for one item, newest first.
+    pub fn list_annotations_for_item(
+        &self,
+        item_id: &str,
+    ) -> Result<Vec<gist_model::Annotation>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, item_id, kind, block_id, start_offset, len_bytes, prefix_hash,
+                    quote_hash, note_text, created_at, updated_at
+             FROM annotations
+             WHERE item_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![item_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
+            ))
+        })?;
+
+        let mut annotations = Vec::new();
+        for row in rows {
+            let (
+                id,
+                item_id,
+                kind_sql,
+                block_id,
+                start,
+                len,
+                prefix_hash,
+                quote_hash,
+                note_text,
+                created_at,
+                updated_at,
+            ) = row?;
+            annotations.push(gist_model::Annotation {
+                id,
+                item_id,
+                kind: annotation_kind_from_sql(&kind_sql)?,
+                block_id,
+                start: start as usize,
+                len: len as usize,
+                prefix_hash: prefix_hash as u64,
+                quote_hash: quote_hash as u64,
+                note_text,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(annotations)
+    }
+
+    /// Update an annotation's note text (e.g. editing a `Note`'s body) and
+    /// bump `updated_at`. Pass `None` to clear the text (e.g. converting a
+    /// `Note` back to a plain `Highlight`). The anchor fields
+    /// (`block_id`/`start`/`len`/`prefix_hash`/`quote_hash`) are never
+    /// touched by this method — re-anchoring after a hash mismatch is
+    /// reading-view logic, out of scope for this backend slice (see
+    /// `gist_model::Annotation`'s doc comment).
+    pub fn update_annotation_note(
+        &self,
+        id: &str,
+        note_text: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let now_ms = now_millis();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let affected = conn.execute(
+            "UPDATE annotations SET note_text = ?1, updated_at = ?2 WHERE id = ?3",
+            params![note_text, now_ms, id],
+        )?;
+        if affected == 0 {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Delete a single annotation. Errors with `NotFound` if `id` doesn't
+    /// match a row — unlike `delete_annotations`'s bulk form below, which
+    /// silently skips unknown ids (mirroring `remove_items`'s convention,
+    /// for the same reason: a bulk multi-select shouldn't fail wholesale
+    /// over one stale id).
+    pub fn delete_annotation(&self, id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let affected = conn.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
+        if affected == 0 {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Delete one or more annotations in a single transaction, mirroring
+    /// `remove_items`'s multi-id delete: an id with no matching row is
+    /// silently skipped, not an error. Returns the number of rows actually
+    /// deleted. `annotations` rows are also cleaned up automatically via
+    /// `ON DELETE CASCADE` whenever the owning `library_items` row is
+    /// removed (`Store::remove_items`) — this method is for deleting
+    /// annotations directly, independent of item removal.
+    pub fn delete_annotations(&self, ids: &[String]) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        let mut deleted = 0usize;
+        {
+            let mut stmt = tx.prepare("DELETE FROM annotations WHERE id = ?1")?;
+            for id in ids {
+                deleted += stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
     // ── Per-item encryption (ADR-014) ───────────────────────────────────
 
     /// Retroactively encrypts one already-imported item's `.json`/
@@ -1630,6 +1835,31 @@ fn escape_fts5_query(query: &str) -> String {
 /// escape them — there's no path-construction meaning left to preserve.
 fn sanitize_ext(ext: &str) -> String {
     ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
+/// The exact string each `gist_model::AnnotationKind` variant is stored as
+/// in the `annotations.kind` column. Kept as free functions (rather than a
+/// `rusqlite::ToSql`/`FromSql` impl on the type itself) because
+/// `gist-model` must stay free of I/O/SQL dependencies (wasm32 target) —
+/// see that crate's conventions.
+fn annotation_kind_to_sql(kind: gist_model::AnnotationKind) -> &'static str {
+    match kind {
+        gist_model::AnnotationKind::Highlight => "highlight",
+        gist_model::AnnotationKind::Note => "note",
+        gist_model::AnnotationKind::Bookmark => "bookmark",
+    }
+}
+
+/// Reverses [`annotation_kind_to_sql`]. Every write path
+/// (`Store::create_annotation`) only ever writes one of the three known
+/// strings, so any other value means the row is corrupt.
+fn annotation_kind_from_sql(s: &str) -> Result<gist_model::AnnotationKind, StoreError> {
+    match s {
+        "highlight" => Ok(gist_model::AnnotationKind::Highlight),
+        "note" => Ok(gist_model::AnnotationKind::Note),
+        "bookmark" => Ok(gist_model::AnnotationKind::Bookmark),
+        other => Err(StoreError::InvalidAnnotationKind(other.to_string())),
+    }
 }
 
 fn now_millis() -> i64 {
@@ -1966,6 +2196,341 @@ mod tests {
             )
             .unwrap();
         assert_eq!(collection_count, 1);
+    }
+
+    // ── Annotations (ADR-003) ────────────────────────────────────────────
+
+    /// Round-trips the full ADR-003 anchor tuple through SQLite storage,
+    /// including the two FNV-1a hashes at values that exercise both the
+    /// sign-bit-flip risk of an `as i64`/`as u64` cast (a hash whose top bit
+    /// is set looks negative as a bare `i64`) and `u64::MAX` itself.
+    #[test]
+    fn annotation_create_then_list_round_trips_every_anchor_field_exactly() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+
+        let id = store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Highlight,
+                "block-42",
+                17,
+                9,
+                0xFFFF_FFFF_FFFF_FFFF, // u64::MAX — top bit set
+                0x8000_0000_0000_0001, // top bit set, not all-ones
+                None,
+            )
+            .unwrap();
+
+        let annotations = store.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(annotations.len(), 1);
+        let a = &annotations[0];
+        assert_eq!(a.id, id);
+        assert_eq!(a.item_id, item_id);
+        assert_eq!(a.kind, gist_model::AnnotationKind::Highlight);
+        assert_eq!(a.block_id, "block-42");
+        assert_eq!(a.start, 17);
+        assert_eq!(a.len, 9);
+        assert_eq!(a.prefix_hash, 0xFFFF_FFFF_FFFF_FFFF);
+        assert_eq!(a.quote_hash, 0x8000_0000_0000_0001);
+        assert_eq!(a.note_text, None);
+        assert_eq!(a.created_at, a.updated_at);
+
+        // The same struct also round-trips through JSON exactly, including
+        // both hashes — the "serialization" half of this test, independent
+        // of SQLite.
+        let json = serde_json::to_string(a).unwrap();
+        let back: gist_model::Annotation = serde_json::from_str(&json).unwrap();
+        assert_eq!(&back, a);
+    }
+
+    #[test]
+    fn annotation_note_kind_carries_note_text() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+
+        store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Note,
+                "block-1",
+                0,
+                5,
+                1,
+                2,
+                Some("a margin note"),
+            )
+            .unwrap();
+
+        let annotations = store.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].kind, gist_model::AnnotationKind::Note);
+        assert_eq!(annotations[0].note_text.as_deref(), Some("a margin note"));
+    }
+
+    #[test]
+    fn annotation_bookmark_kind_uses_zero_length_point_anchor() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+
+        store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Bookmark,
+                "block-7",
+                123,
+                0,
+                42,
+                42,
+                None,
+            )
+            .unwrap();
+
+        let annotations = store.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(annotations[0].kind, gist_model::AnnotationKind::Bookmark);
+        assert_eq!(annotations[0].len, 0);
+    }
+
+    #[test]
+    fn list_annotations_for_item_only_returns_that_items_annotations() {
+        let (_dir, store) = open_test_store();
+        let item_a = insert_test_item(&store);
+        let item_b = insert_test_item(&store);
+
+        store
+            .create_annotation(
+                &item_a,
+                gist_model::AnnotationKind::Highlight,
+                "b1",
+                0,
+                1,
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+        store
+            .create_annotation(
+                &item_b,
+                gist_model::AnnotationKind::Highlight,
+                "b2",
+                0,
+                1,
+                2,
+                2,
+                None,
+            )
+            .unwrap();
+
+        let a_annotations = store.list_annotations_for_item(&item_a).unwrap();
+        let b_annotations = store.list_annotations_for_item(&item_b).unwrap();
+        assert_eq!(a_annotations.len(), 1);
+        assert_eq!(b_annotations.len(), 1);
+        assert_eq!(a_annotations[0].block_id, "b1");
+        assert_eq!(b_annotations[0].block_id, "b2");
+    }
+
+    #[test]
+    fn update_annotation_note_changes_text_and_bumps_updated_at_only() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        let id = store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Note,
+                "block-1",
+                0,
+                5,
+                1,
+                2,
+                Some("first draft"),
+            )
+            .unwrap();
+        let before = store.list_annotations_for_item(&item_id).unwrap().remove(0);
+
+        // Ensure a strictly later millisecond timestamp is observable.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store
+            .update_annotation_note(&id, Some("edited text"))
+            .unwrap();
+
+        let after = store.list_annotations_for_item(&item_id).unwrap().remove(0);
+        assert_eq!(after.note_text.as_deref(), Some("edited text"));
+        assert_eq!(after.created_at, before.created_at);
+        assert!(after.updated_at >= before.updated_at);
+        // Anchor fields are untouched by a note-only update.
+        assert_eq!(after.block_id, before.block_id);
+        assert_eq!(after.start, before.start);
+        assert_eq!(after.len, before.len);
+        assert_eq!(after.prefix_hash, before.prefix_hash);
+        assert_eq!(after.quote_hash, before.quote_hash);
+    }
+
+    #[test]
+    fn update_annotation_note_can_clear_text() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        let id = store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Note,
+                "block-1",
+                0,
+                5,
+                1,
+                2,
+                Some("will be cleared"),
+            )
+            .unwrap();
+
+        store.update_annotation_note(&id, None).unwrap();
+
+        let annotations = store.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(annotations[0].note_text, None);
+    }
+
+    #[test]
+    fn update_annotation_note_on_unknown_id_returns_not_found() {
+        let (_dir, store) = open_test_store();
+        let result = store.update_annotation_note("does-not-exist", Some("x"));
+        assert!(matches!(result, Err(StoreError::NotFound(ref id)) if id == "does-not-exist"));
+    }
+
+    #[test]
+    fn delete_annotation_removes_it_and_errors_on_unknown_id() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        let id = store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Highlight,
+                "block-1",
+                0,
+                5,
+                1,
+                2,
+                None,
+            )
+            .unwrap();
+
+        store.delete_annotation(&id).unwrap();
+        assert!(store
+            .list_annotations_for_item(&item_id)
+            .unwrap()
+            .is_empty());
+
+        let result = store.delete_annotation(&id);
+        assert!(matches!(result, Err(StoreError::NotFound(ref got)) if *got == id));
+    }
+
+    #[test]
+    fn delete_annotations_bulk_removes_valid_ids_and_ignores_unknown_ids() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        let id_a = store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Highlight,
+                "b1",
+                0,
+                1,
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+        let id_b = store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Highlight,
+                "b2",
+                0,
+                1,
+                2,
+                2,
+                None,
+            )
+            .unwrap();
+        let id_c = store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Highlight,
+                "b3",
+                0,
+                1,
+                3,
+                3,
+                None,
+            )
+            .unwrap();
+
+        let deleted = store
+            .delete_annotations(&[id_a.clone(), "not-a-real-id".to_string(), id_b.clone()])
+            .unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = store.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, id_c);
+    }
+
+    #[test]
+    fn deleting_item_cascades_to_its_annotations() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Bookmark,
+                "b1",
+                0,
+                0,
+                1,
+                1,
+                None,
+            )
+            .unwrap();
+
+        store.delete_item(&item_id).unwrap();
+
+        let conn = store.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM annotations WHERE item_id = ?1",
+                params![item_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// `annotations.kind` should only ever hold one of the three strings
+    /// `create_annotation` writes; this locks in the round-trip for all
+    /// three so a future kind-string typo/rename is caught immediately.
+    #[test]
+    fn annotation_kind_round_trips_for_every_variant() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        for (kind, block) in [
+            (gist_model::AnnotationKind::Highlight, "h"),
+            (gist_model::AnnotationKind::Note, "n"),
+            (gist_model::AnnotationKind::Bookmark, "b"),
+        ] {
+            store
+                .create_annotation(&item_id, kind, block, 0, 1, 1, 1, None)
+                .unwrap();
+        }
+        let annotations = store.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(annotations.len(), 3);
+        assert!(annotations
+            .iter()
+            .any(|a| a.kind == gist_model::AnnotationKind::Highlight));
+        assert!(annotations
+            .iter()
+            .any(|a| a.kind == gist_model::AnnotationKind::Note));
+        assert!(annotations
+            .iter()
+            .any(|a| a.kind == gist_model::AnnotationKind::Bookmark));
     }
 
     /// `remove_items` treats an id that matches no row as a no-op for that

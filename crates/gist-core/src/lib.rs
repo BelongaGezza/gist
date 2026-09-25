@@ -453,6 +453,14 @@ impl ImportObserver for NullObserver {
 /// crates need it and must not depend back on `gist-core`.
 pub use gist_model::ParseLimits;
 
+// ── Annotations (ADR-003) ────────────────────────────────────────────────────
+
+/// Re-exported from `gist-model` (ADR-003) so `gist-ffi` — which depends on
+/// `gist-core` but not directly on `gist-model` — can build `FfiAnnotation`/
+/// `FfiAnnotationKind` from these without adding a redundant direct
+/// dependency, mirroring the `ParseLimits` re-export above.
+pub use gist_model::{Annotation, AnnotationKind};
+
 // ── Encryption at rest (ADR-011) ─────────────────────────────────────────────
 
 /// Re-exported from `gist-store` for the same reason `ParseLimits` is
@@ -1129,6 +1137,64 @@ impl Core {
         Ok(self.store.list_items_by_tag(tag_name)?)
     }
 
+    // ── Annotations (ADR-003) ─────────────────────────────────────────────
+
+    /// Create a new annotation (highlight/note/bookmark) anchored per
+    /// ADR-003. Returns the generated annotation id.
+    /// See `gist_store::Store::create_annotation`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_annotation(
+        &self,
+        item_id: &str,
+        kind: AnnotationKind,
+        block_id: &str,
+        start: usize,
+        len: usize,
+        prefix_hash: u64,
+        quote_hash: u64,
+        note_text: Option<&str>,
+    ) -> Result<String, CoreError> {
+        Ok(self.store.create_annotation(
+            item_id,
+            kind,
+            block_id,
+            start,
+            len,
+            prefix_hash,
+            quote_hash,
+            note_text,
+        )?)
+    }
+
+    /// Return all annotations for one item, newest first.
+    /// See `gist_store::Store::list_annotations_for_item`.
+    pub fn list_annotations_for_item(&self, item_id: &str) -> Result<Vec<Annotation>, CoreError> {
+        Ok(self.store.list_annotations_for_item(item_id)?)
+    }
+
+    /// Update an annotation's note text (e.g. editing a `Note`'s body).
+    /// See `gist_store::Store::update_annotation_note`.
+    pub fn update_annotation_note(
+        &self,
+        id: &str,
+        note_text: Option<&str>,
+    ) -> Result<(), CoreError> {
+        Ok(self.store.update_annotation_note(id, note_text)?)
+    }
+
+    /// Delete a single annotation. See `gist_store::Store::delete_annotation`.
+    pub fn delete_annotation(&self, id: &str) -> Result<(), CoreError> {
+        Ok(self.store.delete_annotation(id)?)
+    }
+
+    /// Delete one or more annotations; unknown ids are silently skipped
+    /// (mirrors `Core::remove_items`'s multi-id semantics). Returns the
+    /// number of annotations actually deleted.
+    /// See `gist_store::Store::delete_annotations`.
+    pub fn delete_annotations(&self, ids: &[String]) -> Result<usize, CoreError> {
+        Ok(self.store.delete_annotations(ids)?)
+    }
+
     // ── Per-item encryption (ADR-014) ──────────────────────────────────────
 
     /// Retroactively encrypt one or more already-imported items at rest, on
@@ -1590,6 +1656,97 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, tagged_id);
         assert!(items.iter().all(|i| i.id != untagged_id));
+    }
+
+    // ── Annotations (ADR-003) ────────────────────────────────────────────
+
+    /// Mirrors `create_collection_add_item_and_list_contents_round_trip`'s
+    /// style: create an item, create an annotation on it, list it back,
+    /// update its note text, then delete it — the full CRUD round trip this
+    /// backend slice exists to support.
+    #[test]
+    fn create_annotation_list_update_delete_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("annotated.txt");
+        std::fs::write(&txt, b"A document that will be annotated.").unwrap();
+        let item_id = core.import_file(&txt, &NullObserver).unwrap();
+
+        assert!(core.list_annotations_for_item(&item_id).unwrap().is_empty());
+
+        let annotation_id = core
+            .create_annotation(
+                &item_id,
+                AnnotationKind::Note,
+                "block-0",
+                5,
+                12,
+                111_222_333,
+                444_555_666,
+                Some("first draft of the note"),
+            )
+            .unwrap();
+
+        let annotations = core.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(annotations.len(), 1);
+        let a = &annotations[0];
+        assert_eq!(a.id, annotation_id);
+        assert_eq!(a.item_id, item_id);
+        assert_eq!(a.kind, AnnotationKind::Note);
+        assert_eq!(a.block_id, "block-0");
+        assert_eq!(a.start, 5);
+        assert_eq!(a.len, 12);
+        assert_eq!(a.prefix_hash, 111_222_333);
+        assert_eq!(a.quote_hash, 444_555_666);
+        assert_eq!(a.note_text.as_deref(), Some("first draft of the note"));
+
+        core.update_annotation_note(&annotation_id, Some("revised note text"))
+            .unwrap();
+        let updated = core.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(updated[0].note_text.as_deref(), Some("revised note text"));
+        // Anchor fields are unaffected by a note-text update.
+        assert_eq!(updated[0].block_id, "block-0");
+        assert_eq!(updated[0].prefix_hash, 111_222_333);
+        assert_eq!(updated[0].quote_hash, 444_555_666);
+
+        core.delete_annotation(&annotation_id).unwrap();
+        assert!(core.list_annotations_for_item(&item_id).unwrap().is_empty());
+
+        // Deleting an already-deleted (or otherwise unknown) id is an error.
+        assert!(core.delete_annotation(&annotation_id).is_err());
+    }
+
+    #[test]
+    fn delete_annotations_bulk_ignores_unknown_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("multi_annotated.txt");
+        std::fs::write(&txt, b"A document with several annotations.").unwrap();
+        let item_id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let id_a = core
+            .create_annotation(&item_id, AnnotationKind::Highlight, "b1", 0, 4, 1, 1, None)
+            .unwrap();
+        let id_b = core
+            .create_annotation(&item_id, AnnotationKind::Bookmark, "b2", 10, 0, 2, 2, None)
+            .unwrap();
+
+        let deleted = core
+            .delete_annotations(&[id_a, "unknown-id".to_string()])
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining = core.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, id_b);
     }
 
     // ── Per-item encryption (ADR-014) ───────────────────────────────────
