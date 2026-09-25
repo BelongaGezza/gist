@@ -441,6 +441,60 @@ final class GISTTests: XCTestCase {
         let untagged = await client.listItemsByTag(tagName: "nonexistent")
         XCTAssertTrue(untagged.isEmpty)
     }
+
+    /// Orphan-drop scenario (a): removing a tag's last use via the tag
+    /// editor. `list_all_tags()` (`gist-store`) was fixed 2026-09-21 to
+    /// return only tags with at least one item link -- previously an
+    /// unused tag lingered in the Filter menu and selecting it showed an
+    /// empty result. `LibraryView`'s Filter menu (see `.task { await
+    /// core.listAllTags() }` and its `ForEach(core.allTags, ...)`) is a
+    /// thin, direct rendering of `CoreClient.allTags` with no filtering
+    /// logic of its own, so asserting `allTags` here is a faithful proxy
+    /// for "the Filter menu drops the tag." See
+    /// `PENDING_APPLE_CHANGES.md`'s 2026-09-21 entry.
+    func testListAllTagsDropsTagAfterRemoveTagRemovesLastUse() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        await client.addTag(itemId: item.id, tagName: "temporary")
+        await client.listAllTags()
+        XCTAssertEqual(client.allTags, ["temporary"])
+
+        await client.removeTag(itemId: item.id, tagName: "temporary")
+        await client.listAllTags()
+        XCTAssertTrue(
+            client.allTags.isEmpty,
+            "removing a tag's last use must drop it from the Filter menu's source list"
+        )
+    }
+
+    /// Orphan-drop scenario (b): deleting the last item carrying a tag.
+    /// Same rationale as the sibling test above -- `remove_items` cascades
+    /// the tag link away, and `list_all_tags()` must no longer surface the
+    /// now-unused tag name.
+    func testListAllTagsDropsTagAfterLastTaggedItemIsRemoved() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        await client.addTag(itemId: item.id, tagName: "solo-book")
+        await client.listAllTags()
+        XCTAssertEqual(client.allTags, ["solo-book"])
+
+        await client.removeItems(ids: [item.id], deleteSourceFiles: false)
+        await client.listAllTags()
+        XCTAssertTrue(
+            client.allTags.isEmpty,
+            "removing the last item tagged with a name must drop it from the Filter menu's source list"
+        )
+    }
 }
 
 /// `LibraryFiltering` is pure logic factored out of `LibraryView` precisely

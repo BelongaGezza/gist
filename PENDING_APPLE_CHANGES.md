@@ -25,10 +25,3 @@ this file when it contains entries.
 **Reason:** blocks `LibraryFiltering`/`LibrarySelection`/sort and `ThemeManager` suites from ever running in this kind of session, since XCTest runs suites in sequence and never reaches them. Also leaves a few orphaned, uniquely-UUID-suffixed test Keychain items behind when a hung run is killed instead of completing tearDown (harmless — isolated from the real production key by the existing test seam — but `security dump-keychain | grep 'com.gist.macos.encryption-at-rest.TEST-'` found 4 after this session's two interrupted runs).
 **Action:** when running the full suite unattended, expect to need a human present to click through a Keychain prompt the first time (or run interactively in Xcode once to pre-authorize). Periodically clean up stray `...TEST-<uuid>` Keychain items. No code action needed.
 
-## Pending Apple Change — 2026-09-21 — ⚠️ not verified, no change needed unless a live gap surfaces
-**File:** `crates/gist-store/src/lib.rs` (no Apple file edited)
-**Change required:** none — **behaviour change in `list_all_tags()` only (read query, no schema change, no migration).** It now returns only tags that currently have at least one item link (distinct, alphabetical, same casing as before). Previously `remove_tag` (and cascade removal of the last tagged item) left the row in `tags`, so an unused tag stayed in the Filter menu and selecting it showed an empty result. `tags` rows are not deleted; `add_tag` of an orphaned name reuses the existing row. Swift needs no code change; `CoreClient.listAllTags()` simply returns the corrected list.
-**2026-09-23:** not specifically re-verified this session — `testListAllTagsAndListItemsByTagRoundTrip` passed, but that test doesn't target the orphaned-tag-drop scenario specifically.
-**Action:** verify on macOS that the Library Filter menu drops a tag after its last use is removed (Tag editor) or its last tagged item is deleted. Delete this block once verified. CI `apple-build` runs on this PR (touches `crates/`).
-**Related PR:** `fix/orphaned-tags`
-
