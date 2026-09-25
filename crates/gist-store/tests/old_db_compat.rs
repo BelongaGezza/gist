@@ -19,9 +19,9 @@
 //!     shadow tables are an on-disk format, not just an API;
 //!   * the `tokens_ad` delete trigger + `ON DELETE CASCADE` still fire
 //!     correctly against rows and index entries written by the old version;
-//!   * the v3 → v4 → v5 `ALTER TABLE` migrations run successfully on a file
-//!     created by the old version (fixture B is a v3-era library, from before
-//!     `source_copy_path`/`content_encrypted` existed);
+//!   * the v3 → v4 → v5 → v6 migrations run successfully on a file created
+//!     by the old version (fixture B is a v3-era library, from before
+//!     `source_copy_path`/`content_encrypted`/`annotations` existed);
 //!   * new writes interleave with old rows in the same index.
 
 use std::path::{Path, PathBuf};
@@ -74,16 +74,17 @@ fn id_of(store: &Store, title: &str) -> String {
         .id
 }
 
-// ── fixture A: an already-current (v5) library written by the old stack ──────
+// ── fixture A: a v5 (one-behind-current) library written by the old stack ────
 
 #[test]
 fn old_v5_library_opens_reads_and_searches() {
     let (_dir, db, storage) = fixture_copy("library_v5_rusqlite031.db");
     let store = Store::open(&db, &storage).expect("an existing v5 library must still open");
 
-    // Already at the current schema version: nothing to migrate, and in
-    // particular the version-ceiling check must not trip.
-    assert_eq!(user_version(&db), 5);
+    // One version behind current (v6 added the ADR-003 `annotations` table)
+    // — migrates forward cleanly, and in particular the version-ceiling
+    // check must not trip.
+    assert_eq!(user_version(&db), 6);
 
     assert_eq!(
         titles(&store),
@@ -282,14 +283,14 @@ fn removing_an_old_row_still_cascades_and_clears_the_old_fts_entries() {
 // ── fixture B: a v3-era library, so the migrations themselves are exercised ──
 
 #[test]
-fn old_v3_library_migrates_forward_to_v5() {
+fn old_v3_library_migrates_forward_to_v6() {
     let (_dir, db, storage) = fixture_copy("library_v3_rusqlite031.db");
     assert_eq!(user_version(&db), 3, "fixture must start at v3");
 
     let store = Store::open(&db, &storage).expect("a v3 library must migrate, not fail");
     assert_eq!(
         user_version(&db),
-        5,
+        6,
         "must have migrated to the current version"
     );
 
@@ -341,7 +342,7 @@ fn old_v3_library_migrates_forward_to_v5() {
     // Re-opening an already-migrated file is a no-op, not a second migration.
     drop(store);
     let store = Store::open(&db, &storage).unwrap();
-    assert_eq!(user_version(&db), 5);
+    assert_eq!(user_version(&db), 6);
     assert_eq!(store.list_items(0, 10).unwrap().len(), 1);
 }
 
