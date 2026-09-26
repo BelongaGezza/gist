@@ -12,6 +12,9 @@ internal interface ILibraryDialogHost
     /// <summary>Shows whatever <c>vm.PendingDialog</c> asks for, drives the VM operations, and dismisses.</summary>
     Task HandleAsync(LibraryViewModel vm, XamlRoot xamlRoot);
 
+    /// <summary>The Collection screen's counterpart (§5): fewer dialogs, different removal wording.</summary>
+    Task HandleAsync(CollectionViewModel vm, XamlRoot xamlRoot);
+
     /// <summary>Shows the file picker (.txt .epub .docx); null when cancelled.</summary>
     Task<string?> PickImportFileAsync(Window window);
 }

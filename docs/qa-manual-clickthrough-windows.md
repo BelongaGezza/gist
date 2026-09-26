@@ -1,8 +1,9 @@
 # Windows manual click-through checklist (Library)
 
-Windows counterpart of `docs/qa-manual-clickthrough-m2.md`. Every Library behaviour is listed once and marked either
-`[automated: <TestName>]` (a FlaUI test in `apps/windows/GIST.App.UITests/LibraryClickThroughTests.cs` drives the real
-`GIST.exe` and asserts it; a person need not repeat it) or `[manual only]` (needs human eyes or hardware). The human
+Windows counterpart of `docs/qa-manual-clickthrough-m2.md`. Every Library/Collection/Appearance behaviour is listed
+once and marked either `[automated: <TestName>]` (a FlaUI test in `apps/windows/GIST.App.UITests/LibraryClickThroughTests.cs`
+or, for W3's sidebar/collections/theme work, `CollectionAndThemeTests.cs` — drives the real `GIST.exe` and asserts it;
+a person need not repeat it) or `[manual only]` (needs human eyes or hardware). The human
 visual pass therefore has two parts: spot-check the automated items once if you distrust the suite, and do every
 `[manual only]` item.
 
@@ -68,7 +69,11 @@ also get PNGs of the empty / seeded / corrupt-key states for the visual pass.
 ## 6. Collections
 
 - [ ] [automated: New_Collection_dialog_creates_and_adds_selection_and_existing_collection_works] New Collection: Create disabled while blank; creates and adds the selection; an existing collection is offered and adding works (verified in the DB).
-- [ ] [manual only] Collection screen (sidebar entry, browsing, "Remove" from collection wording) - not covered by the Library tests.
+- [ ] [automated: Sidebar_hides_the_Collections_header_when_there_are_none] Sidebar's "Collections" header is absent on a library with none.
+- [ ] [automated: Sidebar_shows_the_seeded_collection_and_navigates_without_disturbing_the_back_stack] Clicking a collection in the sidebar shows its page and clears the back stack (the Library page is gone underneath, not pushed).
+- [ ] [automated: Collection_page_shows_only_its_own_item_with_the_narrower_command_set] Collection screen shows only its own item(s); exactly Sort/Remove/Open/Tags in the command bar (no Search/Filter/Import/Add to Collection/Encrypt).
+- [ ] [automated: Removing_from_a_collection_detaches_without_deleting_the_item] "Remove" on the Collection screen asks with the collection's name, says items stay in the library, and only detaches — the item and its stored copy are untouched.
+- [ ] [manual only] Collection screen visual look: row template matches the Library screen, sidebar Folder icon, page header shows the collection name, context menu reads "Remove from Collection…" not "Remove…".
 
 ## 7. Remove
 
@@ -95,13 +100,21 @@ the UI spec and ADR-006's addendum.
 - [ ] [manual only] Real https import of a public article (needs network); DRM-protected epub shows "Can't import this book"; a corrupt/empty file shows the generic error, never a path or exception text.
 - [ ] [manual only] Native picker look, starting folder, and file-type filter (.txt/.epub/.docx only).
 
+## 9b. Appearance (theme dialog, spec §7.3)
+
+- [ ] [automated: Appearance_dialog_applies_live_and_persists_across_a_restart] Selecting a theme applies live (no Apply step), Close is the only button, the selection persists to disk and a fresh launch against the same profile comes back up already on that theme.
+- [ ] [manual only] Appearance dialog visual look: five radio buttons (Follow System, Light, Dark, Sepia, OLED (True Black)), the high-contrast note line, follows the active theme itself.
+- [ ] [manual only] Clicking "Appearance" in the sidebar footer does not leave it looking selected once the dialog closes, and whatever page was showing (Library or a collection) is still there, undisturbed, underneath.
+- [ ] [manual only] Sepia and OLED never change when the OS switches between light and dark while one of them is selected; System does.
+- [ ] [manual only] OLED is genuinely `#000000`, visibly different from Dark's slightly-lifted background.
+
 ## 10. Whole-window visual pass (manual only)
 
-- [ ] Themes: light, dark, sepia, OLED (and OS-follow): backgrounds/text/accent correct on the Library, every dialog, the InfoBars and the flyouts.
-- [ ] Mica backdrop renders and the title bar matches the theme.
+- [ ] Themes: light, dark, sepia, OLED (and OS-follow): backgrounds/text/accent correct on the Library, the Collection screen, every dialog, the InfoBars and the flyouts.
+- [ ] Mica backdrop renders behind System/Light/Dark, and the title bar matches the theme; Sepia and OLED show a solid background with no Mica tint.
 - [ ] Layout at 800, 1100 and 1600 px wide and at 125/150/200 % display scaling: no clipping, header search stays right-aligned.
 - [ ] Narrator: reads the page title, the list ("Library items"), each row ("Title, Author, encrypted"), the commands and dialogs' titles/bodies in a sensible order.
-- [ ] High contrast (Aquatic, Desert, Night sky): all controls and glyphs remain visible.
+- [ ] High contrast (Aquatic, Desert, Night sky): GIST's own palette is bypassed entirely (no Mica, no forced light/dark) and all controls and glyphs remain visible using the OS high-contrast colours.
 - [ ] Nothing shows a raw exception message, GUID or file path anywhere.
 
 ## Known behaviour to be aware of
@@ -117,3 +130,8 @@ the UI spec and ADR-006's addendum.
 - **Apple still has the two-button dialog** ("Remove from Library" / "Also Delete Original File", the second of which is
   additionally mislabelled — it deletes only the sandboxed copy). Adopting the Windows semantics there is logged in
   `PENDING_APPLE_CHANGES.md`.
+- **`Import_File_can_pick_a_file_by_typing_its_path_into_the_native_picker` has been observed flaky** (2026-09-26,
+  timing out on "picker Open button" — the native common-dialog's Open button, control id `1`) on at least one dev
+  session, while every other automated test in both files passed, including the rest of that same file's native-picker
+  coverage. Reproduced twice in isolation, so not test-ordering related; not yet root-caused, and unrelated to any W3
+  (sidebar/collections/theme) code. If it recurs, re-run it alone before assuming a regression.

@@ -23,8 +23,10 @@
                         SelectionChanged="OnSelectionChanged">
             <NavigationView.MenuItems>
                 <NavigationViewItem x:Name="LibraryItem" Content="Library" Icon="Library" Tag="library" />
-                <NavigationViewItemHeader Content="Collections" />
-                <!-- Collection items are added here once CoreClient exists (spec section 2: hidden when none). -->
+                <NavigationViewItemHeader x:Name="CollectionsHeader" Content="Collections" Visibility="Collapsed" />
+                <!-- Per-collection items are inserted after CollectionsHeader in code-behind
+                     (RebuildCollectionsNav), which also toggles the header's visibility: hidden when
+                     there are no collections (spec section 2). -->
             </NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>
                 <NavigationViewItem Content="Appearance" Tag="appearance">
