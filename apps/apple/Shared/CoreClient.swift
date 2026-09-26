@@ -615,6 +615,40 @@ final class CoreClient: ObservableObject {
         )
     }
 
+    // MARK: - OCR import (role R8)
+
+    /// Commits a multi-page OCR scan via `GistCore.importImageWithOcr`.
+    /// `engine` is expected to be a `ReviewedOcrEngine` (see
+    /// VisionOcrEngine.swift), built from the OCR review screen's
+    /// already-recognized -- and possibly user-edited -- per-page text and
+    /// confidence: unlike `importFile`/`importUrl`, there is no separate
+    /// "commit, then find out something's wrong" step for content itself,
+    /// since the review screen already resolved that client-side before
+    /// this is ever called. There's also no DRM branch here (OCR imports
+    /// have no DRM concept) -- any `GistError` case (most notably the
+    /// ADR-009-addendum-2 byte-size cap surfacing as `.Core`) is returned as
+    /// a plain, presentable failure message, matching this codebase's
+    /// standing rule that a typed error from this path is real and must be
+    /// shown, never silently swallowed.
+    func importScannedDocument(pagePaths: [String], engine: OcrEngine) async -> OcrImportOutcome {
+        guard let core else {
+            return .failure("GIST core is not available.")
+        }
+        do {
+            let result = try core.importImageWithOcr(paths: pagePaths, engine: engine)
+            error = nil
+            await reloadItems(clearErrorOnSuccess: false)
+            return .success(itemId: result.itemId, pageConfidences: result.pageConfidences)
+        } catch let gistError as GistError {
+            let message = "\(gistError)"
+            self.error = message
+            return .failure(message)
+        } catch {
+            self.error = "\(error)"
+            return .failure("\(error)")
+        }
+    }
+
     /// Persists the current token index so playback can resume later.
     func saveProgress(itemId: String, tokenIndex: Int) async {
         guard let core else { return }
@@ -695,6 +729,17 @@ struct RemoveItemsSummary {
             + "could not be deleted (something else may have it open). "
             + "It has been reclaimed from your library — GIST will retry deleting the leftover file\(filesFailedCount == 1 ? "" : "s") automatically."
     }
+}
+
+/// Outcome of `CoreClient.importScannedDocument`. Returned as a value
+/// (rather than only setting `core.error`, like most other `CoreClient`
+/// methods) because `OcrImportState.commit` drives its own
+/// `OcrImportPhase` state machine and needs to distinguish "committed
+/// successfully" from "failed" without depending on `core.error` as a side
+/// channel that some other concurrent operation could also be writing to.
+enum OcrImportOutcome {
+    case success(itemId: String, pageConfidences: [Float])
+    case failure(String)
 }
 
 struct CollectionVM: Identifiable, Hashable {
