@@ -119,6 +119,25 @@ impl gist_core::OcrEngine for CoreOcrAdapter<'_> {
     }
 }
 
+/// Result of a multi-page OCR import — mirrors `gist_core::OcrImportResult`.
+/// `page_confidences` is in page order (`ocrConfidence[]`); the OCR review
+/// screen (M3 role `R8`) uses it to highlight low-confidence pages without a
+/// second FFI round trip.
+#[derive(Debug, uniffi::Record)]
+pub struct FfiOcrImportResult {
+    pub item_id: String,
+    pub page_confidences: Vec<f32>,
+}
+
+impl From<gist_core::OcrImportResult> for FfiOcrImportResult {
+    fn from(r: gist_core::OcrImportResult) -> Self {
+        FfiOcrImportResult {
+            item_id: r.item_id,
+            page_confidences: r.page_confidences,
+        }
+    }
+}
+
 // ── Key provider (ADR-011) ────────────────────────────────────────────────────
 
 /// Callback interface: implemented in Swift/Kotlin (Keychain-backed on
@@ -971,19 +990,24 @@ impl GistCore {
         })
     }
 
-    /// Import an image file and run OCR using the provided engine.
-    /// Returns the document ID on success.
+    /// Import one or more page images (one raw file per page) and run OCR
+    /// using the provided engine. Returns the new document's id plus each
+    /// page's OCR confidence, in page order. See
+    /// `gist_core::Core::import_image_with_ocr` for the full pipeline and
+    /// the ADR-009 addendum (`[A7]`) for the byte-size cap enforced before
+    /// any page's bytes are read.
     pub fn import_image_with_ocr(
         &self,
-        path: String,
+        paths: Vec<String>,
         engine: Box<dyn OcrEngine>,
-    ) -> Result<String, GistError> {
+    ) -> Result<FfiOcrImportResult, GistError> {
         ffi_catch!({
             let adapter = CoreOcrAdapter(engine.as_ref());
+            let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             self.inner
-                .import_image_with_ocr(&path, &adapter)
-                .map(|doc| doc.id)
-                .map_err(|e| GistError::Core(e.to_string()))
+                .import_image_with_ocr(&paths, &adapter)
+                .map(FfiOcrImportResult::from)
+                .map_err(GistError::from)
         })
     }
 }

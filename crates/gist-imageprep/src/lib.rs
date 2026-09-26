@@ -1,4 +1,4 @@
-use gist_core::ParseError;
+use gist_model::ParseError;
 
 /// A single image page that has been pre-processed and is ready to hand to an
 /// OCR engine.
@@ -38,7 +38,7 @@ pub struct PreparedPage {
 pub fn prepare_image(
     page_index: u32,
     raw_bytes: &[u8],
-    limits: &gist_core::ParseLimits,
+    limits: &gist_model::ParseLimits,
 ) -> Result<PreparedPage, ParseError> {
     let max_pixels = limits.max_expanded_bytes / 4;
 
@@ -103,7 +103,7 @@ pub fn prepare_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gist_core::ParseLimits;
+    use gist_model::ParseLimits;
     use image::{ImageBuffer, Rgb};
 
     /// Encode a solid-colour RGB image as PNG bytes.
