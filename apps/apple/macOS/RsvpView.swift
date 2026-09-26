@@ -354,7 +354,12 @@ struct RsvpView: View {
         }
         .background(theme.background.ignoresSafeArea())
         .navigationTitle("RSVP")
-        .task { await player.load(core: core, itemId: itemId) }
+        .task {
+            // Settings scene's RSVP tab default -- see `RsvpDefaults
+            // .defaultWpm`'s doc comment; falls back to the same 250 this
+            // used to hardcode when nothing has been persisted yet.
+            await player.load(core: core, itemId: itemId, initialWpm: UInt32(RsvpDefaults.shared.defaultWpm))
+        }
         .onDisappear { Task { await player.stopAndPersist() } }
     }
 

@@ -301,7 +301,10 @@ struct LibraryView: View {
         ToolbarItem(placement: .primaryAction) {
             Button {
                 if let id = selection.first {
-                    navigationPath.append(.rsvp(itemId: id))
+                    // Settings scene's Reading tab default (RSVP vs Flow
+                    // View) -- the context menu's explicit "Open in
+                    // Reader"/"Open in Flow View" items are unaffected.
+                    navigationPath.append(ReadingSettings.shared.defaultMode.destination(for: id))
                 }
             } label: {
                 Label("Open", systemImage: "book")
@@ -389,8 +392,13 @@ struct LibraryView: View {
                 Button("Remove", role: .destructive) {
                     let ids = Array(selection)
                     selection.removeAll()
+                    // Was hardcoded `true` -- now reads the Settings-scene
+                    // default (Storage tab), see `StorageSettings
+                    // .deleteSourceFilesOnRemoval`'s doc comment for why
+                    // `true` remains the out-of-the-box default.
+                    let deleteSourceFiles = StorageSettings.shared.deleteSourceFilesOnRemoval
                     Task {
-                        let summary = await core.removeItems(ids: ids, deleteSourceFiles: true)
+                        let summary = await core.removeItems(ids: ids, deleteSourceFiles: deleteSourceFiles)
                         if summary.hasFailures { removeWarning = summary }
                     }
                 }
