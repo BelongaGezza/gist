@@ -235,6 +235,12 @@ private struct OcrReviewScreen: View {
             if page.isLowConfidence {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
+                    // The row's orange tint (`.listRowBackground` below) and
+                    // this icon are both purely visual signals of the same
+                    // fact the confidence percentage above doesn't spell
+                    // out in words -- give VoiceOver an explicit label
+                    // rather than the SF-Symbol-name fallback.
+                    .accessibilityLabel("Needs review")
             }
         }
         .padding(.vertical, 2)
