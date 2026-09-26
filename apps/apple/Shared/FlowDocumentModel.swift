@@ -58,32 +58,43 @@ struct FlowSectionVM: Decodable {
     let heading: FlowHeadingVM?
     let blocks: [FlowBlockVM]
 
-    /// Concatenation of every block's `plainText`, each joined by a single
-    /// `"\n"`, in document order. This is the byte-offset addressing space
-    /// this reading view uses for ADR-003's `(block_id, start, len)`
-    /// annotation anchor -- see `AnnotationAnchoring`'s doc comment
-    /// (`AnnotationModel.swift`) for why: `gist_model::Block` has no id of
-    /// its own, only `Section` does, so `block_id` is always a *section*
-    /// id, and a section can hold more than one block. Addressing into the
-    /// section's whole concatenated text (rather than one block's text in
-    /// isolation) gives every byte offset within a section a single,
-    /// unambiguous meaning regardless of how many blocks it contains, and
-    /// lets a highlight's `prefix_hash` context correctly span a block
-    /// boundary (e.g. a highlight starting at the very first word of a
-    /// paragraph, whose preceding context is the end of the previous
-    /// block). This is a client-side convention this reading view (the only
-    /// annotation producer today) applies consistently on both write and
-    /// read -- the Rust backend itself has no opinion on what `start`/`len`
-    /// mean, it only stores whatever it's given (see
-    /// `gist_store::create_annotation`'s doc comment).
+    /// Concatenation of every block's `plainText`, each joined by `"\n\n"`,
+    /// in document order. This is the byte-offset addressing space this
+    /// reading view uses for ADR-003's `(block_id, start, len)` annotation
+    /// anchor -- see `AnnotationAnchoring`'s doc comment (`AnnotationModel
+    /// .swift`) for why: `gist_model::Block` has no id of its own, only
+    /// `Section` does, so `block_id` is always a *section* id, and a
+    /// section can hold more than one block. Addressing into the section's
+    /// whole concatenated text (rather than one block's text in isolation)
+    /// gives every byte offset within a section a single, unambiguous
+    /// meaning regardless of how many blocks it contains, and lets a
+    /// highlight's `prefix_hash` context correctly span a block boundary
+    /// (e.g. a highlight starting at the very first word of a paragraph,
+    /// whose preceding context is the end of the previous block).
+    ///
+    /// **The `"\n\n"` separator is not a free client-side choice** -- it
+    /// must match `gist_core::anchoring::section_text`'s own join exactly,
+    /// byte for byte, because that Rust function is what
+    /// `Core::reanchor_annotations` slices `start..start+len` out of when
+    /// verifying/re-anchoring an annotation on load. A separator mismatch
+    /// between the two sides doesn't fail loudly -- it just makes Rust
+    /// compute `prefix_hash`/`quote_hash` against the wrong substring the
+    /// moment a section has more than one block, so every annotation past
+    /// the first block in its section silently reads as shifted or
+    /// orphaned even when nothing in the document changed. (Caught during
+    /// M3 integration, 2026-09-26: this file originally joined with a
+    /// single `"\n"`, disagreeing with `section_text`'s `"\n\n"` -- fixed to
+    /// match. If `section_text`'s separator ever changes, this must change
+    /// with it in the same commit.)
     var concatenatedPlainText: String {
-        blocks.map(\.plainText).joined(separator: "\n")
+        blocks.map(\.plainText).joined(separator: "\n\n")
     }
 
     /// The byte offset within `concatenatedPlainText` where block `index`'s
-    /// own text begins.
+    /// own text begins. Must add the same 2-byte `"\n\n"` separator length
+    /// `concatenatedPlainText` joins with -- see its doc comment.
     func blockByteOffset(at index: Int) -> Int {
-        blocks.prefix(index).reduce(0) { $0 + $1.plainText.utf8.count + 1 }
+        blocks.prefix(index).reduce(0) { $0 + $1.plainText.utf8.count + 2 }
     }
 
     private enum CodingKeys: String, CodingKey { case id, heading, blocks }

@@ -363,14 +363,16 @@ final class FlowViewTests: XCTestCase {
         return Data(json.utf8)
     }
 
-    func testConcatenatedPlainTextJoinsBlocksWithNewlineAndBlockByteOffsetIsCumulative() throws {
+    func testConcatenatedPlainTextJoinsBlocksWithDoubleNewlineAndBlockByteOffsetIsCumulative() throws {
         let json = paragraphDocumentJSON(sections: [(id: "s0", heading: nil, paragraphs: ["Hello", "World"])])
         let document = try JSONDecoder().decode(FlowDocumentVM.self, from: json)
         let section = document.sections[0]
 
-        XCTAssertEqual(section.concatenatedPlainText, "Hello\nWorld")
+        // Must match gist_core::anchoring::section_text's "\n\n" join exactly
+        // -- see concatenatedPlainText's doc comment.
+        XCTAssertEqual(section.concatenatedPlainText, "Hello\n\nWorld")
         XCTAssertEqual(section.blockByteOffset(at: 0), 0)
-        XCTAssertEqual(section.blockByteOffset(at: 1), "Hello\n".utf8.count)
+        XCTAssertEqual(section.blockByteOffset(at: 1), "Hello\n\n".utf8.count)
     }
 
     func testAnnotatedTextResolvesSpanFromSectionConcatenatedTextAndSectionLabelUsesHeading() throws {
