@@ -461,6 +461,222 @@ pub use gist_model::ParseLimits;
 /// dependency, mirroring the `ParseLimits` re-export above.
 pub use gist_model::{Annotation, AnnotationKind};
 
+/// ADR-003 annotation re-anchoring: verifying an [`Annotation`]'s
+/// `(prefix_hash, quote_hash)` against a document's *current* text on load,
+/// re-anchoring on a shift, and orphaning when the quoted text can no longer
+/// be found. This was deliberately left out of the 2026-09-24 annotations
+/// backend scaffold (commit `39c0942`) — see `gist_model::Annotation`'s doc
+/// comment — and is implemented here rather than in `gist-store` (which only
+/// persists whatever anchor it's given) or `gist-model` (I/O-free, and
+/// re-anchoring needs a whole assembled [`gist_model::Document`] plus the
+/// stored `Annotation` rows together, which only `gist-core` sees).
+pub mod anchoring {
+    use gist_model::{Annotation, Document, Section};
+
+    /// Number of characters of context immediately before `start` that
+    /// ADR-003's `prefix_hash` covers — enough to detect a shift without
+    /// being so large that an unrelated distant edit spuriously changes it.
+    pub const PREFIX_CONTEXT_CHARS: usize = 30;
+
+    /// FNV-1a (64-bit) over raw bytes — the hash function ADR-003 specifies
+    /// for both `prefix_hash` and `quote_hash`. This is the one canonical
+    /// implementation in the workspace; any future caller that *creates*
+    /// annotations (e.g. a Swift reading view, via `Core::create_annotation`)
+    /// must hash identically to this for re-anchoring to ever find a
+    /// `Valid`/`Reanchored` match instead of spuriously orphaning everything.
+    pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
+        const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut hash = OFFSET_BASIS;
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(PRIME);
+        }
+        hash
+    }
+
+    /// The plain text ADR-003 anchors against for a given `block_id`.
+    ///
+    /// `gist_model::Block` (unlike `Section`) carries no stable id of its
+    /// own — only `Section::id` is stable across a parse (see
+    /// `gist-parse-txt`'s `"s0"`, `gist-parse-epub`'s `"s{spine_index}"`,
+    /// `gist-parse-docx`'s single `"s0"`) — so an `Annotation::block_id`
+    /// anchors to a whole `Section`, not one sub-block within it. "The
+    /// block's plain text" for hashing purposes is that section's blocks'
+    /// `plain_text()` joined with `"\n\n"`, the same separator
+    /// `gist-parse-txt` splits paragraphs on, so a freshly-imported
+    /// document's section text is close to the original source bytes.
+    pub fn section_text(section: &Section) -> String {
+        section
+            .blocks
+            .iter()
+            .map(|b| b.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Find the section addressed by `block_id`, if the document still has one.
+    pub fn find_section<'a>(document: &'a Document, block_id: &str) -> Option<&'a Section> {
+        document.sections.iter().find(|s| s.id == block_id)
+    }
+
+    /// The up-to-[`PREFIX_CONTEXT_CHARS`]-character slice of `text`
+    /// immediately preceding byte offset `start`, snapped inward to char
+    /// boundaries so this never panics on a stale/out-of-range offset.
+    fn prefix_slice(text: &str, start: usize) -> &str {
+        let mut boundary = start.min(text.len());
+        while boundary > 0 && !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let before = &text[..boundary];
+        let char_count = before.chars().count();
+        if char_count <= PREFIX_CONTEXT_CHARS {
+            before
+        } else {
+            let skip = char_count - PREFIX_CONTEXT_CHARS;
+            let byte_offset = before.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
+            &before[byte_offset..]
+        }
+    }
+
+    /// The `[start, start+len)` byte slice of `text`, clamped to `text`'s
+    /// bounds and snapped inward to the nearest char boundaries so this
+    /// never panics on a stale/out-of-range anchor.
+    fn quote_slice(text: &str, start: usize, len: usize) -> &str {
+        let mut lo = start.min(text.len());
+        while lo > 0 && !text.is_char_boundary(lo) {
+            lo -= 1;
+        }
+        let mut hi = start.saturating_add(len).min(text.len());
+        while hi < text.len() && !text.is_char_boundary(hi) {
+            hi += 1;
+        }
+        if hi < lo {
+            hi = lo;
+        }
+        &text[lo..hi]
+    }
+
+    /// The `prefix_hash` ADR-003 defines for an anchor at `start` within `text`.
+    pub fn compute_prefix_hash(text: &str, start: usize) -> u64 {
+        fnv1a_hash(prefix_slice(text, start).as_bytes())
+    }
+
+    /// The `quote_hash` ADR-003 defines for the `len`-byte span at `start`
+    /// within `text`.
+    pub fn compute_quote_hash(text: &str, start: usize, len: usize) -> u64 {
+        fnv1a_hash(quote_slice(text, start, len).as_bytes())
+    }
+
+    /// Outcome of checking (and possibly re-anchoring) one [`Annotation`]
+    /// against a document's current text.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum AnchorStatus {
+        /// `prefix_hash` and `quote_hash` both matched at the stored
+        /// `start` — nothing about this annotation's position changed.
+        Valid,
+        /// The stored anchor no longer matched in place, but a `quote_hash`
+        /// match was found elsewhere within the same block (ADR-003's
+        /// "text shifted" case) — the annotation's `start`/`prefix_hash`
+        /// were rewritten to the new position.
+        Reanchored { old_start: usize, new_start: usize },
+        /// Neither the original position nor a search for `quote_hash`
+        /// within the block found the annotated text — the quoted span was
+        /// likely edited through, or the whole block was removed. Left
+        /// exactly as stored (never deleted or silently moved) so a reading
+        /// view can decide how to present it instead of losing user data.
+        Orphaned,
+    }
+
+    impl AnchorStatus {
+        pub fn is_orphaned(&self) -> bool {
+            matches!(self, AnchorStatus::Orphaned)
+        }
+    }
+
+    /// Verify one annotation against `document` and return its status plus
+    /// a possibly-updated copy: only `start`/`prefix_hash` ever change, and
+    /// only when the status is `Reanchored`; `Valid`/`Orphaned` return an
+    /// unmodified clone. Pure — never touches storage;
+    /// [`super::Core::reanchor_annotations`] persists the result.
+    pub fn reanchor(document: &Document, annotation: &Annotation) -> (AnchorStatus, Annotation) {
+        let Some(section) = find_section(document, &annotation.block_id) else {
+            return (AnchorStatus::Orphaned, annotation.clone());
+        };
+        let text = section_text(section);
+
+        let current_prefix = compute_prefix_hash(&text, annotation.start);
+        let current_quote = compute_quote_hash(&text, annotation.start, annotation.len);
+
+        if current_prefix == annotation.prefix_hash && current_quote == annotation.quote_hash {
+            return (AnchorStatus::Valid, annotation.clone());
+        }
+
+        // The anchor didn't verify in place (per ADR-003, this is triggered
+        // by a `prefix_hash` mismatch; a `quote_hash`-only mismatch with an
+        // unchanged prefix is treated the same way, since either case means
+        // "don't trust `start` any more") — search the block for a position
+        // whose quote_hash agrees.
+        if let Some(new_start) = find_quote_in_text(&text, annotation.len, annotation.quote_hash) {
+            let mut updated = annotation.clone();
+            updated.start = new_start;
+            updated.prefix_hash = compute_prefix_hash(&text, new_start);
+            // quote_hash is unchanged by definition: it's what we matched on.
+            return (
+                AnchorStatus::Reanchored {
+                    old_start: annotation.start,
+                    new_start,
+                },
+                updated,
+            );
+        }
+
+        (AnchorStatus::Orphaned, annotation.clone())
+    }
+
+    /// Scan every char-boundary-aligned, `len`-byte-long span of `text` for
+    /// one whose FNV-1a hash equals `quote_hash`, returning the first
+    /// (leftmost) match's byte offset.
+    ///
+    /// `len == 0` (a `Bookmark`'s point anchor) always returns `None`
+    /// rather than matching the first empty slice it finds: an empty span's
+    /// hash carries no information about *where* in the block it used to
+    /// point, so there is no principled position to re-anchor a bookmark to
+    /// once its context has shifted — orphaning is the honest outcome.
+    fn find_quote_in_text(text: &str, len: usize, quote_hash: u64) -> Option<usize> {
+        if len == 0 {
+            return None;
+        }
+        for (start, _) in text.char_indices() {
+            let end = start + len;
+            if end > text.len() {
+                break;
+            }
+            if !text.is_char_boundary(end) {
+                continue;
+            }
+            if fnv1a_hash(&text.as_bytes()[start..end]) == quote_hash {
+                return Some(start);
+            }
+        }
+        None
+    }
+}
+
+/// Re-exported so callers can write `gist_core::AnchorStatus` alongside
+/// `gist_core::Annotation` without reaching into the `anchoring` module
+/// directly — mirrors this file's other top-level re-exports.
+pub use anchoring::AnchorStatus;
+
+/// Per-annotation result of [`Core::reanchor_annotations`]: the annotation's
+/// state after the check (already persisted if `status` is `Reanchored`)
+/// paired with what happened.
+#[derive(Debug, Clone)]
+pub struct AnnotationAnchorResult {
+    pub annotation: Annotation,
+    pub status: AnchorStatus,
+}
+
 // ── Encryption at rest (ADR-011) ─────────────────────────────────────────────
 
 /// Re-exported from `gist-store` for the same reason `ParseLimits` is
@@ -1195,6 +1411,53 @@ impl Core {
         Ok(self.store.delete_annotations(ids)?)
     }
 
+    /// Verify every annotation on `item_id` against the document's current
+    /// text and re-anchor/orphan as needed (ADR-003) — call this on load,
+    /// before rendering a reading view's highlights/notes/bookmarks, so
+    /// annotations survive a re-import or content edit since they were
+    /// created instead of silently pointing at the wrong (or now-missing)
+    /// text.
+    ///
+    /// For each annotation: `AnchorStatus::Valid` writes nothing (the
+    /// anchor already matches); `AnchorStatus::Reanchored` rewrites the
+    /// stored `start`/`prefix_hash` via
+    /// `gist_store::Store::update_annotation_anchor` before returning, so a
+    /// later call doesn't need to search again; `AnchorStatus::Orphaned`
+    /// writes nothing — the annotation is left exactly as stored (never
+    /// deleted or silently moved), only reported, so the caller decides how
+    /// to present it. See `anchoring::reanchor` for the pure per-annotation
+    /// logic this wraps.
+    pub fn reanchor_annotations(
+        &self,
+        item_id: &str,
+    ) -> Result<Vec<AnnotationAnchorResult>, CoreError> {
+        let document = self
+            .store
+            .get_item(item_id)?
+            .ok_or_else(|| CoreError::NotFound(item_id.to_owned()))?;
+        let annotations = self.store.list_annotations_for_item(item_id)?;
+
+        let mut results = Vec::with_capacity(annotations.len());
+        for annotation in annotations {
+            let (status, updated) = anchoring::reanchor(&document, &annotation);
+            if let AnchorStatus::Reanchored { .. } = status {
+                self.store.update_annotation_anchor(
+                    &updated.id,
+                    &updated.block_id,
+                    updated.start,
+                    updated.len,
+                    updated.prefix_hash,
+                    updated.quote_hash,
+                )?;
+            }
+            results.push(AnnotationAnchorResult {
+                annotation: updated,
+                status,
+            });
+        }
+        Ok(results)
+    }
+
     // ── Per-item encryption (ADR-014) ──────────────────────────────────────
 
     /// Retroactively encrypt one or more already-imported items at rest, on
@@ -1263,6 +1526,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gist_model::{Block, Document, Metadata, Section, TextRun};
 
     struct AlwaysCancelObserver;
     impl ImportObserver for AlwaysCancelObserver {
@@ -1747,6 +2011,317 @@ mod tests {
         let remaining = core.list_annotations_for_item(&item_id).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, id_b);
+    }
+
+    // ── Annotation re-anchoring (ADR-003) ────────────────────────────────
+
+    /// A `Document` with a single section `"s0"` holding a single
+    /// `Paragraph` block whose text is exactly `text` — so
+    /// `anchoring::section_text` round-trips back to `text` with no extra
+    /// separators, keeping byte offsets in these tests easy to reason about.
+    fn one_section_document(text: &str) -> Document {
+        let section = Section {
+            id: "s0".to_string(),
+            heading: None,
+            blocks: vec![Block::Paragraph {
+                runs: vec![TextRun::plain(text)],
+            }],
+        };
+        Document::new(Metadata::minimal("anchoring test"), vec![section])
+    }
+
+    fn highlight_annotation(block_id: &str, start: usize, len: usize, text: &str) -> Annotation {
+        Annotation {
+            id: "test-annotation".to_string(),
+            item_id: "test-item".to_string(),
+            kind: AnnotationKind::Highlight,
+            block_id: block_id.to_string(),
+            start,
+            len,
+            prefix_hash: anchoring::compute_prefix_hash(text, start),
+            quote_hash: anchoring::compute_quote_hash(text, start, len),
+            note_text: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn reanchor_returns_valid_when_text_is_unchanged() {
+        let text = "The quick brown fox jumps over the lazy dog.";
+        let doc = one_section_document(text);
+        let start = text.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), text);
+
+        let (status, updated) = anchoring::reanchor(&doc, &annotation);
+        assert_eq!(status, AnchorStatus::Valid);
+        assert_eq!(updated.start, start);
+        assert_eq!(updated.prefix_hash, annotation.prefix_hash);
+        assert_eq!(updated.quote_hash, annotation.quote_hash);
+    }
+
+    #[test]
+    fn reanchor_finds_a_shifted_quote_and_updates_start_and_prefix_hash() {
+        let original = "The quick brown fox jumps over the lazy dog.";
+        let start = original.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), original);
+
+        // Shift: insert new text right before the quote, inside the
+        // prefix-hash window, so "brown fox" itself is byte-identical but
+        // moves further along and its preceding context changes.
+        let shifted = "The extremely quick brown fox jumps over the lazy dog.";
+        let shifted_doc = one_section_document(shifted);
+        let expected_new_start = shifted.find("brown fox").unwrap();
+        assert_ne!(
+            expected_new_start, start,
+            "sanity: the shift must actually move it"
+        );
+
+        let (status, updated) = anchoring::reanchor(&shifted_doc, &annotation);
+        assert_eq!(
+            status,
+            AnchorStatus::Reanchored {
+                old_start: start,
+                new_start: expected_new_start
+            }
+        );
+        assert_eq!(updated.start, expected_new_start);
+        assert_eq!(
+            updated.quote_hash, annotation.quote_hash,
+            "quote text itself didn't change"
+        );
+        assert_eq!(
+            updated.prefix_hash,
+            anchoring::compute_prefix_hash(shifted, expected_new_start)
+        );
+        assert_ne!(
+            updated.prefix_hash, annotation.prefix_hash,
+            "context before the quote did change"
+        );
+    }
+
+    #[test]
+    fn reanchor_finds_the_quote_after_surrounding_text_is_deleted() {
+        let original =
+            "Once upon a time, the quick brown fox jumps over the lazy dog, happily ever after.";
+        let start = original.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), original);
+
+        // Delete text that surrounds, but never touches, the quote itself.
+        let edited = "The quick brown fox jumps over the lazy dog.";
+        let edited_doc = one_section_document(edited);
+        let expected_new_start = edited.find("brown fox").unwrap();
+        assert_ne!(expected_new_start, start);
+
+        let (status, updated) = anchoring::reanchor(&edited_doc, &annotation);
+        assert_eq!(
+            status,
+            AnchorStatus::Reanchored {
+                old_start: start,
+                new_start: expected_new_start
+            }
+        );
+        assert_eq!(updated.start, expected_new_start);
+    }
+
+    #[test]
+    fn reanchor_orphans_when_the_quoted_text_itself_is_edited() {
+        let original = "The quick brown fox jumps over the lazy dog.";
+        let start = original.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), original);
+
+        // Delete through part of the quoted span itself — "brown fox" no
+        // longer exists anywhere in the text.
+        let edited = "The quick br fox jumps over the lazy dog.";
+        assert!(!edited.contains("brown fox"));
+        let edited_doc = one_section_document(edited);
+
+        let (status, updated) = anchoring::reanchor(&edited_doc, &annotation);
+        assert_eq!(status, AnchorStatus::Orphaned);
+        // Orphaning never mutates the stored anchor.
+        assert_eq!(updated.start, annotation.start);
+        assert_eq!(updated.prefix_hash, annotation.prefix_hash);
+        assert_eq!(updated.quote_hash, annotation.quote_hash);
+    }
+
+    #[test]
+    fn reanchor_orphans_when_the_block_no_longer_exists() {
+        let original = "The quick brown fox jumps over the lazy dog.";
+        let start = original.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), original);
+
+        // A document with no section "s0" at all — e.g. the item was
+        // reparsed into a completely different structure.
+        let mut other_doc = one_section_document("Something completely different.");
+        other_doc.sections[0].id = "s99".to_string();
+
+        let (status, updated) = anchoring::reanchor(&other_doc, &annotation);
+        assert_eq!(status, AnchorStatus::Orphaned);
+        assert_eq!(updated.start, annotation.start);
+    }
+
+    #[test]
+    fn reanchor_bookmark_point_anchor_orphans_rather_than_guessing_a_new_position() {
+        let original = "The quick brown fox jumps over the lazy dog.";
+        let start = original.find("fox").unwrap();
+        let annotation = Annotation {
+            id: "bookmark-1".to_string(),
+            item_id: "test-item".to_string(),
+            kind: AnnotationKind::Bookmark,
+            block_id: "s0".to_string(),
+            start,
+            len: 0,
+            prefix_hash: anchoring::compute_prefix_hash(original, start),
+            quote_hash: anchoring::compute_quote_hash(original, start, 0),
+            note_text: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let shifted = "Once upon a time, the quick brown fox jumps over the lazy dog.";
+        let shifted_doc = one_section_document(shifted);
+
+        let (status, updated) = anchoring::reanchor(&shifted_doc, &annotation);
+        assert_eq!(status, AnchorStatus::Orphaned);
+        assert_eq!(updated.start, start);
+    }
+
+    /// End-to-end: `Core::reanchor_annotations` finds a shifted quote
+    /// against a real store-backed `Document` and *persists* the corrected
+    /// position, not just returns it. There's deliberately no "update a
+    /// document's content" API yet, so the "edit" here is simulated by
+    /// rewriting the stored `<id>.json` blob directly and dropping its
+    /// ADR-013 `.blake3` sidecar — `verify_checksum`'s documented
+    /// backfill/legacy policy treats a missing sidecar as "unverified," not
+    /// corrupt, so the rewritten blob is accepted on the next read.
+    #[test]
+    fn reanchor_annotations_persists_a_reanchored_position_through_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let original_text = "The quick brown fox jumps over the lazy dog.";
+        let txt = dir.path().join("fox.txt");
+        std::fs::write(&txt, original_text).unwrap();
+        let item_id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let stored_json = core.get_document(&item_id).unwrap();
+        let stored_doc: Document = serde_json::from_str(&stored_json).unwrap();
+        assert_eq!(stored_doc.sections.len(), 1);
+        let section_id = stored_doc.sections[0].id.clone();
+        let section_text = anchoring::section_text(&stored_doc.sections[0]);
+        let start = section_text.find("brown fox").unwrap();
+        let len = "brown fox".len();
+        let prefix_hash = anchoring::compute_prefix_hash(&section_text, start);
+        let quote_hash = anchoring::compute_quote_hash(&section_text, start, len);
+
+        let annotation_id = core
+            .create_annotation(
+                &item_id,
+                AnnotationKind::Highlight,
+                &section_id,
+                start,
+                len,
+                prefix_hash,
+                quote_hash,
+                None,
+            )
+            .unwrap();
+
+        let edited_text = format!("Once upon a time, {section_text}");
+        let mut edited_doc = stored_doc.clone();
+        edited_doc.sections[0].blocks = vec![Block::Paragraph {
+            runs: vec![TextRun::plain(edited_text.clone())],
+        }];
+        let doc_path = storage.join(format!("{item_id}.json"));
+        std::fs::write(&doc_path, serde_json::to_string(&edited_doc).unwrap()).unwrap();
+        std::fs::remove_file(storage.join(format!("{item_id}.json.blake3"))).unwrap();
+
+        let expected_new_start = edited_text.find("brown fox").unwrap();
+
+        let results = core.reanchor_annotations(&item_id).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].annotation.id, annotation_id);
+        assert_eq!(
+            results[0].status,
+            AnchorStatus::Reanchored {
+                old_start: start,
+                new_start: expected_new_start
+            }
+        );
+        assert_eq!(results[0].annotation.start, expected_new_start);
+
+        // Persisted, not just returned in this call's result.
+        let persisted = core.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].start, expected_new_start);
+        assert_eq!(
+            persisted[0].prefix_hash,
+            anchoring::compute_prefix_hash(&edited_text, expected_new_start)
+        );
+        assert_eq!(persisted[0].quote_hash, quote_hash);
+    }
+
+    /// Complement to the persistence test above: an orphaned annotation is
+    /// left completely untouched in the store (stale `start`/hashes and
+    /// all), not deleted or silently moved.
+    #[test]
+    fn reanchor_annotations_leaves_an_orphaned_annotation_untouched_in_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let original_text = "The quick brown fox jumps over the lazy dog.";
+        let txt = dir.path().join("fox2.txt");
+        std::fs::write(&txt, original_text).unwrap();
+        let item_id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let stored_json = core.get_document(&item_id).unwrap();
+        let stored_doc: Document = serde_json::from_str(&stored_json).unwrap();
+        let section_id = stored_doc.sections[0].id.clone();
+        let section_text = anchoring::section_text(&stored_doc.sections[0]);
+        let start = section_text.find("brown fox").unwrap();
+        let len = "brown fox".len();
+        let prefix_hash = anchoring::compute_prefix_hash(&section_text, start);
+        let quote_hash = anchoring::compute_quote_hash(&section_text, start, len);
+
+        let annotation_id = core
+            .create_annotation(
+                &item_id,
+                AnnotationKind::Highlight,
+                &section_id,
+                start,
+                len,
+                prefix_hash,
+                quote_hash,
+                None,
+            )
+            .unwrap();
+
+        // Edit through the quoted span itself.
+        let edited_text = section_text.replace("brown fox", "br fox");
+        let mut edited_doc = stored_doc.clone();
+        edited_doc.sections[0].blocks = vec![Block::Paragraph {
+            runs: vec![TextRun::plain(edited_text)],
+        }];
+        let doc_path = storage.join(format!("{item_id}.json"));
+        std::fs::write(&doc_path, serde_json::to_string(&edited_doc).unwrap()).unwrap();
+        std::fs::remove_file(storage.join(format!("{item_id}.json.blake3"))).unwrap();
+
+        let results = core.reanchor_annotations(&item_id).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].annotation.id, annotation_id);
+        assert_eq!(results[0].status, AnchorStatus::Orphaned);
+
+        let persisted = core.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].start, start);
+        assert_eq!(persisted[0].prefix_hash, prefix_hash);
+        assert_eq!(persisted[0].quote_hash, quote_hash);
     }
 
     // ── Per-item encryption (ADR-014) ───────────────────────────────────
