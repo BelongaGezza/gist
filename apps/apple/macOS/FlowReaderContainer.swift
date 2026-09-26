@@ -20,6 +20,8 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
     @StateObject private var search = SearchState()
     @StateObject private var navigation = SectionNavigator()
     @StateObject private var progress: ReadingProgress
+    @StateObject private var annotationState = AnnotationState()
+    @State private var showingAnnotations = false
 
     init(itemId: String) {
         self.itemId = itemId
@@ -33,10 +35,20 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
     var body: some View {
         Group {
             if let document {
-                Layout(document: document, typography: $typography, search: search, navigation: navigation, progress: progress)
-                    .navigationTitle(document.metadata.title)
-                    .toolbar { toolbarContent(document: document) }
-                    .safeAreaInset(edge: .bottom) { progressBar }
+                Layout(
+                    document: document,
+                    typography: $typography,
+                    search: search,
+                    navigation: navigation,
+                    progress: progress,
+                    annotations: annotationState
+                )
+                .navigationTitle(document.metadata.title)
+                .toolbar { toolbarContent(document: document) }
+                .safeAreaInset(edge: .bottom) { progressBar }
+                .sheet(isPresented: $showingAnnotations) {
+                    AnnotationsSidebarView(annotations: annotationState, itemId: itemId, document: document)
+                }
             } else {
                 ProgressView("Loading…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -46,6 +58,9 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
         .foregroundStyle(themeManager.resolvedTheme.foreground)
         .task {
             document = await core.loadDocument(itemId: itemId)
+        }
+        .task {
+            await annotationState.reload(itemId: itemId, core: core)
         }
         .onChange(of: progress.fraction) { _, newValue in
             FlowScrollPositionStore.save(itemId: itemId, fraction: newValue)
@@ -85,6 +100,12 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
             }
 
             typographyMenu
+
+            Button {
+                showingAnnotations = true
+            } label: {
+                Label("Annotations", systemImage: "highlighter")
+            }
 
             HStack(spacing: 4) {
                 TextField("Find in document", text: $search.query)
