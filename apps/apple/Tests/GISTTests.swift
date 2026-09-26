@@ -418,6 +418,110 @@ final class GISTTests: XCTestCase {
         XCTAssertTrue(tags.isEmpty)
     }
 
+    // MARK: - Annotations (ADR-003)
+
+    /// Full create → list → update-note → delete round trip for the
+    /// annotation CRUD wrappers (role R4a's acceptance criterion), against a
+    /// real `GistCore`/SQLite backend -- mirrors
+    /// `testCreateListAddRemoveCollectionRoundTrips`'s shape for the
+    /// collections wrappers.
+    func testCreateListUpdateNoteDeleteAnnotationRoundTrips() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        var annotations = await client.listAnnotations(itemId: item.id)
+        XCTAssertTrue(annotations.isEmpty)
+
+        let id = await client.createAnnotation(
+            itemId: item.id,
+            kind: .highlight,
+            blockId: "section-0",
+            start: 10,
+            len: 5,
+            prefixHash: 111,
+            quoteHash: 222,
+            noteText: HighlightColor.encode(.green)
+        )
+        XCTAssertNil(client.error)
+        guard let id else {
+            XCTFail("expected createAnnotation to return a new id")
+            return
+        }
+
+        annotations = await client.listAnnotations(itemId: item.id)
+        XCTAssertEqual(annotations.count, 1)
+        guard let created = annotations.first else {
+            XCTFail("expected the created annotation to be listed")
+            return
+        }
+        XCTAssertEqual(created.id, id)
+        XCTAssertEqual(created.itemId, item.id)
+        XCTAssertEqual(created.kind, .highlight)
+        XCTAssertEqual(created.blockId, "section-0")
+        XCTAssertEqual(created.start, 10)
+        XCTAssertEqual(created.len, 5)
+        XCTAssertEqual(created.prefixHash, 111)
+        XCTAssertEqual(created.quoteHash, 222)
+        XCTAssertEqual(created.highlightColor, .green)
+
+        await client.updateAnnotationNote(id: id, noteText: HighlightColor.encode(.purple))
+        XCTAssertNil(client.error)
+
+        annotations = await client.listAnnotations(itemId: item.id)
+        guard let updated = annotations.first else {
+            XCTFail("expected the annotation to still be listed after updating its note")
+            return
+        }
+        XCTAssertEqual(updated.highlightColor, .purple, "update-note must change note_text without touching the anchor")
+        XCTAssertEqual(updated.blockId, created.blockId)
+        XCTAssertEqual(updated.start, created.start)
+        XCTAssertEqual(updated.len, created.len)
+        XCTAssertEqual(updated.prefixHash, created.prefixHash)
+        XCTAssertEqual(updated.quoteHash, created.quoteHash)
+
+        await client.deleteAnnotation(id: id)
+        XCTAssertNil(client.error)
+
+        annotations = await client.listAnnotations(itemId: item.id)
+        XCTAssertTrue(annotations.isEmpty, "annotation must be gone after delete")
+    }
+
+    /// `deleteAnnotations` (bulk) silently skips unknown ids and returns the
+    /// count actually deleted -- mirrors `removeItems`'s multi-id semantics,
+    /// tested the same way `delete_annotations_bulk_ignores_unknown_ids`
+    /// tests it Rust-side.
+    func testDeleteAnnotationsBulkIgnoresUnknownIdsAndReturnsDeletedCount() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        let firstId = await client.createAnnotation(
+            itemId: item.id, kind: .bookmark, blockId: "section-0", start: 0, len: 0,
+            prefixHash: 1, quoteHash: 2, noteText: nil
+        )
+        let secondId = await client.createAnnotation(
+            itemId: item.id, kind: .bookmark, blockId: "section-1", start: 0, len: 0,
+            prefixHash: 3, quoteHash: 4, noteText: nil
+        )
+        guard let firstId, let secondId else {
+            XCTFail("expected both bookmarks to be created")
+            return
+        }
+
+        let deletedCount = await client.deleteAnnotations(ids: [firstId, secondId, "does-not-exist"])
+        XCTAssertEqual(deletedCount, 2)
+
+        let remaining = await client.listAnnotations(itemId: item.id)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
     // MARK: - Tag-based filtering
 
     func testListAllTagsAndListItemsByTagRoundTrip() async throws {
@@ -494,6 +598,200 @@ final class GISTTests: XCTestCase {
             client.allTags.isEmpty,
             "removing the last item tagged with a name must drop it from the Filter menu's source list"
         )
+    }
+
+    // MARK: - Annotation re-anchoring (ADR-003, role R4b)
+
+    /// End-to-end: `CoreClient.reanchorAnnotations` finds a shifted quote
+    /// against a real store-backed document and *persists* the corrected
+    /// position, not just returns it -- the Swift-side mirror of
+    /// `gist-core`'s own
+    /// `reanchor_annotations_persists_a_reanchored_position_through_core`
+    /// test. There's no "edit a document's content" API, so the "edit" is
+    /// simulated the same way the Rust test does it: rewriting the stored
+    /// `<id>.json` blob directly and dropping its ADR-013 `.blake3`
+    /// sidecar (a missing sidecar is "unverified," not corrupt, per that
+    /// policy, so the rewritten blob is accepted on the next read).
+    func testReanchorAnnotationsWrapperPersistsAReanchoredPosition() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        guard let document = await client.loadDocument(itemId: item.id),
+            let section = document.sections.first
+        else {
+            XCTFail("expected loadDocument to return a document with at least one section")
+            return
+        }
+
+        let sectionText = section.concatenatedPlainText
+        let needle = "ipsum dolor sit amet"
+        guard let range = sectionText.range(of: needle) else {
+            XCTFail("expected the fixture text to contain \"\(needle)\"")
+            return
+        }
+        let start = sectionText.utf8.distance(from: sectionText.utf8.startIndex, to: range.lowerBound)
+        let len = needle.utf8.count
+        let (prefixHash, quoteHash) = AnnotationAnchoring.hashes(fullText: sectionText, start: start, len: len)
+
+        let annotationId = await client.createAnnotation(
+            itemId: item.id,
+            kind: .highlight,
+            blockId: section.id,
+            start: start,
+            len: len,
+            prefixHash: prefixHash,
+            quoteHash: quoteHash,
+            noteText: nil
+        )
+        guard let annotationId else {
+            XCTFail("expected createAnnotation to return a new id")
+            return
+        }
+
+        // Before any edit, re-anchoring must report `.valid` -- the anchor
+        // still matches exactly where it was created.
+        var results = await client.reanchorAnnotations(itemId: item.id)
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.status, .valid)
+        XCTAssertEqual(results.first?.annotation.anchorStatus, .valid)
+        XCTAssertNil(results.first?.oldStart)
+
+        // Simulate an edit: prepend text to the first block's run, shifting
+        // every later byte offset in that block (and thus in the section's
+        // concatenated text) forward -- without touching the quoted span
+        // itself.
+        let insertedPrefix = "Prefix inserted. "
+        try rewriteFirstParagraphRun(itemId: item.id) { insertedPrefix + $0 }
+
+        results = await client.reanchorAnnotations(itemId: item.id)
+        XCTAssertEqual(results.count, 1)
+        guard let result = results.first else {
+            XCTFail("expected one reanchor result")
+            return
+        }
+        XCTAssertEqual(result.annotation.id, annotationId)
+        XCTAssertEqual(result.status, .reanchored)
+        XCTAssertEqual(result.annotation.anchorStatus, .reanchored)
+        XCTAssertEqual(result.oldStart, start)
+        let expectedNewStart = start + insertedPrefix.utf8.count
+        XCTAssertEqual(result.annotation.start, expectedNewStart)
+
+        // Persisted, not just returned in this call's result.
+        let persisted = await client.listAnnotations(itemId: item.id)
+        XCTAssertEqual(persisted.count, 1)
+        XCTAssertEqual(persisted.first?.start, expectedNewStart)
+    }
+
+    /// Complement to the persistence test above: an annotation whose quoted
+    /// text can no longer be found anywhere in its block comes back
+    /// `.orphaned`, left completely untouched in the store (stale `start`
+    /// and all) -- mirrors `gist-core`'s
+    /// `reanchor_annotations_leaves_an_orphaned_annotation_untouched_in_store`.
+    /// No document edit is needed here: a `quoteHash` computed over text
+    /// that never appears in the section is orphaned on the very first
+    /// check.
+    func testReanchorAnnotationsWrapperReportsOrphanedForAnUnfindableQuote() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        guard let document = await client.loadDocument(itemId: item.id),
+            let section = document.sections.first
+        else {
+            XCTFail("expected loadDocument to return a document with at least one section")
+            return
+        }
+        let sectionText = section.concatenatedPlainText
+        XCTAssertNil(
+            sectionText.range(of: "zzz-not-in-the-fixture-zzz"),
+            "the sentinel text must not actually appear in the fixture"
+        )
+        let (prefixHash, quoteHash) = AnnotationAnchoring.hashes(
+            fullText: "zzz-not-in-the-fixture-zzz",
+            start: 0,
+            len: "zzz-not-in-the-fixture-zzz".utf8.count
+        )
+
+        let annotationId = await client.createAnnotation(
+            itemId: item.id,
+            kind: .highlight,
+            blockId: section.id,
+            start: 0,
+            len: "zzz-not-in-the-fixture-zzz".utf8.count,
+            prefixHash: prefixHash,
+            quoteHash: quoteHash,
+            noteText: nil
+        )
+        guard let annotationId else {
+            XCTFail("expected createAnnotation to return a new id")
+            return
+        }
+
+        let results = await client.reanchorAnnotations(itemId: item.id)
+        XCTAssertEqual(results.count, 1)
+        guard let result = results.first else {
+            XCTFail("expected one reanchor result")
+            return
+        }
+        XCTAssertEqual(result.annotation.id, annotationId)
+        XCTAssertEqual(result.status, .orphaned)
+        XCTAssertEqual(result.annotation.anchorStatus, .orphaned)
+        XCTAssertNil(result.oldStart)
+
+        // Left exactly as stored -- never deleted or silently moved.
+        let persisted = await client.listAnnotations(itemId: item.id)
+        XCTAssertEqual(persisted.count, 1)
+        XCTAssertEqual(persisted.first?.id, annotationId)
+        XCTAssertEqual(persisted.first?.start, 0)
+    }
+
+    /// Rewrites the stored `<itemId>.json` document blob's first section's
+    /// first block's first `TextRun.text` in place via `transform`, then
+    /// drops the ADR-013 `.blake3` sidecar so the rewritten blob is accepted
+    /// as "unverified" (not corrupt) on the next read -- the same technique
+    /// `gist-core`'s own re-anchoring tests use to simulate an edit, since
+    /// there is no "edit a document's content" API. Operates generically on
+    /// the JSON via `JSONSerialization` rather than a typed Swift model,
+    /// since `gist_model::Block`'s externally-tagged enum shape
+    /// (`{"Paragraph": {"runs": [...]}}`) is exactly what serde's default
+    /// derive produces and doesn't need a dedicated Codable type just for
+    /// this one test helper to reach into it.
+    private func rewriteFirstParagraphRun(itemId: String, transform: (String) -> String) throws {
+        let docPath = URL(fileURLWithPath: storageDir).appendingPathComponent("\(itemId).json")
+        let data = try Data(contentsOf: docPath)
+        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            var sections = json["sections"] as? [[String: Any]],
+            var firstSection = sections.first,
+            var blocks = firstSection["blocks"] as? [[String: Any]],
+            var firstBlock = blocks.first,
+            var paragraph = firstBlock["Paragraph"] as? [String: Any],
+            var runs = paragraph["runs"] as? [[String: Any]],
+            var firstRun = runs.first,
+            let originalText = firstRun["text"] as? String
+        else {
+            XCTFail("unexpected stored document JSON shape -- first block must be a Paragraph with a run")
+            return
+        }
+
+        firstRun["text"] = transform(originalText)
+        runs[0] = firstRun
+        paragraph["runs"] = runs
+        firstBlock["Paragraph"] = paragraph
+        blocks[0] = firstBlock
+        firstSection["blocks"] = blocks
+        sections[0] = firstSection
+        json["sections"] = sections
+
+        let editedData = try JSONSerialization.data(withJSONObject: json)
+        try editedData.write(to: docPath)
+        try? FileManager.default.removeItem(at: docPath.appendingPathExtension("blake3"))
     }
 }
 

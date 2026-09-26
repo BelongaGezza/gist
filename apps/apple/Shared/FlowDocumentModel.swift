@@ -58,6 +58,45 @@ struct FlowSectionVM: Decodable {
     let heading: FlowHeadingVM?
     let blocks: [FlowBlockVM]
 
+    /// Concatenation of every block's `plainText`, each joined by `"\n\n"`,
+    /// in document order. This is the byte-offset addressing space this
+    /// reading view uses for ADR-003's `(block_id, start, len)` annotation
+    /// anchor -- see `AnnotationAnchoring`'s doc comment (`AnnotationModel
+    /// .swift`) for why: `gist_model::Block` has no id of its own, only
+    /// `Section` does, so `block_id` is always a *section* id, and a
+    /// section can hold more than one block. Addressing into the section's
+    /// whole concatenated text (rather than one block's text in isolation)
+    /// gives every byte offset within a section a single, unambiguous
+    /// meaning regardless of how many blocks it contains, and lets a
+    /// highlight's `prefix_hash` context correctly span a block boundary
+    /// (e.g. a highlight starting at the very first word of a paragraph,
+    /// whose preceding context is the end of the previous block).
+    ///
+    /// **The `"\n\n"` separator is not a free client-side choice** -- it
+    /// must match `gist_core::anchoring::section_text`'s own join exactly,
+    /// byte for byte, because that Rust function is what
+    /// `Core::reanchor_annotations` slices `start..start+len` out of when
+    /// verifying/re-anchoring an annotation on load. A separator mismatch
+    /// between the two sides doesn't fail loudly -- it just makes Rust
+    /// compute `prefix_hash`/`quote_hash` against the wrong substring the
+    /// moment a section has more than one block, so every annotation past
+    /// the first block in its section silently reads as shifted or
+    /// orphaned even when nothing in the document changed. (Caught during
+    /// M3 integration, 2026-09-26: this file originally joined with a
+    /// single `"\n"`, disagreeing with `section_text`'s `"\n\n"` -- fixed to
+    /// match. If `section_text`'s separator ever changes, this must change
+    /// with it in the same commit.)
+    var concatenatedPlainText: String {
+        blocks.map(\.plainText).joined(separator: "\n\n")
+    }
+
+    /// The byte offset within `concatenatedPlainText` where block `index`'s
+    /// own text begins. Must add the same 2-byte `"\n\n"` separator length
+    /// `concatenatedPlainText` joins with -- see its doc comment.
+    func blockByteOffset(at index: Int) -> Int {
+        blocks.prefix(index).reduce(0) { $0 + $1.plainText.utf8.count + 2 }
+    }
+
     private enum CodingKeys: String, CodingKey { case id, heading, blocks }
 
     init(from decoder: Decoder) throws {
@@ -89,6 +128,11 @@ struct FlowBlockEntry: Identifiable {
     let id = UUID()
     let sectionId: String
     let block: FlowBlockVM
+    /// This block's position among its own section's `blocks` array --
+    /// needed (alongside `sectionId`) to compute its byte offset within
+    /// `FlowSectionVM.concatenatedPlainText` via `blockByteOffset(at:)`,
+    /// for annotation anchoring (see that property's doc comment).
+    let blockIndexInSection: Int
 }
 
 /// Mirrors `gist_model::Block`. Serde's default enum representation is
@@ -210,11 +254,13 @@ enum ReadingFontDesign: String, CaseIterable, Identifiable, Equatable {
 
     var id: String { rawValue }
 
+    // (R5b localisation) Read via `Text(design.label)` in the typography
+    // menu, which takes the returned value, not a literal.
     var label: String {
         switch self {
-        case .system: return "Default"
-        case .serif: return "Serif"
-        case .rounded: return "Rounded"
+        case .system: return String(localized: "Default")
+        case .serif: return String(localized: "Serif")
+        case .rounded: return String(localized: "Rounded")
         }
     }
 
@@ -237,11 +283,13 @@ enum LineSpacingOption: String, CaseIterable, Identifiable, Equatable {
 
     var id: String { rawValue }
 
+    // (R5b localisation) Read via `Text(option.label)` in the typography
+    // menu, which takes the returned value, not a literal.
     var label: String {
         switch self {
-        case .compact: return "Compact"
-        case .regular: return "Regular"
-        case .relaxed: return "Relaxed"
+        case .compact: return String(localized: "Compact")
+        case .regular: return String(localized: "Regular")
+        case .relaxed: return String(localized: "Relaxed")
         }
     }
 
@@ -334,6 +382,44 @@ enum FlowScrollPositionStore {
     }
 }
 
+/// Live annotation state for the flow view (ADR-003: highlights, notes,
+/// bookmarks), owned by `FlowReaderContainer` exactly like `SearchState`/
+/// `SectionNavigator`/`ReadingProgress` above -- a shared, mutable
+/// `ObservableObject` the container seeds via `CoreClient.listAnnotations`
+/// and that any `ReadingLayout` conformer (currently just
+/// `FlowViewSwiftUINative`) both renders from *and* mutates directly when it
+/// creates/deletes an annotation, rather than round-tripping every change
+/// back up through the container. `AnnotationsSidebarView` (the browse/
+/// export UI, presented as a sheet) observes the same instance so it always
+/// reflects whatever the reading view just did, and vice versa.
+@MainActor
+final class AnnotationState: ObservableObject {
+    @Published var items: [AnnotationVM] = []
+
+    /// Set by `AnnotationsSidebarView`'s "Jump" action to request a
+    /// scroll-to. Mirrors `SectionNavigator.pendingSectionId`'s "container-
+    /// owned shared state; the hosting layout observes and reacts" idiom,
+    /// just keyed on an annotation id instead of a section id.
+    @Published var pendingJumpAnnotationId: String?
+
+    /// Refetches `items`, replacing whatever was there, via
+    /// `core.reanchorAnnotations(itemId:)` rather than the plain
+    /// `listAnnotations` -- this re-verifies every annotation's anchor
+    /// against the document's *current* content (ADR-003) before the
+    /// sidebar/flow view render, silently correcting a shifted anchor
+    /// (`.reanchored`) and stamping `AnnotationVM.anchorStatus` so an
+    /// `.orphaned` one can show a visible indicator (see
+    /// `AnnotationsSidebarView`). Used both for the initial load and any
+    /// time a caller would rather re-derive the full list than reason about
+    /// a local edit (e.g. after an update-note round trip) -- re-running
+    /// re-anchoring on every reload is deliberately cheap/idempotent (an
+    /// already-`.valid` annotation just re-verifies as `.valid`), not
+    /// gated behind "only on first open."
+    func reload(itemId: String, core: CoreClient) async {
+        items = await core.reanchorAnnotations(itemId: itemId).map(\.annotation)
+    }
+}
+
 // ── ReadingLayout protocol ───────────────────────────────────────────────────
 
 /// Common contract for a reading-mode implementation that renders a parsed
@@ -361,6 +447,7 @@ protocol ReadingLayout: View {
         typography: Binding<TypographySettings>,
         search: SearchState,
         navigation: SectionNavigator,
-        progress: ReadingProgress
+        progress: ReadingProgress,
+        annotations: AnnotationState
     )
 }

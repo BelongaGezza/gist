@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Lower-cased file extension with no leading dot (empty string if none).
 /// Shared by every import path that needs to name a sandboxed copy of the
@@ -359,14 +359,13 @@ fn sweep_dir(
 
 // ── Parse error (shared across image/doc parsers) ──────────────────────────
 
-/// Errors returned by format-specific parsers and pre-processors.
-#[derive(Debug, thiserror::Error)]
-pub enum ParseError {
-    #[error("invalid input: {0}")]
-    InvalidInput(String),
-    #[error("resource limit exceeded")]
-    ResourceLimitExceeded,
-}
+/// Re-exported from `gist-model`, mirroring the `ParseLimits` re-export
+/// below — moved there 2026-09-26 (role R2b) so that `gist-core` can call
+/// `gist_imageprep::prepare_image` directly (see `Core::import_image_with_ocr`)
+/// without a `gist-core -> gist-imageprep -> gist-core` dependency cycle:
+/// `gist-imageprep` needs this type for its own `Result`, and must not
+/// depend back on `gist-core` to get it.
+pub use gist_model::ParseError;
 
 // ── OCR types ──────────────────────────────────────────────────────────────
 
@@ -393,6 +392,17 @@ pub trait OcrEngine: Send + Sync {
     /// `image_bytes` is a PNG-encoded, pre-processed page image.
     /// Return `None` to signal cancellation.
     fn recognize_page(&self, page_index: u32, image_bytes: Vec<u8>) -> Option<OcrPageResult>;
+}
+
+/// Result of a multi-page OCR import ([`Core::import_image_with_ocr`]): the
+/// imported document's id plus each page's OCR confidence score, in page
+/// order (`ocrConfidence[]`) — so a review screen (M3 role `R8`) can
+/// highlight low-confidence pages without a second round trip through
+/// [`Core::get_document`].
+#[derive(Debug, Clone)]
+pub struct OcrImportResult {
+    pub item_id: String,
+    pub page_confidences: Vec<f32>,
 }
 
 // ── Import error ────────────────────────────────────────────────────────────
@@ -460,6 +470,222 @@ pub use gist_model::ParseLimits;
 /// `FfiAnnotationKind` from these without adding a redundant direct
 /// dependency, mirroring the `ParseLimits` re-export above.
 pub use gist_model::{Annotation, AnnotationKind};
+
+/// ADR-003 annotation re-anchoring: verifying an [`Annotation`]'s
+/// `(prefix_hash, quote_hash)` against a document's *current* text on load,
+/// re-anchoring on a shift, and orphaning when the quoted text can no longer
+/// be found. This was deliberately left out of the 2026-09-24 annotations
+/// backend scaffold (commit `39c0942`) — see `gist_model::Annotation`'s doc
+/// comment — and is implemented here rather than in `gist-store` (which only
+/// persists whatever anchor it's given) or `gist-model` (I/O-free, and
+/// re-anchoring needs a whole assembled [`gist_model::Document`] plus the
+/// stored `Annotation` rows together, which only `gist-core` sees).
+pub mod anchoring {
+    use gist_model::{Annotation, Document, Section};
+
+    /// Number of characters of context immediately before `start` that
+    /// ADR-003's `prefix_hash` covers — enough to detect a shift without
+    /// being so large that an unrelated distant edit spuriously changes it.
+    pub const PREFIX_CONTEXT_CHARS: usize = 30;
+
+    /// FNV-1a (64-bit) over raw bytes — the hash function ADR-003 specifies
+    /// for both `prefix_hash` and `quote_hash`. This is the one canonical
+    /// implementation in the workspace; any future caller that *creates*
+    /// annotations (e.g. a Swift reading view, via `Core::create_annotation`)
+    /// must hash identically to this for re-anchoring to ever find a
+    /// `Valid`/`Reanchored` match instead of spuriously orphaning everything.
+    pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
+        const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut hash = OFFSET_BASIS;
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(PRIME);
+        }
+        hash
+    }
+
+    /// The plain text ADR-003 anchors against for a given `block_id`.
+    ///
+    /// `gist_model::Block` (unlike `Section`) carries no stable id of its
+    /// own — only `Section::id` is stable across a parse (see
+    /// `gist-parse-txt`'s `"s0"`, `gist-parse-epub`'s `"s{spine_index}"`,
+    /// `gist-parse-docx`'s single `"s0"`) — so an `Annotation::block_id`
+    /// anchors to a whole `Section`, not one sub-block within it. "The
+    /// block's plain text" for hashing purposes is that section's blocks'
+    /// `plain_text()` joined with `"\n\n"`, the same separator
+    /// `gist-parse-txt` splits paragraphs on, so a freshly-imported
+    /// document's section text is close to the original source bytes.
+    pub fn section_text(section: &Section) -> String {
+        section
+            .blocks
+            .iter()
+            .map(|b| b.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Find the section addressed by `block_id`, if the document still has one.
+    pub fn find_section<'a>(document: &'a Document, block_id: &str) -> Option<&'a Section> {
+        document.sections.iter().find(|s| s.id == block_id)
+    }
+
+    /// The up-to-[`PREFIX_CONTEXT_CHARS`]-character slice of `text`
+    /// immediately preceding byte offset `start`, snapped inward to char
+    /// boundaries so this never panics on a stale/out-of-range offset.
+    fn prefix_slice(text: &str, start: usize) -> &str {
+        let mut boundary = start.min(text.len());
+        while boundary > 0 && !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let before = &text[..boundary];
+        let char_count = before.chars().count();
+        if char_count <= PREFIX_CONTEXT_CHARS {
+            before
+        } else {
+            let skip = char_count - PREFIX_CONTEXT_CHARS;
+            let byte_offset = before.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
+            &before[byte_offset..]
+        }
+    }
+
+    /// The `[start, start+len)` byte slice of `text`, clamped to `text`'s
+    /// bounds and snapped inward to the nearest char boundaries so this
+    /// never panics on a stale/out-of-range anchor.
+    fn quote_slice(text: &str, start: usize, len: usize) -> &str {
+        let mut lo = start.min(text.len());
+        while lo > 0 && !text.is_char_boundary(lo) {
+            lo -= 1;
+        }
+        let mut hi = start.saturating_add(len).min(text.len());
+        while hi < text.len() && !text.is_char_boundary(hi) {
+            hi += 1;
+        }
+        if hi < lo {
+            hi = lo;
+        }
+        &text[lo..hi]
+    }
+
+    /// The `prefix_hash` ADR-003 defines for an anchor at `start` within `text`.
+    pub fn compute_prefix_hash(text: &str, start: usize) -> u64 {
+        fnv1a_hash(prefix_slice(text, start).as_bytes())
+    }
+
+    /// The `quote_hash` ADR-003 defines for the `len`-byte span at `start`
+    /// within `text`.
+    pub fn compute_quote_hash(text: &str, start: usize, len: usize) -> u64 {
+        fnv1a_hash(quote_slice(text, start, len).as_bytes())
+    }
+
+    /// Outcome of checking (and possibly re-anchoring) one [`Annotation`]
+    /// against a document's current text.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum AnchorStatus {
+        /// `prefix_hash` and `quote_hash` both matched at the stored
+        /// `start` — nothing about this annotation's position changed.
+        Valid,
+        /// The stored anchor no longer matched in place, but a `quote_hash`
+        /// match was found elsewhere within the same block (ADR-003's
+        /// "text shifted" case) — the annotation's `start`/`prefix_hash`
+        /// were rewritten to the new position.
+        Reanchored { old_start: usize, new_start: usize },
+        /// Neither the original position nor a search for `quote_hash`
+        /// within the block found the annotated text — the quoted span was
+        /// likely edited through, or the whole block was removed. Left
+        /// exactly as stored (never deleted or silently moved) so a reading
+        /// view can decide how to present it instead of losing user data.
+        Orphaned,
+    }
+
+    impl AnchorStatus {
+        pub fn is_orphaned(&self) -> bool {
+            matches!(self, AnchorStatus::Orphaned)
+        }
+    }
+
+    /// Verify one annotation against `document` and return its status plus
+    /// a possibly-updated copy: only `start`/`prefix_hash` ever change, and
+    /// only when the status is `Reanchored`; `Valid`/`Orphaned` return an
+    /// unmodified clone. Pure — never touches storage;
+    /// [`super::Core::reanchor_annotations`] persists the result.
+    pub fn reanchor(document: &Document, annotation: &Annotation) -> (AnchorStatus, Annotation) {
+        let Some(section) = find_section(document, &annotation.block_id) else {
+            return (AnchorStatus::Orphaned, annotation.clone());
+        };
+        let text = section_text(section);
+
+        let current_prefix = compute_prefix_hash(&text, annotation.start);
+        let current_quote = compute_quote_hash(&text, annotation.start, annotation.len);
+
+        if current_prefix == annotation.prefix_hash && current_quote == annotation.quote_hash {
+            return (AnchorStatus::Valid, annotation.clone());
+        }
+
+        // The anchor didn't verify in place (per ADR-003, this is triggered
+        // by a `prefix_hash` mismatch; a `quote_hash`-only mismatch with an
+        // unchanged prefix is treated the same way, since either case means
+        // "don't trust `start` any more") — search the block for a position
+        // whose quote_hash agrees.
+        if let Some(new_start) = find_quote_in_text(&text, annotation.len, annotation.quote_hash) {
+            let mut updated = annotation.clone();
+            updated.start = new_start;
+            updated.prefix_hash = compute_prefix_hash(&text, new_start);
+            // quote_hash is unchanged by definition: it's what we matched on.
+            return (
+                AnchorStatus::Reanchored {
+                    old_start: annotation.start,
+                    new_start,
+                },
+                updated,
+            );
+        }
+
+        (AnchorStatus::Orphaned, annotation.clone())
+    }
+
+    /// Scan every char-boundary-aligned, `len`-byte-long span of `text` for
+    /// one whose FNV-1a hash equals `quote_hash`, returning the first
+    /// (leftmost) match's byte offset.
+    ///
+    /// `len == 0` (a `Bookmark`'s point anchor) always returns `None`
+    /// rather than matching the first empty slice it finds: an empty span's
+    /// hash carries no information about *where* in the block it used to
+    /// point, so there is no principled position to re-anchor a bookmark to
+    /// once its context has shifted — orphaning is the honest outcome.
+    fn find_quote_in_text(text: &str, len: usize, quote_hash: u64) -> Option<usize> {
+        if len == 0 {
+            return None;
+        }
+        for (start, _) in text.char_indices() {
+            let end = start + len;
+            if end > text.len() {
+                break;
+            }
+            if !text.is_char_boundary(end) {
+                continue;
+            }
+            if fnv1a_hash(&text.as_bytes()[start..end]) == quote_hash {
+                return Some(start);
+            }
+        }
+        None
+    }
+}
+
+/// Re-exported so callers can write `gist_core::AnchorStatus` alongside
+/// `gist_core::Annotation` without reaching into the `anchoring` module
+/// directly — mirrors this file's other top-level re-exports.
+pub use anchoring::AnchorStatus;
+
+/// Per-annotation result of [`Core::reanchor_annotations`]: the annotation's
+/// state after the check (already persisted if `status` is `Reanchored`)
+/// paired with what happened.
+#[derive(Debug, Clone)]
+pub struct AnnotationAnchorResult {
+    pub annotation: Annotation,
+    pub status: AnchorStatus,
+}
 
 // ── Encryption at rest (ADR-011) ─────────────────────────────────────────────
 
@@ -1195,6 +1421,53 @@ impl Core {
         Ok(self.store.delete_annotations(ids)?)
     }
 
+    /// Verify every annotation on `item_id` against the document's current
+    /// text and re-anchor/orphan as needed (ADR-003) — call this on load,
+    /// before rendering a reading view's highlights/notes/bookmarks, so
+    /// annotations survive a re-import or content edit since they were
+    /// created instead of silently pointing at the wrong (or now-missing)
+    /// text.
+    ///
+    /// For each annotation: `AnchorStatus::Valid` writes nothing (the
+    /// anchor already matches); `AnchorStatus::Reanchored` rewrites the
+    /// stored `start`/`prefix_hash` via
+    /// `gist_store::Store::update_annotation_anchor` before returning, so a
+    /// later call doesn't need to search again; `AnchorStatus::Orphaned`
+    /// writes nothing — the annotation is left exactly as stored (never
+    /// deleted or silently moved), only reported, so the caller decides how
+    /// to present it. See `anchoring::reanchor` for the pure per-annotation
+    /// logic this wraps.
+    pub fn reanchor_annotations(
+        &self,
+        item_id: &str,
+    ) -> Result<Vec<AnnotationAnchorResult>, CoreError> {
+        let document = self
+            .store
+            .get_item(item_id)?
+            .ok_or_else(|| CoreError::NotFound(item_id.to_owned()))?;
+        let annotations = self.store.list_annotations_for_item(item_id)?;
+
+        let mut results = Vec::with_capacity(annotations.len());
+        for annotation in annotations {
+            let (status, updated) = anchoring::reanchor(&document, &annotation);
+            if let AnchorStatus::Reanchored { .. } = status {
+                self.store.update_annotation_anchor(
+                    &updated.id,
+                    &updated.block_id,
+                    updated.start,
+                    updated.len,
+                    updated.prefix_hash,
+                    updated.quote_hash,
+                )?;
+            }
+            results.push(AnnotationAnchorResult {
+                annotation: updated,
+                status,
+            });
+        }
+        Ok(results)
+    }
+
     // ── Per-item encryption (ADR-014) ──────────────────────────────────────
 
     /// Retroactively encrypt one or more already-imported items at rest, on
@@ -1239,30 +1512,150 @@ impl Core {
             .collect()
     }
 
-    /// Import a single image file and run OCR using the provided engine.
+    /// Import one or more page images (one raw file per page — the natural
+    /// shape of a multi-page phone-camera/scanner capture) and run OCR using
+    /// the provided engine, producing a single multi-section document.
     ///
-    /// Phase M3 stub — the full pipeline (multi-page PDF tiling, heuristic
-    /// de-skew, layout analysis) is deferred.  For now the method signature
-    /// is stable so the FFI layer and tests can be wired up.
+    /// Pipeline (mirrors `import_file`'s shape — type sniff -> dispatch ->
+    /// normalise -> persist -> index — with OCR standing in for a parser):
     ///
-    /// Planned pipeline:
-    /// 1. Read raw bytes from `path`.
-    /// 2. Pre-process with `gist_imageprep::prepare_image` (greyscale + resize).
-    /// 3. Call `engine.recognize_page` for each page image.
-    /// 4. Assemble a [`gist_model::Document`] from the OCR text.
-    /// 5. Insert into the store and return the document.
+    /// 1. **Addendum 2 (`docs/adr/009-ocr-callback-interface.md`, closes
+    ///    `[A7]`):** for every page's file, check its on-disk byte size
+    ///    against `ParseLimits::max_bytes` *before* that page's bytes are
+    ///    ever read into memory — the same `fs::metadata`-before-`fs::read`
+    ///    gate `import_file`/`import_txt` already enforce, applied once per
+    ///    page since each page is an independent raw file. This is a
+    ///    distinct, earlier check than step 2's: it bounds raw byte count
+    ///    before any read at all, where `prepare_image`'s own check bounds
+    ///    decoded pixel count on bytes already in memory.
+    /// 2. Pre-process each page with [`gist_imageprep::prepare_image`]
+    ///    (declared-dimension check, decode, greyscale, resize, PNG
+    ///    re-encode — see `N4` for the decode-before-check fix that lives
+    ///    there).
+    /// 3. Call `engine.recognize_page` once per page, sequentially, in page
+    ///    order (ADR-009's calling convention: sequential, not parallel — a
+    ///    `None` result signals cancellation and aborts the whole import
+    ///    before anything is written to the store, matching `import_file`'s/
+    ///    `import_url`'s "no partial data on cancel" behavior).
+    /// 4. Assemble one [`gist_model::Section`] per page (a single
+    ///    `Paragraph` block holding that page's recognised text) and copy
+    ///    every page's *raw* bytes into ADR-006's sandboxed `originals/`
+    ///    directory as one bundled, content-addressed copy (see the doc
+    ///    comment on the bundling below for why one bundle rather than `N`
+    ///    separate copies).
+    /// 5. Insert into the store and return the new item's id plus each
+    ///    page's OCR confidence, in page order.
+    ///
+    /// `gist-core` depends on `gist-imageprep` for step 2 (not the other way
+    /// around, as it was before this landed) — see the `ParseError`
+    /// re-export above for why that direction is the one that avoids a
+    /// dependency cycle.
     pub fn import_image_with_ocr(
         &self,
-        _path: &str,
-        _engine: &dyn OcrEngine,
-    ) -> Result<gist_model::Document, ImportError> {
-        todo!("OCR import pipeline — Phase M3")
+        paths: &[PathBuf],
+        engine: &dyn OcrEngine,
+    ) -> Result<OcrImportResult, ImportError> {
+        let limits = ParseLimits::default();
+
+        if paths.is_empty() {
+            return Err(ImportError::UnsupportedType(
+                "no pages provided for OCR import".to_string(),
+            ));
+        }
+
+        // Step 1: per-page byte-size cap, checked before that page's bytes
+        // are ever read into memory (Addendum 2).
+        let mut page_bytes: Vec<Vec<u8>> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let declared_len = std::fs::metadata(path)?.len() as usize;
+            if declared_len > limits.max_bytes {
+                return Err(ImportError::ResourceLimitExceeded {
+                    limit: format!("max_bytes={}", limits.max_bytes),
+                    attempted: declared_len,
+                });
+            }
+            page_bytes.push(std::fs::read(path)?);
+        }
+
+        // Steps 2-3: pre-process + OCR, sequentially, in page order.
+        let mut sections = Vec::with_capacity(page_bytes.len());
+        let mut page_confidences = Vec::with_capacity(page_bytes.len());
+        for (i, raw) in page_bytes.iter().enumerate() {
+            let page_index = i as u32;
+
+            let prepared = gist_imageprep::prepare_image(page_index, raw, &limits)
+                .map_err(|e| ImportError::ImagePrep(e.to_string()))?;
+
+            let Some(result) = engine.recognize_page(page_index, prepared.png_bytes) else {
+                return Err(ImportError::Cancelled);
+            };
+
+            page_confidences.push(result.confidence);
+            sections.push(gist_model::Section {
+                id: format!("page-{page_index}"),
+                heading: None,
+                blocks: vec![gist_model::Block::Paragraph {
+                    runs: vec![gist_model::TextRun::plain(result.text)],
+                }],
+            });
+        }
+
+        // Step 4: copy-on-import (ADR-006). A multi-page OCR import has N
+        // raw source files, not the single file every other importer's
+        // `store_original_copy`/`source_copy_ref` pairing assumes. Rather
+        // than extend the single-value `source_copy_ref`/`source_copy_path`
+        // column to a list — a `gist-store` schema change, and one
+        // `remove_items` would need to learn to delete N paths for instead
+        // of one, both out of scope for this pipeline-wiring pass — every
+        // page's raw bytes are bundled into one length-prefixed blob and
+        // stored as a single content-addressed copy, exactly like every
+        // other importer's one `store_original_copy` call. This preserves
+        // ADR-006's guarantee (removal only ever deletes GIST's own
+        // sandboxed copy, never a file at the user's real path) with zero
+        // `gist-store` changes. Nothing reads an original copy's content
+        // back today regardless of import type (see `A4`/`A5` in the
+        // security register), so a provenance-only bundle format nothing
+        // ever decodes is consistent with how `source_copy_ref` is already
+        // used for every other import path.
+        let mut bundle = Vec::new();
+        for raw in &page_bytes {
+            bundle.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+            bundle.extend_from_slice(raw);
+        }
+        let copy_path = self.store.store_original_copy(&bundle, "ocrbundle")?;
+
+        let stem = paths[0]
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("scanned document");
+
+        let mut metadata = gist_model::Metadata::minimal(stem);
+        metadata.source_type = "ocr".to_string();
+        metadata.source_ref = Some(
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        metadata.source_copy_ref = Some(copy_path);
+
+        let doc = gist_model::Document::new(metadata, sections);
+        let id = doc.id.clone();
+        self.store.insert_item(&doc)?;
+
+        tracing::debug!("gist-core: imported OCR document as {}", id);
+        Ok(OcrImportResult {
+            item_id: id,
+            page_confidences,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gist_model::{Block, Document, Metadata, Section, TextRun};
 
     struct AlwaysCancelObserver;
     impl ImportObserver for AlwaysCancelObserver {
@@ -1747,6 +2140,317 @@ mod tests {
         let remaining = core.list_annotations_for_item(&item_id).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, id_b);
+    }
+
+    // ── Annotation re-anchoring (ADR-003) ────────────────────────────────
+
+    /// A `Document` with a single section `"s0"` holding a single
+    /// `Paragraph` block whose text is exactly `text` — so
+    /// `anchoring::section_text` round-trips back to `text` with no extra
+    /// separators, keeping byte offsets in these tests easy to reason about.
+    fn one_section_document(text: &str) -> Document {
+        let section = Section {
+            id: "s0".to_string(),
+            heading: None,
+            blocks: vec![Block::Paragraph {
+                runs: vec![TextRun::plain(text)],
+            }],
+        };
+        Document::new(Metadata::minimal("anchoring test"), vec![section])
+    }
+
+    fn highlight_annotation(block_id: &str, start: usize, len: usize, text: &str) -> Annotation {
+        Annotation {
+            id: "test-annotation".to_string(),
+            item_id: "test-item".to_string(),
+            kind: AnnotationKind::Highlight,
+            block_id: block_id.to_string(),
+            start,
+            len,
+            prefix_hash: anchoring::compute_prefix_hash(text, start),
+            quote_hash: anchoring::compute_quote_hash(text, start, len),
+            note_text: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn reanchor_returns_valid_when_text_is_unchanged() {
+        let text = "The quick brown fox jumps over the lazy dog.";
+        let doc = one_section_document(text);
+        let start = text.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), text);
+
+        let (status, updated) = anchoring::reanchor(&doc, &annotation);
+        assert_eq!(status, AnchorStatus::Valid);
+        assert_eq!(updated.start, start);
+        assert_eq!(updated.prefix_hash, annotation.prefix_hash);
+        assert_eq!(updated.quote_hash, annotation.quote_hash);
+    }
+
+    #[test]
+    fn reanchor_finds_a_shifted_quote_and_updates_start_and_prefix_hash() {
+        let original = "The quick brown fox jumps over the lazy dog.";
+        let start = original.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), original);
+
+        // Shift: insert new text right before the quote, inside the
+        // prefix-hash window, so "brown fox" itself is byte-identical but
+        // moves further along and its preceding context changes.
+        let shifted = "The extremely quick brown fox jumps over the lazy dog.";
+        let shifted_doc = one_section_document(shifted);
+        let expected_new_start = shifted.find("brown fox").unwrap();
+        assert_ne!(
+            expected_new_start, start,
+            "sanity: the shift must actually move it"
+        );
+
+        let (status, updated) = anchoring::reanchor(&shifted_doc, &annotation);
+        assert_eq!(
+            status,
+            AnchorStatus::Reanchored {
+                old_start: start,
+                new_start: expected_new_start
+            }
+        );
+        assert_eq!(updated.start, expected_new_start);
+        assert_eq!(
+            updated.quote_hash, annotation.quote_hash,
+            "quote text itself didn't change"
+        );
+        assert_eq!(
+            updated.prefix_hash,
+            anchoring::compute_prefix_hash(shifted, expected_new_start)
+        );
+        assert_ne!(
+            updated.prefix_hash, annotation.prefix_hash,
+            "context before the quote did change"
+        );
+    }
+
+    #[test]
+    fn reanchor_finds_the_quote_after_surrounding_text_is_deleted() {
+        let original =
+            "Once upon a time, the quick brown fox jumps over the lazy dog, happily ever after.";
+        let start = original.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), original);
+
+        // Delete text that surrounds, but never touches, the quote itself.
+        let edited = "The quick brown fox jumps over the lazy dog.";
+        let edited_doc = one_section_document(edited);
+        let expected_new_start = edited.find("brown fox").unwrap();
+        assert_ne!(expected_new_start, start);
+
+        let (status, updated) = anchoring::reanchor(&edited_doc, &annotation);
+        assert_eq!(
+            status,
+            AnchorStatus::Reanchored {
+                old_start: start,
+                new_start: expected_new_start
+            }
+        );
+        assert_eq!(updated.start, expected_new_start);
+    }
+
+    #[test]
+    fn reanchor_orphans_when_the_quoted_text_itself_is_edited() {
+        let original = "The quick brown fox jumps over the lazy dog.";
+        let start = original.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), original);
+
+        // Delete through part of the quoted span itself — "brown fox" no
+        // longer exists anywhere in the text.
+        let edited = "The quick br fox jumps over the lazy dog.";
+        assert!(!edited.contains("brown fox"));
+        let edited_doc = one_section_document(edited);
+
+        let (status, updated) = anchoring::reanchor(&edited_doc, &annotation);
+        assert_eq!(status, AnchorStatus::Orphaned);
+        // Orphaning never mutates the stored anchor.
+        assert_eq!(updated.start, annotation.start);
+        assert_eq!(updated.prefix_hash, annotation.prefix_hash);
+        assert_eq!(updated.quote_hash, annotation.quote_hash);
+    }
+
+    #[test]
+    fn reanchor_orphans_when_the_block_no_longer_exists() {
+        let original = "The quick brown fox jumps over the lazy dog.";
+        let start = original.find("brown fox").unwrap();
+        let annotation = highlight_annotation("s0", start, "brown fox".len(), original);
+
+        // A document with no section "s0" at all — e.g. the item was
+        // reparsed into a completely different structure.
+        let mut other_doc = one_section_document("Something completely different.");
+        other_doc.sections[0].id = "s99".to_string();
+
+        let (status, updated) = anchoring::reanchor(&other_doc, &annotation);
+        assert_eq!(status, AnchorStatus::Orphaned);
+        assert_eq!(updated.start, annotation.start);
+    }
+
+    #[test]
+    fn reanchor_bookmark_point_anchor_orphans_rather_than_guessing_a_new_position() {
+        let original = "The quick brown fox jumps over the lazy dog.";
+        let start = original.find("fox").unwrap();
+        let annotation = Annotation {
+            id: "bookmark-1".to_string(),
+            item_id: "test-item".to_string(),
+            kind: AnnotationKind::Bookmark,
+            block_id: "s0".to_string(),
+            start,
+            len: 0,
+            prefix_hash: anchoring::compute_prefix_hash(original, start),
+            quote_hash: anchoring::compute_quote_hash(original, start, 0),
+            note_text: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let shifted = "Once upon a time, the quick brown fox jumps over the lazy dog.";
+        let shifted_doc = one_section_document(shifted);
+
+        let (status, updated) = anchoring::reanchor(&shifted_doc, &annotation);
+        assert_eq!(status, AnchorStatus::Orphaned);
+        assert_eq!(updated.start, start);
+    }
+
+    /// End-to-end: `Core::reanchor_annotations` finds a shifted quote
+    /// against a real store-backed `Document` and *persists* the corrected
+    /// position, not just returns it. There's deliberately no "update a
+    /// document's content" API yet, so the "edit" here is simulated by
+    /// rewriting the stored `<id>.json` blob directly and dropping its
+    /// ADR-013 `.blake3` sidecar — `verify_checksum`'s documented
+    /// backfill/legacy policy treats a missing sidecar as "unverified," not
+    /// corrupt, so the rewritten blob is accepted on the next read.
+    #[test]
+    fn reanchor_annotations_persists_a_reanchored_position_through_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let original_text = "The quick brown fox jumps over the lazy dog.";
+        let txt = dir.path().join("fox.txt");
+        std::fs::write(&txt, original_text).unwrap();
+        let item_id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let stored_json = core.get_document(&item_id).unwrap();
+        let stored_doc: Document = serde_json::from_str(&stored_json).unwrap();
+        assert_eq!(stored_doc.sections.len(), 1);
+        let section_id = stored_doc.sections[0].id.clone();
+        let section_text = anchoring::section_text(&stored_doc.sections[0]);
+        let start = section_text.find("brown fox").unwrap();
+        let len = "brown fox".len();
+        let prefix_hash = anchoring::compute_prefix_hash(&section_text, start);
+        let quote_hash = anchoring::compute_quote_hash(&section_text, start, len);
+
+        let annotation_id = core
+            .create_annotation(
+                &item_id,
+                AnnotationKind::Highlight,
+                &section_id,
+                start,
+                len,
+                prefix_hash,
+                quote_hash,
+                None,
+            )
+            .unwrap();
+
+        let edited_text = format!("Once upon a time, {section_text}");
+        let mut edited_doc = stored_doc.clone();
+        edited_doc.sections[0].blocks = vec![Block::Paragraph {
+            runs: vec![TextRun::plain(edited_text.clone())],
+        }];
+        let doc_path = storage.join(format!("{item_id}.json"));
+        std::fs::write(&doc_path, serde_json::to_string(&edited_doc).unwrap()).unwrap();
+        std::fs::remove_file(storage.join(format!("{item_id}.json.blake3"))).unwrap();
+
+        let expected_new_start = edited_text.find("brown fox").unwrap();
+
+        let results = core.reanchor_annotations(&item_id).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].annotation.id, annotation_id);
+        assert_eq!(
+            results[0].status,
+            AnchorStatus::Reanchored {
+                old_start: start,
+                new_start: expected_new_start
+            }
+        );
+        assert_eq!(results[0].annotation.start, expected_new_start);
+
+        // Persisted, not just returned in this call's result.
+        let persisted = core.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].start, expected_new_start);
+        assert_eq!(
+            persisted[0].prefix_hash,
+            anchoring::compute_prefix_hash(&edited_text, expected_new_start)
+        );
+        assert_eq!(persisted[0].quote_hash, quote_hash);
+    }
+
+    /// Complement to the persistence test above: an orphaned annotation is
+    /// left completely untouched in the store (stale `start`/hashes and
+    /// all), not deleted or silently moved.
+    #[test]
+    fn reanchor_annotations_leaves_an_orphaned_annotation_untouched_in_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let original_text = "The quick brown fox jumps over the lazy dog.";
+        let txt = dir.path().join("fox2.txt");
+        std::fs::write(&txt, original_text).unwrap();
+        let item_id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let stored_json = core.get_document(&item_id).unwrap();
+        let stored_doc: Document = serde_json::from_str(&stored_json).unwrap();
+        let section_id = stored_doc.sections[0].id.clone();
+        let section_text = anchoring::section_text(&stored_doc.sections[0]);
+        let start = section_text.find("brown fox").unwrap();
+        let len = "brown fox".len();
+        let prefix_hash = anchoring::compute_prefix_hash(&section_text, start);
+        let quote_hash = anchoring::compute_quote_hash(&section_text, start, len);
+
+        let annotation_id = core
+            .create_annotation(
+                &item_id,
+                AnnotationKind::Highlight,
+                &section_id,
+                start,
+                len,
+                prefix_hash,
+                quote_hash,
+                None,
+            )
+            .unwrap();
+
+        // Edit through the quoted span itself.
+        let edited_text = section_text.replace("brown fox", "br fox");
+        let mut edited_doc = stored_doc.clone();
+        edited_doc.sections[0].blocks = vec![Block::Paragraph {
+            runs: vec![TextRun::plain(edited_text)],
+        }];
+        let doc_path = storage.join(format!("{item_id}.json"));
+        std::fs::write(&doc_path, serde_json::to_string(&edited_doc).unwrap()).unwrap();
+        std::fs::remove_file(storage.join(format!("{item_id}.json.blake3"))).unwrap();
+
+        let results = core.reanchor_annotations(&item_id).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].annotation.id, annotation_id);
+        assert_eq!(results[0].status, AnchorStatus::Orphaned);
+
+        let persisted = core.list_annotations_for_item(&item_id).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].start, start);
+        assert_eq!(persisted[0].prefix_hash, prefix_hash);
+        assert_eq!(persisted[0].quote_hash, quote_hash);
     }
 
     // ── Per-item encryption (ADR-014) ───────────────────────────────────
@@ -3054,5 +3758,230 @@ mod tests {
             results[1].result,
             Err(gist_store::StoreError::NotFound(_))
         ));
+    }
+
+    // ── OCR pipeline (R2b, 2026-09-26) ──────────────────────────────────────
+
+    /// Writes a tiny, valid PNG to `path` (a real, fully-decodable image —
+    /// not the header-only "PNG bomb" shape gist-imageprep's own N4 tests
+    /// use, since these tests exercise the *whole* pipeline, including a
+    /// real `prepare_image` decode).
+    fn write_test_png(path: &std::path::Path, width: u32, height: u32) {
+        use image::{ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(width, height, |_, _| Rgb([10, 20, 30]));
+        image::DynamicImage::from(img)
+            .save(path)
+            .expect("test helper: PNG write failed");
+    }
+
+    /// Addendum 2 (`docs/adr/009-ocr-callback-interface.md`, closes `[A7]`):
+    /// a page file whose on-disk size exceeds `ParseLimits::max_bytes` must
+    /// be rejected with `ImportError::ResourceLimitExceeded` — not a panic,
+    /// not a generic IO error — and rejected *before* its bytes are ever
+    /// read, which this test proves by using an engine that panics if it is
+    /// ever called at all (the pipeline must never get that far). A sparse
+    /// file (`File::set_len`) gives the file a declared size over the limit
+    /// without materializing real content, exactly as the addendum's own
+    /// test guidance suggests.
+    #[test]
+    fn import_image_with_ocr_rejects_oversized_page_before_reading_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let limits = ParseLimits::default();
+        let oversized = dir.path().join("huge_page.png");
+        {
+            let file = std::fs::File::create(&oversized).unwrap();
+            file.set_len(limits.max_bytes as u64 + 1).unwrap();
+        }
+
+        struct PanicIfCalledEngine;
+        impl OcrEngine for PanicIfCalledEngine {
+            fn recognize_page(
+                &self,
+                _page_index: u32,
+                _image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                panic!(
+                    "recognize_page must never be called for a page that fails \
+                     the pre-read byte-size gate"
+                );
+            }
+        }
+
+        let err = core
+            .import_image_with_ocr(&[oversized], &PanicIfCalledEngine)
+            .unwrap_err();
+        assert!(
+            matches!(err, ImportError::ResourceLimitExceeded { .. }),
+            "expected ResourceLimitExceeded, got {err:?}"
+        );
+    }
+
+    /// The byte-size gate applies per page, not only to the first one — a
+    /// valid first page must not let a later oversized page slip through.
+    #[test]
+    fn import_image_with_ocr_rejects_oversized_second_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let limits = ParseLimits::default();
+        let page0 = dir.path().join("page0.png");
+        write_test_png(&page0, 4, 4);
+        let page1 = dir.path().join("page1_huge.png");
+        {
+            let file = std::fs::File::create(&page1).unwrap();
+            file.set_len(limits.max_bytes as u64 + 1).unwrap();
+        }
+
+        struct PanicIfCalledEngine;
+        impl OcrEngine for PanicIfCalledEngine {
+            fn recognize_page(
+                &self,
+                _page_index: u32,
+                _image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                panic!("no page's OCR should run once any page fails the byte-size gate");
+            }
+        }
+
+        let err = core
+            .import_image_with_ocr(&[page0, page1], &PanicIfCalledEngine)
+            .unwrap_err();
+        assert!(matches!(err, ImportError::ResourceLimitExceeded { .. }));
+    }
+
+    /// End-to-end happy path with a mock `OcrEngine`: two pages are
+    /// pre-processed, recognised in order, assembled into a two-section
+    /// document, and persisted — exercised through the real `Core`/store,
+    /// not a unit test of `gist-imageprep` alone.
+    #[test]
+    fn import_image_with_ocr_happy_path_assembles_pages_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let page0 = dir.path().join("scan_page0.png");
+        let page1 = dir.path().join("scan_page1.png");
+        write_test_png(&page0, 4, 4);
+        write_test_png(&page1, 4, 4);
+
+        struct MockOcrEngine;
+        impl OcrEngine for MockOcrEngine {
+            fn recognize_page(
+                &self,
+                page_index: u32,
+                image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                assert!(
+                    image_bytes.starts_with(b"\x89PNG"),
+                    "the engine must receive prepare_image's PNG output, not raw bytes"
+                );
+                Some(OcrPageResult {
+                    page_index,
+                    text: format!("page {page_index} text"),
+                    confidence: 0.9 - (page_index as f32) * 0.1,
+                })
+            }
+        }
+
+        let result = core
+            .import_image_with_ocr(&[page0, page1], &MockOcrEngine)
+            .expect("happy-path OCR import must succeed");
+
+        assert_eq!(result.page_confidences.len(), 2);
+        assert!((result.page_confidences[0] - 0.9_f32).abs() < 1e-6);
+        assert!((result.page_confidences[1] - 0.8_f32).abs() < 1e-6);
+
+        let doc_json = core.get_document(&result.item_id).unwrap();
+        let doc: Document = serde_json::from_str(&doc_json).unwrap();
+        assert_eq!(doc.sections.len(), 2);
+        assert_eq!(doc.sections[0].blocks[0].plain_text(), "page 0 text");
+        assert_eq!(doc.sections[1].blocks[0].plain_text(), "page 1 text");
+        assert_eq!(doc.metadata.source_type, "ocr");
+        assert!(
+            doc.metadata.source_copy_ref.is_some(),
+            "ADR-006: a multi-page OCR import must still produce a sandboxed copy"
+        );
+
+        // The item is genuinely findable through the normal library list —
+        // proves `insert_item` actually ran, not just that a Document value
+        // was constructed in memory.
+        let items = core.list_items(0, 10).unwrap();
+        assert!(items.iter().any(|i| i.id == result.item_id));
+    }
+
+    /// ADR-009's calling convention: a `None` from `recognize_page` signals
+    /// cancellation and must abort the whole import with no partial data
+    /// written to the store — matching `import_file`'s/`import_url`'s
+    /// existing cancellation behavior.
+    #[test]
+    fn import_image_with_ocr_cancellation_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let page0 = dir.path().join("cancel_page0.png");
+        write_test_png(&page0, 4, 4);
+
+        struct CancellingEngine;
+        impl OcrEngine for CancellingEngine {
+            fn recognize_page(
+                &self,
+                _page_index: u32,
+                _image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                None
+            }
+        }
+
+        let err = core
+            .import_image_with_ocr(&[page0], &CancellingEngine)
+            .unwrap_err();
+        assert!(matches!(err, ImportError::Cancelled));
+
+        let items = core.list_items(0, 10).unwrap();
+        assert!(
+            items.is_empty(),
+            "a cancelled OCR import must not leave a partial item behind"
+        );
+    }
+
+    /// An empty page list is a caller error, not a panic or a silently
+    /// empty document.
+    #[test]
+    fn import_image_with_ocr_rejects_empty_page_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        struct PanicIfCalledEngine;
+        impl OcrEngine for PanicIfCalledEngine {
+            fn recognize_page(
+                &self,
+                _page_index: u32,
+                _image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                panic!("must never be called for an empty page list");
+            }
+        }
+
+        let err = core
+            .import_image_with_ocr(&[], &PanicIfCalledEngine)
+            .unwrap_err();
+        assert!(matches!(err, ImportError::UnsupportedType(_)));
     }
 }

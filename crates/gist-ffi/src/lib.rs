@@ -119,6 +119,25 @@ impl gist_core::OcrEngine for CoreOcrAdapter<'_> {
     }
 }
 
+/// Result of a multi-page OCR import — mirrors `gist_core::OcrImportResult`.
+/// `page_confidences` is in page order (`ocrConfidence[]`); the OCR review
+/// screen (M3 role `R8`) uses it to highlight low-confidence pages without a
+/// second FFI round trip.
+#[derive(Debug, uniffi::Record)]
+pub struct FfiOcrImportResult {
+    pub item_id: String,
+    pub page_confidences: Vec<f32>,
+}
+
+impl From<gist_core::OcrImportResult> for FfiOcrImportResult {
+    fn from(r: gist_core::OcrImportResult) -> Self {
+        FfiOcrImportResult {
+            item_id: r.item_id,
+            page_confidences: r.page_confidences,
+        }
+    }
+}
+
 // ── Key provider (ADR-011) ────────────────────────────────────────────────────
 
 /// Callback interface: implemented in Swift/Kotlin (Keychain-backed on
@@ -252,6 +271,65 @@ impl From<gist_core::Annotation> for FfiAnnotation {
             note_text: a.note_text,
             created_at: a.created_at,
             updated_at: a.updated_at,
+        }
+    }
+}
+
+// ── Annotation re-anchoring (ADR-003) ───────────────────────────────────────
+
+/// Mirrors `gist_core::anchoring::AnchorStatus` as a uniffi-exportable enum.
+/// Kept data-free, like every other uniffi enum in this file, since a
+/// uniffi enum with a per-variant payload doesn't map as cleanly to Swift
+/// as a flat enum plus an `Option` field on the containing record (the same
+/// pattern `FfiEncryptItemResult` above uses) — `FfiAnnotationAnchorResult
+/// .old_start` carries `Reanchored`'s only payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiAnchorStatus {
+    /// `prefix_hash`/`quote_hash` both matched at the stored position —
+    /// nothing changed.
+    Valid,
+    /// The stored anchor didn't verify in place, but the quoted text was
+    /// found elsewhere in the same block and the anchor was rewritten.
+    Reanchored,
+    /// The quoted text could not be found anywhere in the block. Left
+    /// exactly as stored — never deleted or silently moved.
+    Orphaned,
+}
+
+impl From<&gist_core::AnchorStatus> for FfiAnchorStatus {
+    fn from(s: &gist_core::AnchorStatus) -> Self {
+        match s {
+            gist_core::AnchorStatus::Valid => FfiAnchorStatus::Valid,
+            gist_core::AnchorStatus::Reanchored { .. } => FfiAnchorStatus::Reanchored,
+            gist_core::AnchorStatus::Orphaned => FfiAnchorStatus::Orphaned,
+        }
+    }
+}
+
+/// Result of re-anchoring one annotation via
+/// `GistCore::reanchor_annotations` (ADR-003): the annotation's state after
+/// the check — already rewritten in the store if `status == .reanchored` —
+/// paired with what happened. `old_start` is `Some` only when
+/// `status == .reanchored`, letting a reading view explain the move (e.g.
+/// "this highlight moved") without a second round trip.
+#[derive(uniffi::Record)]
+pub struct FfiAnnotationAnchorResult {
+    pub annotation: FfiAnnotation,
+    pub status: FfiAnchorStatus,
+    pub old_start: Option<u64>,
+}
+
+impl From<gist_core::AnnotationAnchorResult> for FfiAnnotationAnchorResult {
+    fn from(r: gist_core::AnnotationAnchorResult) -> Self {
+        let status = FfiAnchorStatus::from(&r.status);
+        let old_start = match r.status {
+            gist_core::AnchorStatus::Reanchored { old_start, .. } => Some(old_start as u64),
+            _ => None,
+        };
+        FfiAnnotationAnchorResult {
+            annotation: r.annotation.into(),
+            status,
+            old_start,
         }
     }
 }
@@ -857,6 +935,31 @@ impl GistCore {
         })
     }
 
+    /// Verify every annotation on `item_id` against the document's current
+    /// text and re-anchor/orphan as needed (ADR-003). Call this when
+    /// opening a reading view, before rendering highlights/notes/
+    /// bookmarks, so annotations created before a re-import or content
+    /// edit still point at the right text, or are clearly flagged when
+    /// they can't be found any more. A `.reanchored` result has already
+    /// been persisted by this call; `list_annotations_for_item` afterward
+    /// would return the same corrected position. See
+    /// `gist_core::Core::reanchor_annotations`.
+    pub fn reanchor_annotations(
+        &self,
+        item_id: String,
+    ) -> Result<Vec<FfiAnnotationAnchorResult>, GistError> {
+        ffi_catch!({
+            let results = self
+                .inner
+                .reanchor_annotations(&item_id)
+                .map_err(GistError::from)?;
+            Ok(results
+                .into_iter()
+                .map(FfiAnnotationAnchorResult::from)
+                .collect())
+        })
+    }
+
     /// Retroactively encrypt one or more already-imported items at rest, on
     /// demand (ADR-014) — reuses the same `KeyProvider` callback-interface
     /// machinery `new_encrypted`/`new_with_read_key` use
@@ -887,19 +990,24 @@ impl GistCore {
         })
     }
 
-    /// Import an image file and run OCR using the provided engine.
-    /// Returns the document ID on success.
+    /// Import one or more page images (one raw file per page) and run OCR
+    /// using the provided engine. Returns the new document's id plus each
+    /// page's OCR confidence, in page order. See
+    /// `gist_core::Core::import_image_with_ocr` for the full pipeline and
+    /// the ADR-009 addendum (`[A7]`) for the byte-size cap enforced before
+    /// any page's bytes are read.
     pub fn import_image_with_ocr(
         &self,
-        path: String,
+        paths: Vec<String>,
         engine: Box<dyn OcrEngine>,
-    ) -> Result<String, GistError> {
+    ) -> Result<FfiOcrImportResult, GistError> {
         ffi_catch!({
             let adapter = CoreOcrAdapter(engine.as_ref());
+            let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             self.inner
-                .import_image_with_ocr(&path, &adapter)
-                .map(|doc| doc.id)
-                .map_err(|e| GistError::Core(e.to_string()))
+                .import_image_with_ocr(&paths, &adapter)
+                .map(FfiOcrImportResult::from)
+                .map_err(GistError::from)
         })
     }
 }
