@@ -58,6 +58,34 @@ struct FlowSectionVM: Decodable {
     let heading: FlowHeadingVM?
     let blocks: [FlowBlockVM]
 
+    /// Concatenation of every block's `plainText`, each joined by a single
+    /// `"\n"`, in document order. This is the byte-offset addressing space
+    /// this reading view uses for ADR-003's `(block_id, start, len)`
+    /// annotation anchor -- see `AnnotationAnchoring`'s doc comment
+    /// (`AnnotationModel.swift`) for why: `gist_model::Block` has no id of
+    /// its own, only `Section` does, so `block_id` is always a *section*
+    /// id, and a section can hold more than one block. Addressing into the
+    /// section's whole concatenated text (rather than one block's text in
+    /// isolation) gives every byte offset within a section a single,
+    /// unambiguous meaning regardless of how many blocks it contains, and
+    /// lets a highlight's `prefix_hash` context correctly span a block
+    /// boundary (e.g. a highlight starting at the very first word of a
+    /// paragraph, whose preceding context is the end of the previous
+    /// block). This is a client-side convention this reading view (the only
+    /// annotation producer today) applies consistently on both write and
+    /// read -- the Rust backend itself has no opinion on what `start`/`len`
+    /// mean, it only stores whatever it's given (see
+    /// `gist_store::create_annotation`'s doc comment).
+    var concatenatedPlainText: String {
+        blocks.map(\.plainText).joined(separator: "\n")
+    }
+
+    /// The byte offset within `concatenatedPlainText` where block `index`'s
+    /// own text begins.
+    func blockByteOffset(at index: Int) -> Int {
+        blocks.prefix(index).reduce(0) { $0 + $1.plainText.utf8.count + 1 }
+    }
+
     private enum CodingKeys: String, CodingKey { case id, heading, blocks }
 
     init(from decoder: Decoder) throws {
@@ -89,6 +117,11 @@ struct FlowBlockEntry: Identifiable {
     let id = UUID()
     let sectionId: String
     let block: FlowBlockVM
+    /// This block's position among its own section's `blocks` array --
+    /// needed (alongside `sectionId`) to compute its byte offset within
+    /// `FlowSectionVM.concatenatedPlainText` via `blockByteOffset(at:)`,
+    /// for annotation anchoring (see that property's doc comment).
+    let blockIndexInSection: Int
 }
 
 /// Mirrors `gist_model::Block`. Serde's default enum representation is
@@ -334,6 +367,35 @@ enum FlowScrollPositionStore {
     }
 }
 
+/// Live annotation state for the flow view (ADR-003: highlights, notes,
+/// bookmarks), owned by `FlowReaderContainer` exactly like `SearchState`/
+/// `SectionNavigator`/`ReadingProgress` above -- a shared, mutable
+/// `ObservableObject` the container seeds via `CoreClient.listAnnotations`
+/// and that any `ReadingLayout` conformer (currently just
+/// `FlowViewSwiftUINative`) both renders from *and* mutates directly when it
+/// creates/deletes an annotation, rather than round-tripping every change
+/// back up through the container. `AnnotationsSidebarView` (the browse/
+/// export UI, presented as a sheet) observes the same instance so it always
+/// reflects whatever the reading view just did, and vice versa.
+@MainActor
+final class AnnotationState: ObservableObject {
+    @Published var items: [AnnotationVM] = []
+
+    /// Set by `AnnotationsSidebarView`'s "Jump" action to request a
+    /// scroll-to. Mirrors `SectionNavigator.pendingSectionId`'s "container-
+    /// owned shared state; the hosting layout observes and reacts" idiom,
+    /// just keyed on an annotation id instead of a section id.
+    @Published var pendingJumpAnnotationId: String?
+
+    /// Refetches `items` from `core.listAnnotations(itemId:)`, replacing
+    /// whatever was there. Used both for the initial load and any time a
+    /// caller would rather re-derive the full list than reason about a
+    /// local edit (e.g. after an update-note round trip).
+    func reload(itemId: String, core: CoreClient) async {
+        items = await core.listAnnotations(itemId: itemId)
+    }
+}
+
 // ── ReadingLayout protocol ───────────────────────────────────────────────────
 
 /// Common contract for a reading-mode implementation that renders a parsed
@@ -361,6 +423,7 @@ protocol ReadingLayout: View {
         typography: Binding<TypographySettings>,
         search: SearchState,
         navigation: SectionNavigator,
-        progress: ReadingProgress
+        progress: ReadingProgress,
+        annotations: AnnotationState
     )
 }

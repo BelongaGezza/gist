@@ -425,6 +425,106 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    // MARK: - Annotations (ADR-003)
+
+    /// Creates a new annotation (highlight/note/bookmark), anchored per
+    /// ADR-003 as `(block_id, start, len, prefix_hash, quote_hash)`.
+    /// `prefixHash`/`quoteHash` must already be computed by the caller (see
+    /// `AnnotationAnchoring` in `AnnotationModel.swift`) -- this call only
+    /// persists them, exactly mirroring `GistCore.createAnnotation`'s own
+    /// doc comment. Returns the new annotation's id, or `nil` on failure
+    /// (with `error` set).
+    @discardableResult
+    func createAnnotation(
+        itemId: String,
+        kind: FfiAnnotationKind,
+        blockId: String,
+        start: Int,
+        len: Int,
+        prefixHash: UInt64,
+        quoteHash: UInt64,
+        noteText: String?
+    ) async -> String? {
+        guard let core else { return nil }
+        do {
+            let id = try core.createAnnotation(
+                itemId: itemId,
+                kind: kind,
+                blockId: blockId,
+                start: UInt64(start),
+                len: UInt64(len),
+                prefixHash: prefixHash,
+                quoteHash: quoteHash,
+                noteText: noteText
+            )
+            error = nil
+            return id
+        } catch {
+            self.error = "\(error)"
+            return nil
+        }
+    }
+
+    /// Returns all annotations for one item, newest first, via
+    /// `GistCore.listAnnotationsForItem`. Like `listItemsInCollection`/
+    /// `listItemsByTag`, this doesn't publish into a shared `@Published`
+    /// property -- callers (`FlowReaderContainer`'s `AnnotationState`) hold
+    /// the result as their own state, since only one document's annotations
+    /// are ever being browsed at a time.
+    func listAnnotations(itemId: String) async -> [AnnotationVM] {
+        guard let core else { return [] }
+        do {
+            let ffiAnnotations = try core.listAnnotationsForItem(itemId: itemId)
+            error = nil
+            return ffiAnnotations.map(AnnotationVM.init(ffi:))
+        } catch {
+            self.error = "\(error)"
+            return []
+        }
+    }
+
+    /// Updates an annotation's note text (a `.note`'s real body, or a
+    /// `.highlight`'s colour encoding -- see `HighlightColor`'s doc
+    /// comment) via `GistCore.updateAnnotationNote`. Never touches the
+    /// anchor fields (`blockId`/`start`/`len`/hashes) -- re-anchoring is out
+    /// of scope here, matching the Rust method's own doc comment.
+    func updateAnnotationNote(id: String, noteText: String?) async {
+        guard let core else { return }
+        do {
+            try core.updateAnnotationNote(id: id, noteText: noteText)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    /// Deletes a single annotation via `GistCore.deleteAnnotation`.
+    func deleteAnnotation(id: String) async {
+        guard let core else { return }
+        do {
+            try core.deleteAnnotation(id: id)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    /// Deletes one or more annotations; unknown ids are silently skipped
+    /// (mirrors `removeItems`'s multi-id semantics). Returns the number
+    /// actually deleted.
+    @discardableResult
+    func deleteAnnotations(ids: [String]) async -> Int {
+        guard let core else { return 0 }
+        do {
+            let count = try core.deleteAnnotations(ids: ids)
+            error = nil
+            return Int(count)
+        } catch {
+            self.error = "\(error)"
+            return 0
+        }
+    }
+
     // MARK: - Per-item encryption (ADR-014)
 
     /// Retroactively encrypts `ids` at rest, on demand -- the per-item,
