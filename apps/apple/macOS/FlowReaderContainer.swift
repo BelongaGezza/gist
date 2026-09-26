@@ -22,6 +22,11 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
     @StateObject private var progress: ReadingProgress
     @StateObject private var annotationState = AnnotationState()
     @State private var showingAnnotations = false
+    /// Read-aloud (role R6): `AVSpeechSynthesizer`-backed, see
+    /// `TextToSpeech.swift`. Owned here (not by `Layout`) since it operates
+    /// on the whole document's block text, independent of which
+    /// `ReadingLayout` is hosting it.
+    @StateObject private var tts = TtsPlayer()
 
     init(itemId: String) {
         self.itemId = itemId
@@ -71,6 +76,76 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
         .onChange(of: progress.fraction) { _, newValue in
             FlowScrollPositionStore.save(itemId: itemId, fraction: newValue)
         }
+        // Stop read-aloud when leaving the screen -- otherwise speech would
+        // keep going after the reader has navigated away, with no visible
+        // controls left to stop it.
+        .onDisappear { tts.stop() }
+    }
+
+    /// Starting index into `TtsTextExtraction.speakableBlocks(for:)` for a
+    /// fresh "Read Aloud" press -- approximated from `progress.fraction`
+    /// (the same block-count-based position `FlowViewSwiftUINative` already
+    /// tracks and persists) rather than an exact live "which block is on
+    /// screen right now" query, since threading that through the generic
+    /// `ReadingLayout` protocol for this alone isn't justified yet. Good
+    /// enough to resume roughly where the reader is, not letter-perfect.
+    private func readAloudStartIndex(document: FlowDocumentVM) -> Int {
+        let blockCount = TtsTextExtraction.speakableBlocks(for: document).count
+        guard blockCount > 1 else { return 0 }
+        return Int((progress.fraction * Double(blockCount - 1)).rounded())
+    }
+
+    private func toggleReadAloud(document: FlowDocumentVM) {
+        if tts.isSpeaking {
+            tts.pause()
+        } else if tts.isPaused {
+            tts.resume()
+        } else {
+            let blocks = TtsTextExtraction.speakableBlocks(for: document)
+            tts.start(blocks: blocks, from: readAloudStartIndex(document: document))
+        }
+    }
+
+    /// "Read Aloud" play/pause toggle, a Stop button (shown only once
+    /// active), and a speed menu -- grouped together so they appear as one
+    /// cluster in the toolbar rather than interleaved with the unrelated
+    /// TOC/typography/annotations/search controls.
+    @ViewBuilder
+    private func readAloudControls(document: FlowDocumentVM) -> some View {
+        Button {
+            toggleReadAloud(document: document)
+        } label: {
+            Label(
+                tts.isSpeaking ? "Pause Read Aloud" : "Read Aloud",
+                systemImage: tts.isSpeaking ? "pause.circle" : "play.circle"
+            )
+        }
+        .accessibilityLabel(
+            tts.isSpeaking ? "Pause reading aloud" : (tts.isPaused ? "Resume reading aloud" : "Read document aloud")
+        )
+
+        if tts.isActive {
+            Button {
+                tts.stop()
+            } label: {
+                Label("Stop Read Aloud", systemImage: "stop.circle")
+            }
+            .accessibilityLabel("Stop reading aloud")
+
+            Menu {
+                Picker("Read-Aloud Speed", selection: Binding(
+                    get: { tts.rate },
+                    set: { tts.setRate($0) }
+                )) {
+                    ForEach(TtsRate.allCases) { rate in
+                        Text(rate.label).tag(rate)
+                    }
+                }
+            } label: {
+                Label("Read-Aloud Speed", systemImage: "speedometer")
+            }
+            .accessibilityLabel("Read-aloud speed, currently \(tts.rate.label)")
+        }
     }
 
     private var progressBar: some View {
@@ -107,6 +182,8 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
 
             typographyMenu
 
+            readAloudControls(document: document)
+
             Button {
                 showingAnnotations = true
             } label: {
@@ -127,11 +204,13 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
                     Image(systemName: "chevron.up")
                 }
                 .disabled(search.matchCount == 0)
+                .accessibilityLabel("Find previous match")
                 Button { search.findNext() } label: {
                     Image(systemName: "chevron.down")
                 }
                 .disabled(search.matchCount == 0)
                 .keyboardShortcut("g", modifiers: .command)
+                .accessibilityLabel("Find next match")
             }
         }
     }

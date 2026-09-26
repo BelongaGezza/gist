@@ -26,6 +26,11 @@ struct LibraryRowContent: View {
                 Image(systemName: "lock.fill")
                     .foregroundStyle(.secondary)
                     .help("Encrypted at rest (ADR-011/014)")
+                    // Without this, VoiceOver falls back to an inferred
+                    // label straight off the SF Symbol name ("lock fill"),
+                    // which doesn't read as a sentence -- explicit label
+                    // matching the `.help()` tooltip's meaning instead.
+                    .accessibilityLabel("Encrypted")
             }
         }
     }

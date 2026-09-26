@@ -65,13 +65,31 @@ enum Theme: String, CaseIterable {
         }
     }
 
-    /// Accent color for interactive controls (buttons, sliders, selection).
+    /// Accent color for interactive controls (buttons, sliders, selection)
+    /// -- and, in `RsvpView.OrpWordView`, actual body-sized *text* color (the
+    /// ORP pivot character), which is why this needs to clear the same
+    /// 4.5:1 WCAG AA text-contrast bar as `foreground`/`background` do, not
+    /// just the looser 3:1 UI-component bar.
+    ///
+    /// Fixed literal RGB values (not the dynamic system `.blue`/`.orange`
+    /// tokens), chosen specifically so each resolves to >=4.5:1 against its
+    /// own case's `background` -- verified in `AccessibilityTests
+    /// .testThemeAccentTextContrastMeetsWcagAaForEveryTheme`. System
+    /// `Color.blue` was measured (role R6, 2026-09-26) at ~4.0:1 against
+    /// `.light`'s white background -- a real, if modest, shortfall for text
+    /// use, since it's tuned as a *UI-control* tint (which only needs 3:1),
+    /// not for rendering text. `.light` and `.dark`/`.oled` need visibly
+    /// different values (not just "blue"): `.light` needs a darker blue to
+    /// stay under the luminance ceiling white imposes, `.dark`/`.oled` need
+    /// a *brighter* blue for the same reason against a near-black/pure-black
+    /// floor. Sepia's existing brown accent (already a fixed literal) was
+    /// independently re-verified rather than changed -- ~4.96:1 against its
+    /// own background, already comfortably over the bar.
     var accent: Color {
         switch self {
-        case .light: return .blue
-        case .dark: return .blue
+        case .light: return Color(red: 0.0, green: 0.341, blue: 0.8)
+        case .dark, .oled: return Color(red: 0.239, green: 0.545, blue: 1.0)
         case .sepia: return Color(red: 0.545, green: 0.353, blue: 0.169)
-        case .oled: return .blue
         }
     }
 

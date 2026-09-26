@@ -79,6 +79,12 @@ private struct TypographySettingsTab: View {
                         in: TypographySettings.range,
                         step: 1
                     )
+                    // A bare `Slider(value:in:step:)` with no `title:`
+                    // closure has no accessible name of its own -- VoiceOver
+                    // would announce only a bare percentage with no
+                    // indication of what it controls.
+                    .accessibilityLabel("Default font size")
+                    .accessibilityValue("\(Int(defaults.fontSize)) points")
                     Text("\(Int(defaults.fontSize)) pt")
                         .monospacedDigit()
                         .frame(width: 48, alignment: .trailing)
@@ -129,6 +135,8 @@ private struct RsvpSettingsTab: View {
                         in: 100...1000,
                         step: 10
                     )
+                    .accessibilityLabel("Default reading speed")
+                    .accessibilityValue("\(defaults.defaultWpm) words per minute")
                     Text("\(defaults.defaultWpm) WPM")
                         .monospacedDigit()
                         .frame(width: 72, alignment: .trailing)
