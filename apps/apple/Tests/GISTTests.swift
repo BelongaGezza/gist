@@ -418,6 +418,110 @@ final class GISTTests: XCTestCase {
         XCTAssertTrue(tags.isEmpty)
     }
 
+    // MARK: - Annotations (ADR-003)
+
+    /// Full create → list → update-note → delete round trip for the
+    /// annotation CRUD wrappers (role R4a's acceptance criterion), against a
+    /// real `GistCore`/SQLite backend -- mirrors
+    /// `testCreateListAddRemoveCollectionRoundTrips`'s shape for the
+    /// collections wrappers.
+    func testCreateListUpdateNoteDeleteAnnotationRoundTrips() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        var annotations = await client.listAnnotations(itemId: item.id)
+        XCTAssertTrue(annotations.isEmpty)
+
+        let id = await client.createAnnotation(
+            itemId: item.id,
+            kind: .highlight,
+            blockId: "section-0",
+            start: 10,
+            len: 5,
+            prefixHash: 111,
+            quoteHash: 222,
+            noteText: HighlightColor.encode(.green)
+        )
+        XCTAssertNil(client.error)
+        guard let id else {
+            XCTFail("expected createAnnotation to return a new id")
+            return
+        }
+
+        annotations = await client.listAnnotations(itemId: item.id)
+        XCTAssertEqual(annotations.count, 1)
+        guard let created = annotations.first else {
+            XCTFail("expected the created annotation to be listed")
+            return
+        }
+        XCTAssertEqual(created.id, id)
+        XCTAssertEqual(created.itemId, item.id)
+        XCTAssertEqual(created.kind, .highlight)
+        XCTAssertEqual(created.blockId, "section-0")
+        XCTAssertEqual(created.start, 10)
+        XCTAssertEqual(created.len, 5)
+        XCTAssertEqual(created.prefixHash, 111)
+        XCTAssertEqual(created.quoteHash, 222)
+        XCTAssertEqual(created.highlightColor, .green)
+
+        await client.updateAnnotationNote(id: id, noteText: HighlightColor.encode(.purple))
+        XCTAssertNil(client.error)
+
+        annotations = await client.listAnnotations(itemId: item.id)
+        guard let updated = annotations.first else {
+            XCTFail("expected the annotation to still be listed after updating its note")
+            return
+        }
+        XCTAssertEqual(updated.highlightColor, .purple, "update-note must change note_text without touching the anchor")
+        XCTAssertEqual(updated.blockId, created.blockId)
+        XCTAssertEqual(updated.start, created.start)
+        XCTAssertEqual(updated.len, created.len)
+        XCTAssertEqual(updated.prefixHash, created.prefixHash)
+        XCTAssertEqual(updated.quoteHash, created.quoteHash)
+
+        await client.deleteAnnotation(id: id)
+        XCTAssertNil(client.error)
+
+        annotations = await client.listAnnotations(itemId: item.id)
+        XCTAssertTrue(annotations.isEmpty, "annotation must be gone after delete")
+    }
+
+    /// `deleteAnnotations` (bulk) silently skips unknown ids and returns the
+    /// count actually deleted -- mirrors `removeItems`'s multi-id semantics,
+    /// tested the same way `delete_annotations_bulk_ignores_unknown_ids`
+    /// tests it Rust-side.
+    func testDeleteAnnotationsBulkIgnoresUnknownIdsAndReturnsDeletedCount() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        let firstId = await client.createAnnotation(
+            itemId: item.id, kind: .bookmark, blockId: "section-0", start: 0, len: 0,
+            prefixHash: 1, quoteHash: 2, noteText: nil
+        )
+        let secondId = await client.createAnnotation(
+            itemId: item.id, kind: .bookmark, blockId: "section-1", start: 0, len: 0,
+            prefixHash: 3, quoteHash: 4, noteText: nil
+        )
+        guard let firstId, let secondId else {
+            XCTFail("expected both bookmarks to be created")
+            return
+        }
+
+        let deletedCount = await client.deleteAnnotations(ids: [firstId, secondId, "does-not-exist"])
+        XCTAssertEqual(deletedCount, 2)
+
+        let remaining = await client.listAnnotations(itemId: item.id)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
     // MARK: - Tag-based filtering
 
     func testListAllTagsAndListItemsByTagRoundTrip() async throws {
