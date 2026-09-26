@@ -177,3 +177,103 @@ the callback.** Treat this as an invariant to test for explicitly (e.g., a
 what a capped, resized PNG could produce, or asserting it's simply never
 called with the original input bytes) once that implementation lands, not
 just as a comment to trust.
+
+## Addendum 2: byte-size cap at the `import_image_with_ocr` FFI entry point (2026-09-26, closes `[A7]`)
+
+The addendum above settled the *outbound* leg of this interface —
+`OcrEngine::recognize_page`'s `image_bytes` parameter, where Rust calls out to
+the platform with bytes that are already pre-processed, capped, and small by
+construction. It did not define a cap for the *inbound* leg: the raw,
+wholly-untrusted bytes of the user's photo/scan file, at the point they first
+cross the FFI boundary into `gist-core` — before `gist-imageprep::prepare_image`
+(the previous addendum's choke point) ever gets a chance to run. That gap is
+what this addendum closes, completing `[A7]` as a documentation gate.
+
+**Why this is a distinct choke point from `prepare_image`'s existing check:**
+`prepare_image` (fixed by `N4`) peeks the *decoded image header's declared
+pixel dimensions* on a `&[u8]` slice and rejects before a full pixel decode —
+but by the time `prepare_image` sees that slice, something has already read
+the entire file into a Rust-owned buffer. `prepare_image` has no way to reject
+a file before its bytes exist in memory; bounding the raw byte count *before*
+that read happens is a separate, earlier responsibility — exactly the one
+`import_txt` and `import_file` already discharge for every other import path
+today (`std::fs::metadata(path)?.len()` checked against `limits.max_bytes`
+*before* `std::fs::read(path)`, in `crates/gist-core/src/lib.rs`).
+`import_image_with_ocr` is the one importer-adjacent entry point that doesn't
+yet do this, because it is still `todo!()`.
+
+**The policy:**
+
+1. **Constant:** reuse `gist_model::ParseLimits::max_bytes`. Do **not**
+   introduce a second, OCR-specific byte-size constant. Every other importer
+   already treats `max_bytes` as "maximum size in bytes of the raw file this
+   import call will read off disk," and a user's photo/scan file is exactly
+   that — a raw file read off disk. A separate `MAX_OCR_IMAGE_BYTES` constant
+   would duplicate this policy for no behavioral benefit and be one more
+   number to keep in sync by hand. Default value, unchanged: **256 MiB**
+   (`268_435_456` bytes, `ParseLimits::default().max_bytes`) — generous
+   relative to a typical phone photo or flatbed scan (single-digit-to-low-tens
+   of MB), but this is a resource-exhaustion backstop, not a quality-of-life
+   limit, so it has no reason to be tighter than the value every other
+   importer already enforces.
+
+2. **Enforcement point:** when `Core::import_image_with_ocr` is implemented
+   (M3), its first lines of real logic — before calling
+   `gist_imageprep::prepare_image`, before any OCR-related allocation, before
+   the observer/cancellation check, before anything else — must be:
+
+   ```rust
+   let limits = ParseLimits::default();
+   let declared_len = std::fs::metadata(path)?.len() as usize;
+   if declared_len > limits.max_bytes {
+       return Err(ImportError::ResourceLimitExceeded {
+           limit: format!("max_bytes={}", limits.max_bytes),
+           attempted: declared_len,
+       });
+   }
+   let bytes = std::fs::read(path)?;
+   ```
+
+   copied verbatim from `import_file`'s/`import_txt`'s existing pattern
+   (`crates/gist-core/src/lib.rs`). This is a hard ordering requirement,
+   matching this codebase's non-negotiable "check `ParseLimits` before
+   allocation" rule (`CLAUDE.md`, "Security policies — must not be relaxed").
+
+3. **The declared-dimension cap stays in `prepare_image` — not duplicated
+   here.** `prepare_image`'s existing pre-decode pixel-count check
+   (`ImageReader::into_dimensions()` vs. `limits.max_expanded_bytes / 4`,
+   fixed by `N4`) runs on the bytes this new check admits, and it bounds a
+   different resource (decoded pixel count / decode-time allocation) than
+   this check bounds (raw file byte count / disk-read allocation).
+   Duplicating a dimension check at the FFI entry point — before the bytes
+   are even decoded — would require parsing the image header at two separate
+   call sites for no additional protection, since `prepare_image` is
+   guaranteed to run immediately afterward by the pipeline-ordering invariant
+   the addendum above already establishes. One check per resource axis, at
+   the earliest point that axis is actually measurable: byte count is
+   measurable via `fs::metadata` before any read at all; pixel count is only
+   measurable once enough of the file has been header-parsed, which is
+   `prepare_image`'s job, not this entry point's.
+
+4. **TOCTOU note (informational, matches `F13`):** like `import_txt`/
+   `import_file`, the `fs::metadata` check and the subsequent `fs::read` are
+   not atomic — a file swapped on disk between the two calls could in
+   principle bypass this gate. Accepted for the same reason `F13` accepts it
+   elsewhere in this codebase: a local single-user app where the user selects
+   the file via an OS picker. No new decision is needed here; this note exists
+   only so a future reviewer doesn't mistake it for a gap newly introduced by
+   this addendum.
+
+5. **Test to add when M3 implements this function:** a `gist-core` test
+   asserting `import_image_with_ocr` returns
+   `ImportError::ResourceLimitExceeded` (not a panic, not a generic IO error,
+   not a silently-truncated read) for a file whose on-disk size exceeds
+   `ParseLimits::default().max_bytes`, mirroring however `import_txt`'s/
+   `import_file`'s own `max_bytes`-rejection tests are structured (check
+   `crates/gist-core/src/lib.rs`'s existing tests for the pattern) — without
+   needing to actually materialize a real 256 MiB image fixture.
+
+With this, `[A7]` is closed as a documentation gate: the OCR pipeline
+implementation role (`R2b`) may proceed against the constant, enforcement
+point, and division of responsibility named above without further judgment
+calls.
