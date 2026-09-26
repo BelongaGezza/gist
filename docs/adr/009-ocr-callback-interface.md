@@ -277,3 +277,18 @@ With this, `[A7]` is closed as a documentation gate: the OCR pipeline
 implementation role (`R2b`) may proceed against the constant, enforcement
 point, and division of responsibility named above without further judgment
 calls.
+
+**Implemented 2026-09-26 (R2b, reviewed against this addendum before
+starting per the sequencing requirement above).** `Core::import_image_with_ocr`
+enforces the byte-size cap exactly as specified (per-page, via
+`std::fs::metadata` before `std::fs::read`, `ImportError::ResourceLimitExceeded`
+on breach) before calling `gist_imageprep::prepare_image`. One implementation
+detail this addendum didn't anticipate: `gist-imageprep` depends on
+`gist-core` for the shared `ParseError` type, so `gist-core` calling
+`gist_imageprep::prepare_image` directly would have created a dependency
+cycle. Fixed by moving `ParseError`'s definition to `gist-model` (re-exported
+from `gist-core`, mirroring the existing `ParseLimits` re-export) — a
+one-directional `gist-model` → `gist-imageprep`/`gist-core` edge, no cycle.
+See `[A7]`'s closure in `CLAUDE.md`'s security register and ADR-006 §4 (this
+implementation's copy-on-import approach for multi-page input) for the rest
+of the design.

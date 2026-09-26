@@ -1,8 +1,8 @@
 # M3 Execution Plan — Agent Roles & Team Structure
 
-**Status:** current execution plan for M3 (RSVP, Annotations, Accessibility). Authoritative for *how M3 gets built* — scope/exit-criteria authority remains `docs/development-plan-v2.md` §3.6–3.11/§5 M3 and `CLAUDE.md`'s milestone register; this document does not restate or override those, it refines them into assignable work.
+**Status:** execution complete as of 2026-09-26 — every role in §2 is done and merged (see that section's status update). Authoritative for *how M3 gets built* — scope/exit-criteria authority remains `docs/development-plan-v2.md` §3.6–3.11/§5 M3 and `CLAUDE.md`'s milestone register; this document does not restate or override those, it refines them into assignable work. If "proceed with development" is invoked again before the manual click-through/device-verification exit item (still outstanding, same as M2's) is done, the Team Leader should confirm with the user whether there's new M3 backlog to add here, or whether this pointer and this file should be rewritten for M4 per §4's note below — don't assume either without asking, since re-reading this file's §2 will otherwise correctly report "nothing left to assign" for the current plan.
 
-**Last updated:** 2026-09-25.
+**Last updated:** 2026-09-26.
 
 **Trigger:** the phrase **"proceed with development"** (or `/proceed-with-development`) invokes this plan — see `.claude/commands/proceed-with-development.md` and the pointer in `CLAUDE.md`. Whoever executes it (this session or a future one) acts as **Team Leader** and follows §0 below.
 
@@ -37,26 +37,28 @@ Verified against `git log` and `CLAUDE.md` as of 2026-09-25 — re-confirm befor
 
 ## 2. Remaining M3 backlog → roles
 
-| # | Role | Scope | Primary files/crates | Depends on |
-|---|---|---|---|---|
-| R1 | Rust — Annotation anchoring | ADR-003's re-anchoring logic | `crates/gist-core/`, `crates/gist-model/` | — |
-| R2a | Rust — OCR ADR addendum | `[A7]` ADR-009 addendum | `docs/adr/009-ocr-callback-interface.md` | — |
-| R2b | Rust — OCR pipeline wiring | `import_image_with_ocr` + FFI export | `crates/gist-core/src/lib.rs:1259`, `crates/gist-ffi/` | R2a reviewed (R7) |
-| R3 | Swift — RSVP view polish | §3.6 | `apps/apple/macOS/RsvpView.swift` | — |
-| R4a | Swift — Annotation UI (CRUD) | §3.7, minus anchor-status | new Swift files + `CoreClient.swift` | — |
-| R4b | Swift — Annotation UI (anchor status) | orphaned-annotation surfacing | same as R4a | R1 |
-| R5a | Swift — Settings scene | §3.8 | new `SettingsView.swift` etc. | — |
-| R5b | Swift — Localisation retrofit | §3.11 | all `apps/apple/{Shared,macOS}/*.swift` | R3, R4a, R5a, R8 |
-| R6 | Swift — Accessibility + TTS | §3.9 | audit across all Apple views | R3, R4a, R5a, R8 |
-| R8 | Swift — OCR review screen | §3.3's missing review UI | new Swift files | R2b |
-| R7 | Security/Architecture reviewer | gate R2a before R2b; final gate | n/a — reviews, doesn't build | continuous |
+**Status update, 2026-09-26: every role below is done, merged onto `integration/m3-2026-09-26` (18 commits over `main` @ `5324f7d`, HEAD `a13f059`), and re-verified for real on the fully-integrated tree** (`cargo test --workspace`/`clippy -D warnings`/`fmt --check`/`cargo deny check bans licenses sources` all green; `xcodegen generate` + `xcodebuild build`/`test` — BUILD SUCCEEDED, 163/163 tests). Not yet pushed/PR'd — see `CLAUDE.md`'s M3 milestone-register row for the full rundown of what each role built and the cross-role bugs integration caught (block-join-separator mismatch between R1/R4a; a missing `xcodegen generate` step of the Team Leader's own, twice). This table's `Depends on` column and the batching below are kept as a historical record of how it was actually executed, not a live TODO list.
 
-**Batching** (recompute from the table above if it's gone stale by the time this runs):
+| # | Role | Scope | Primary files/crates | Depends on | Status |
+|---|---|---|---|---|---|
+| R1 | Rust — Annotation anchoring | ADR-003's re-anchoring logic | `crates/gist-core/`, `crates/gist-model/` | — | ✅ Done 2026-09-26 |
+| R2a | Rust — OCR ADR addendum | `[A7]` ADR-009 addendum | `docs/adr/009-ocr-callback-interface.md` | — | ✅ Done 2026-09-26 |
+| R2b | Rust — OCR pipeline wiring | `import_image_with_ocr` + FFI export | `crates/gist-core/src/lib.rs:1259`, `crates/gist-ffi/` | R2a reviewed (R7) | ✅ Done 2026-09-26 |
+| R3 | Swift — RSVP view polish | §3.6 | `apps/apple/macOS/RsvpView.swift` | — | ✅ Done 2026-09-26 |
+| R4a | Swift — Annotation UI (CRUD) | §3.7, minus anchor-status | new Swift files + `CoreClient.swift` | — | ✅ Done 2026-09-26 |
+| R4b | Swift — Annotation UI (anchor status) | orphaned-annotation surfacing | same as R4a | R1 | ✅ Done 2026-09-26 |
+| R5a | Swift — Settings scene | §3.8 | new `SettingsView.swift` etc. | — | ✅ Done 2026-09-26 |
+| R5b | Swift — Localisation retrofit | §3.11 | all `apps/apple/{Shared,macOS}/*.swift` | R3, R4a, R5a, R8 | ✅ Done 2026-09-26 |
+| R6 | Swift — Accessibility + TTS | §3.9 | audit across all Apple views | R3, R4a, R5a, R8 | ✅ Done 2026-09-26 |
+| R8 | Swift — OCR review screen | §3.3's missing review UI | new Swift files | R2b | ✅ Done 2026-09-26 |
+| R7 | Security/Architecture reviewer | gate R2a before R2b; final gate | n/a — reviews, doesn't build | continuous | ✅ Done 2026-09-26 — no new findings |
+
+**Batching** (as actually executed 2026-09-26):
 - **Batch 1** (parallel): R1, R2a, R3, R4a, R5a
-- **Batch 2** (parallel, after Batch 1 integrated and R7 has reviewed R2a): R2b, R4b
-- **Batch 2.5**: R8 (needs R2b's FFI export to exist — can start once R2b merges, doesn't need to wait for the rest of Batch 2)
-- **Batch 3** (parallel, after everything above is integrated): R5b, R6
-- **Continuous**: R7 does a light-touch review of R2a mid-stream (gates R2b) and a full gate pass at the very end (gates the Team Leader's step 8 report)
+- **Batch 2** (parallel, after Batch 1 integrated and R7 had reviewed R2a): R2b, R4b
+- **Batch 2.5**: R8 (needed R2b's FFI export — started once R2b merged)
+- **Batch 3** (parallel, after everything above was integrated): R5b, R6 (both hit a mid-run session rate limit and were resumed via `SendMessage` rather than restarted, per their own worktrees' partial context)
+- **Continuous**: R7 did a light-touch review of R2a mid-stream (gated R2b) and a full gate pass at the end (FFI panic-safety, mutex discipline, `ParseLimits` enforcement on the new OCR path, source-path logging discipline — all clean, no new findings)
 
 ---
 
