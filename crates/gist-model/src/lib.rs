@@ -39,6 +39,25 @@ impl Default for ParseLimits {
     }
 }
 
+// ── Parse error (shared across image/doc pre-processors) ───────────────────
+
+/// Errors returned by format-specific parsers and pre-processors.
+///
+/// Lives here (not in `gist-core`, where it originally shipped) so that
+/// `gist-imageprep` — which needs this type for `prepare_image`'s `Result`
+/// — can depend on it without creating a `gist-imageprep -> gist-core ->
+/// gist-imageprep` cycle now that `gist-core::import_image_with_ocr` calls
+/// `gist_imageprep::prepare_image` directly (2026-09-26, role R2b). Moved
+/// rather than re-implemented, mirroring the `ParseLimits` re-export
+/// pattern `gist-core` already uses for exactly this reason.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+    #[error("resource limit exceeded")]
+    ResourceLimitExceeded,
+}
+
 // ── Metadata ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

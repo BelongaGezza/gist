@@ -6,6 +6,10 @@ publish = false
 license = "MIT"
 
 [dependencies]
+# `ParseError`/`ParseLimits` live here (not `gist-core`) specifically so this
+# crate never needs to depend back on `gist-core` — see gist-core's
+# `Cargo.toml` comment (R2b, 2026-09-26): `gist-core::import_image_with_ocr`
+# now calls `prepare_image` directly, which would be a dependency cycle if
+# this crate still depended on `gist-core`.
 gist-model = { path = "../gist-model" }
-gist-core  = { path = "../gist-core" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

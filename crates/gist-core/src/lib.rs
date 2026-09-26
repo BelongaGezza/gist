@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Lower-cased file extension with no leading dot (empty string if none).
 /// Shared by every import path that needs to name a sandboxed copy of the
@@ -359,14 +359,13 @@ fn sweep_dir(
 
 // ── Parse error (shared across image/doc parsers) ──────────────────────────
 
-/// Errors returned by format-specific parsers and pre-processors.
-#[derive(Debug, thiserror::Error)]
-pub enum ParseError {
-    #[error("invalid input: {0}")]
-    InvalidInput(String),
-    #[error("resource limit exceeded")]
-    ResourceLimitExceeded,
-}
+/// Re-exported from `gist-model`, mirroring the `ParseLimits` re-export
+/// below — moved there 2026-09-26 (role R2b) so that `gist-core` can call
+/// `gist_imageprep::prepare_image` directly (see `Core::import_image_with_ocr`)
+/// without a `gist-core -> gist-imageprep -> gist-core` dependency cycle:
+/// `gist-imageprep` needs this type for its own `Result`, and must not
+/// depend back on `gist-core` to get it.
+pub use gist_model::ParseError;
 
 // ── OCR types ──────────────────────────────────────────────────────────────
 
@@ -393,6 +392,17 @@ pub trait OcrEngine: Send + Sync {
     /// `image_bytes` is a PNG-encoded, pre-processed page image.
     /// Return `None` to signal cancellation.
     fn recognize_page(&self, page_index: u32, image_bytes: Vec<u8>) -> Option<OcrPageResult>;
+}
+
+/// Result of a multi-page OCR import ([`Core::import_image_with_ocr`]): the
+/// imported document's id plus each page's OCR confidence score, in page
+/// order (`ocrConfidence[]`) — so a review screen (M3 role `R8`) can
+/// highlight low-confidence pages without a second round trip through
+/// [`Core::get_document`].
+#[derive(Debug, Clone)]
+pub struct OcrImportResult {
+    pub item_id: String,
+    pub page_confidences: Vec<f32>,
 }
 
 // ── Import error ────────────────────────────────────────────────────────────
@@ -1502,24 +1512,143 @@ impl Core {
             .collect()
     }
 
-    /// Import a single image file and run OCR using the provided engine.
+    /// Import one or more page images (one raw file per page — the natural
+    /// shape of a multi-page phone-camera/scanner capture) and run OCR using
+    /// the provided engine, producing a single multi-section document.
     ///
-    /// Phase M3 stub — the full pipeline (multi-page PDF tiling, heuristic
-    /// de-skew, layout analysis) is deferred.  For now the method signature
-    /// is stable so the FFI layer and tests can be wired up.
+    /// Pipeline (mirrors `import_file`'s shape — type sniff -> dispatch ->
+    /// normalise -> persist -> index — with OCR standing in for a parser):
     ///
-    /// Planned pipeline:
-    /// 1. Read raw bytes from `path`.
-    /// 2. Pre-process with `gist_imageprep::prepare_image` (greyscale + resize).
-    /// 3. Call `engine.recognize_page` for each page image.
-    /// 4. Assemble a [`gist_model::Document`] from the OCR text.
-    /// 5. Insert into the store and return the document.
+    /// 1. **Addendum 2 (`docs/adr/009-ocr-callback-interface.md`, closes
+    ///    `[A7]`):** for every page's file, check its on-disk byte size
+    ///    against `ParseLimits::max_bytes` *before* that page's bytes are
+    ///    ever read into memory — the same `fs::metadata`-before-`fs::read`
+    ///    gate `import_file`/`import_txt` already enforce, applied once per
+    ///    page since each page is an independent raw file. This is a
+    ///    distinct, earlier check than step 2's: it bounds raw byte count
+    ///    before any read at all, where `prepare_image`'s own check bounds
+    ///    decoded pixel count on bytes already in memory.
+    /// 2. Pre-process each page with [`gist_imageprep::prepare_image`]
+    ///    (declared-dimension check, decode, greyscale, resize, PNG
+    ///    re-encode — see `N4` for the decode-before-check fix that lives
+    ///    there).
+    /// 3. Call `engine.recognize_page` once per page, sequentially, in page
+    ///    order (ADR-009's calling convention: sequential, not parallel — a
+    ///    `None` result signals cancellation and aborts the whole import
+    ///    before anything is written to the store, matching `import_file`'s/
+    ///    `import_url`'s "no partial data on cancel" behavior).
+    /// 4. Assemble one [`gist_model::Section`] per page (a single
+    ///    `Paragraph` block holding that page's recognised text) and copy
+    ///    every page's *raw* bytes into ADR-006's sandboxed `originals/`
+    ///    directory as one bundled, content-addressed copy (see the doc
+    ///    comment on the bundling below for why one bundle rather than `N`
+    ///    separate copies).
+    /// 5. Insert into the store and return the new item's id plus each
+    ///    page's OCR confidence, in page order.
+    ///
+    /// `gist-core` depends on `gist-imageprep` for step 2 (not the other way
+    /// around, as it was before this landed) — see the `ParseError`
+    /// re-export above for why that direction is the one that avoids a
+    /// dependency cycle.
     pub fn import_image_with_ocr(
         &self,
-        _path: &str,
-        _engine: &dyn OcrEngine,
-    ) -> Result<gist_model::Document, ImportError> {
-        todo!("OCR import pipeline — Phase M3")
+        paths: &[PathBuf],
+        engine: &dyn OcrEngine,
+    ) -> Result<OcrImportResult, ImportError> {
+        let limits = ParseLimits::default();
+
+        if paths.is_empty() {
+            return Err(ImportError::UnsupportedType(
+                "no pages provided for OCR import".to_string(),
+            ));
+        }
+
+        // Step 1: per-page byte-size cap, checked before that page's bytes
+        // are ever read into memory (Addendum 2).
+        let mut page_bytes: Vec<Vec<u8>> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let declared_len = std::fs::metadata(path)?.len() as usize;
+            if declared_len > limits.max_bytes {
+                return Err(ImportError::ResourceLimitExceeded {
+                    limit: format!("max_bytes={}", limits.max_bytes),
+                    attempted: declared_len,
+                });
+            }
+            page_bytes.push(std::fs::read(path)?);
+        }
+
+        // Steps 2-3: pre-process + OCR, sequentially, in page order.
+        let mut sections = Vec::with_capacity(page_bytes.len());
+        let mut page_confidences = Vec::with_capacity(page_bytes.len());
+        for (i, raw) in page_bytes.iter().enumerate() {
+            let page_index = i as u32;
+
+            let prepared = gist_imageprep::prepare_image(page_index, raw, &limits)
+                .map_err(|e| ImportError::ImagePrep(e.to_string()))?;
+
+            let Some(result) = engine.recognize_page(page_index, prepared.png_bytes) else {
+                return Err(ImportError::Cancelled);
+            };
+
+            page_confidences.push(result.confidence);
+            sections.push(gist_model::Section {
+                id: format!("page-{page_index}"),
+                heading: None,
+                blocks: vec![gist_model::Block::Paragraph {
+                    runs: vec![gist_model::TextRun::plain(result.text)],
+                }],
+            });
+        }
+
+        // Step 4: copy-on-import (ADR-006). A multi-page OCR import has N
+        // raw source files, not the single file every other importer's
+        // `store_original_copy`/`source_copy_ref` pairing assumes. Rather
+        // than extend the single-value `source_copy_ref`/`source_copy_path`
+        // column to a list — a `gist-store` schema change, and one
+        // `remove_items` would need to learn to delete N paths for instead
+        // of one, both out of scope for this pipeline-wiring pass — every
+        // page's raw bytes are bundled into one length-prefixed blob and
+        // stored as a single content-addressed copy, exactly like every
+        // other importer's one `store_original_copy` call. This preserves
+        // ADR-006's guarantee (removal only ever deletes GIST's own
+        // sandboxed copy, never a file at the user's real path) with zero
+        // `gist-store` changes. Nothing reads an original copy's content
+        // back today regardless of import type (see `A4`/`A5` in the
+        // security register), so a provenance-only bundle format nothing
+        // ever decodes is consistent with how `source_copy_ref` is already
+        // used for every other import path.
+        let mut bundle = Vec::new();
+        for raw in &page_bytes {
+            bundle.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+            bundle.extend_from_slice(raw);
+        }
+        let copy_path = self.store.store_original_copy(&bundle, "ocrbundle")?;
+
+        let stem = paths[0]
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("scanned document");
+
+        let mut metadata = gist_model::Metadata::minimal(stem);
+        metadata.source_type = "ocr".to_string();
+        metadata.source_ref = Some(
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        metadata.source_copy_ref = Some(copy_path);
+
+        let doc = gist_model::Document::new(metadata, sections);
+        let id = doc.id.clone();
+        self.store.insert_item(&doc)?;
+
+        tracing::debug!("gist-core: imported OCR document as {}", id);
+        Ok(OcrImportResult {
+            item_id: id,
+            page_confidences,
+        })
     }
 }
 
@@ -3629,5 +3758,230 @@ mod tests {
             results[1].result,
             Err(gist_store::StoreError::NotFound(_))
         ));
+    }
+
+    // ── OCR pipeline (R2b, 2026-09-26) ──────────────────────────────────────
+
+    /// Writes a tiny, valid PNG to `path` (a real, fully-decodable image —
+    /// not the header-only "PNG bomb" shape gist-imageprep's own N4 tests
+    /// use, since these tests exercise the *whole* pipeline, including a
+    /// real `prepare_image` decode).
+    fn write_test_png(path: &std::path::Path, width: u32, height: u32) {
+        use image::{ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(width, height, |_, _| Rgb([10, 20, 30]));
+        image::DynamicImage::from(img)
+            .save(path)
+            .expect("test helper: PNG write failed");
+    }
+
+    /// Addendum 2 (`docs/adr/009-ocr-callback-interface.md`, closes `[A7]`):
+    /// a page file whose on-disk size exceeds `ParseLimits::max_bytes` must
+    /// be rejected with `ImportError::ResourceLimitExceeded` — not a panic,
+    /// not a generic IO error — and rejected *before* its bytes are ever
+    /// read, which this test proves by using an engine that panics if it is
+    /// ever called at all (the pipeline must never get that far). A sparse
+    /// file (`File::set_len`) gives the file a declared size over the limit
+    /// without materializing real content, exactly as the addendum's own
+    /// test guidance suggests.
+    #[test]
+    fn import_image_with_ocr_rejects_oversized_page_before_reading_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let limits = ParseLimits::default();
+        let oversized = dir.path().join("huge_page.png");
+        {
+            let file = std::fs::File::create(&oversized).unwrap();
+            file.set_len(limits.max_bytes as u64 + 1).unwrap();
+        }
+
+        struct PanicIfCalledEngine;
+        impl OcrEngine for PanicIfCalledEngine {
+            fn recognize_page(
+                &self,
+                _page_index: u32,
+                _image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                panic!(
+                    "recognize_page must never be called for a page that fails \
+                     the pre-read byte-size gate"
+                );
+            }
+        }
+
+        let err = core
+            .import_image_with_ocr(&[oversized], &PanicIfCalledEngine)
+            .unwrap_err();
+        assert!(
+            matches!(err, ImportError::ResourceLimitExceeded { .. }),
+            "expected ResourceLimitExceeded, got {err:?}"
+        );
+    }
+
+    /// The byte-size gate applies per page, not only to the first one — a
+    /// valid first page must not let a later oversized page slip through.
+    #[test]
+    fn import_image_with_ocr_rejects_oversized_second_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let limits = ParseLimits::default();
+        let page0 = dir.path().join("page0.png");
+        write_test_png(&page0, 4, 4);
+        let page1 = dir.path().join("page1_huge.png");
+        {
+            let file = std::fs::File::create(&page1).unwrap();
+            file.set_len(limits.max_bytes as u64 + 1).unwrap();
+        }
+
+        struct PanicIfCalledEngine;
+        impl OcrEngine for PanicIfCalledEngine {
+            fn recognize_page(
+                &self,
+                _page_index: u32,
+                _image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                panic!("no page's OCR should run once any page fails the byte-size gate");
+            }
+        }
+
+        let err = core
+            .import_image_with_ocr(&[page0, page1], &PanicIfCalledEngine)
+            .unwrap_err();
+        assert!(matches!(err, ImportError::ResourceLimitExceeded { .. }));
+    }
+
+    /// End-to-end happy path with a mock `OcrEngine`: two pages are
+    /// pre-processed, recognised in order, assembled into a two-section
+    /// document, and persisted — exercised through the real `Core`/store,
+    /// not a unit test of `gist-imageprep` alone.
+    #[test]
+    fn import_image_with_ocr_happy_path_assembles_pages_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let page0 = dir.path().join("scan_page0.png");
+        let page1 = dir.path().join("scan_page1.png");
+        write_test_png(&page0, 4, 4);
+        write_test_png(&page1, 4, 4);
+
+        struct MockOcrEngine;
+        impl OcrEngine for MockOcrEngine {
+            fn recognize_page(
+                &self,
+                page_index: u32,
+                image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                assert!(
+                    image_bytes.starts_with(b"\x89PNG"),
+                    "the engine must receive prepare_image's PNG output, not raw bytes"
+                );
+                Some(OcrPageResult {
+                    page_index,
+                    text: format!("page {page_index} text"),
+                    confidence: 0.9 - (page_index as f32) * 0.1,
+                })
+            }
+        }
+
+        let result = core
+            .import_image_with_ocr(&[page0, page1], &MockOcrEngine)
+            .expect("happy-path OCR import must succeed");
+
+        assert_eq!(result.page_confidences.len(), 2);
+        assert!((result.page_confidences[0] - 0.9_f32).abs() < 1e-6);
+        assert!((result.page_confidences[1] - 0.8_f32).abs() < 1e-6);
+
+        let doc_json = core.get_document(&result.item_id).unwrap();
+        let doc: Document = serde_json::from_str(&doc_json).unwrap();
+        assert_eq!(doc.sections.len(), 2);
+        assert_eq!(doc.sections[0].blocks[0].plain_text(), "page 0 text");
+        assert_eq!(doc.sections[1].blocks[0].plain_text(), "page 1 text");
+        assert_eq!(doc.metadata.source_type, "ocr");
+        assert!(
+            doc.metadata.source_copy_ref.is_some(),
+            "ADR-006: a multi-page OCR import must still produce a sandboxed copy"
+        );
+
+        // The item is genuinely findable through the normal library list —
+        // proves `insert_item` actually ran, not just that a Document value
+        // was constructed in memory.
+        let items = core.list_items(0, 10).unwrap();
+        assert!(items.iter().any(|i| i.id == result.item_id));
+    }
+
+    /// ADR-009's calling convention: a `None` from `recognize_page` signals
+    /// cancellation and must abort the whole import with no partial data
+    /// written to the store — matching `import_file`'s/`import_url`'s
+    /// existing cancellation behavior.
+    #[test]
+    fn import_image_with_ocr_cancellation_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let page0 = dir.path().join("cancel_page0.png");
+        write_test_png(&page0, 4, 4);
+
+        struct CancellingEngine;
+        impl OcrEngine for CancellingEngine {
+            fn recognize_page(
+                &self,
+                _page_index: u32,
+                _image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                None
+            }
+        }
+
+        let err = core
+            .import_image_with_ocr(&[page0], &CancellingEngine)
+            .unwrap_err();
+        assert!(matches!(err, ImportError::Cancelled));
+
+        let items = core.list_items(0, 10).unwrap();
+        assert!(
+            items.is_empty(),
+            "a cancelled OCR import must not leave a partial item behind"
+        );
+    }
+
+    /// An empty page list is a caller error, not a panic or a silently
+    /// empty document.
+    #[test]
+    fn import_image_with_ocr_rejects_empty_page_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        struct PanicIfCalledEngine;
+        impl OcrEngine for PanicIfCalledEngine {
+            fn recognize_page(
+                &self,
+                _page_index: u32,
+                _image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                panic!("must never be called for an empty page list");
+            }
+        }
+
+        let err = core
+            .import_image_with_ocr(&[], &PanicIfCalledEngine)
+            .unwrap_err();
+        assert!(matches!(err, ImportError::UnsupportedType(_)));
     }
 }

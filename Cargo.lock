@@ -666,6 +666,7 @@ dependencies = [
 name = "gist-core"
 version = "0.1.0"
 dependencies = [
+ "gist-imageprep",
  "gist-model",
  "gist-parse-docx",
  "gist-parse-epub",
@@ -673,6 +674,7 @@ dependencies = [
  "gist-rsvp",
  "gist-store",
  "gist-web",
+ "image",
  "infer",
  "rusqlite",
  "serde_json",
@@ -700,7 +702,6 @@ dependencies = [
 name = "gist-imageprep"
 version = "0.1.0"
 dependencies = [
- "gist-core",
  "gist-model",
  "image",
 ]
