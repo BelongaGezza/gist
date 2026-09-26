@@ -51,6 +51,7 @@ struct TagEditorView: View {
                                     Image(systemName: "xmark.circle.fill")
                                 }
                                 .buttonStyle(.borderless)
+                                .accessibilityLabel("Remove tag \(tag)")
                             }
                         }
                     }

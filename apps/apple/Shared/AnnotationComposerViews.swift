@@ -202,6 +202,7 @@ struct HighlightSelectionSheet: View {
                 }
                 .buttonStyle(.plain)
                 .help(color.label)
+                .accessibilityLabel("\(color.label) highlight")
             }
         }
     }
@@ -219,6 +220,12 @@ struct HighlightSelectionSheet: View {
                 .cornerRadius(4)
         }
         .buttonStyle(.plain)
+        // This is a fully custom word-tap-to-select control (see this
+        // file's type doc comment on `HighlightSelectionSheet` for why real
+        // text selection isn't available here) -- VoiceOver has no built-in
+        // notion of "selected" for a plain `Button`, so the trait has to be
+        // added explicitly for a selected word to be announced as such.
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
     private func selectWord(_ word: SelectableWord) {

@@ -134,6 +134,7 @@ struct AnnotationsSidebarView: View {
                     .fill(highlight.highlightColor?.color ?? .yellow)
                     .frame(width: 12, height: 12)
                     .padding(.top, 4)
+                    .accessibilityLabel("\(highlight.highlightColor?.label ?? "Yellow") highlight")
                 VStack(alignment: .leading, spacing: 2) {
                     Text(document.sectionLabel(for: highlight))
                         .font(.caption)
@@ -160,9 +161,14 @@ struct AnnotationsSidebarView: View {
 
     private func noteRow(_ note: AnnotationVM) -> some View {
         HStack(alignment: .top, spacing: 8) {
+            // Purely decorative -- this row's own text (below) already says
+            // it's a note via the "Notes" section header VoiceOver reads on
+            // the way in; hiding this avoids an extra, redundant "note text"
+            // announcement per row.
             Image(systemName: "note.text")
                 .foregroundStyle(.secondary)
                 .padding(.top, 2)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(document.sectionLabel(for: note))
                     .font(.caption)
@@ -179,8 +185,12 @@ struct AnnotationsSidebarView: View {
 
     private func bookmarkRow(_ bookmark: AnnotationVM) -> some View {
         HStack(spacing: 8) {
+            // Decorative, same reasoning as noteRow's icon above -- the
+            // "Bookmarks" section header already establishes what this row
+            // is.
             Image(systemName: "bookmark.fill")
                 .foregroundStyle(.orange)
+                .accessibilityHidden(true)
             Text(document.sectionLabel(for: bookmark))
             Spacer(minLength: 0)
             orphanedBadge(for: bookmark)
@@ -214,6 +224,10 @@ struct AnnotationsSidebarView: View {
             }
             .buttonStyle(.borderless)
             .help("Jump to this annotation")
+            // `.help()` alone is a hover tooltip, not a VoiceOver label --
+            // every icon-only button in this row needs its own explicit
+            // `.accessibilityLabel` too.
+            .accessibilityLabel("Jump to this annotation")
 
             if annotation.kind == .note {
                 Button {
@@ -224,6 +238,7 @@ struct AnnotationsSidebarView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Edit note")
+                .accessibilityLabel("Edit note")
             } else if annotation.kind == .highlight && attachedNote == nil {
                 Button {
                     editingNote = AnnotationVM(
@@ -245,6 +260,7 @@ struct AnnotationsSidebarView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Add a note to this highlight")
+                .accessibilityLabel("Add a note to this highlight")
             }
 
             Button(role: .destructive) {
@@ -257,6 +273,7 @@ struct AnnotationsSidebarView: View {
             }
             .buttonStyle(.borderless)
             .help("Delete")
+            .accessibilityLabel("Delete annotation")
         }
     }
 
