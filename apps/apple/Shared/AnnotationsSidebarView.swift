@@ -142,10 +142,8 @@ struct AnnotationsSidebarView: View {
                         .font(.body)
                         .lineLimit(3)
                 }
-                // Reserved slot for a future "anchor may have moved" status
-                // badge (see `AnnotationVM.anchorStatus`) -- always empty
-                // today, deliberately not fetching/displaying real status.
                 Spacer(minLength: 0)
+                orphanedBadge(for: highlight)
             }
             ForEach(attachedNotes) { note in
                 if let text = note.displayNoteText {
@@ -173,6 +171,7 @@ struct AnnotationsSidebarView: View {
                     .font(.body)
             }
             Spacer(minLength: 0)
+            orphanedBadge(for: note)
             rowActions(annotation: note, attachedNote: note)
         }
         .padding(.vertical, 2)
@@ -184,7 +183,24 @@ struct AnnotationsSidebarView: View {
                 .foregroundStyle(.orange)
             Text(document.sectionLabel(for: bookmark))
             Spacer(minLength: 0)
+            orphanedBadge(for: bookmark)
             rowActions(annotation: bookmark, attachedNote: nil)
+        }
+    }
+
+    /// A distinct, accessible indicator for an annotation whose anchor
+    /// couldn't be found in the document's current content (ADR-003's
+    /// `.orphaned` status -- see `AnnotationAnchorStatus`). Empty for
+    /// `.valid`/`.reanchored`/`nil` (the common case; `.reanchored` has
+    /// already been silently corrected, so it needs no badge) -- only
+    /// `.orphaned` renders anything here.
+    @ViewBuilder
+    private func orphanedBadge(for annotation: AnnotationVM) -> some View {
+        if annotation.anchorStatus == .orphaned {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .help("Anchor not found — the surrounding text may have changed.")
+                .accessibilityLabel("Anchor not found")
         }
     }
 
