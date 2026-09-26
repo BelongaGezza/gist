@@ -393,6 +393,7 @@ struct FlowViewSwiftUINative: ReadingLayout {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
+            .accessibilityLabel(hasBookmark ? "Bookmark actions" : "Note actions")
         }
     }
 
