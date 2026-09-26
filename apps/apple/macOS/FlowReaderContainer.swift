@@ -15,7 +15,7 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
     @EnvironmentObject var core: CoreClient
     @EnvironmentObject var themeManager: ThemeManager
     @State private var document: FlowDocumentVM?
-    @State private var typography = TypographySettings()
+    @State private var typography: TypographySettings
     @State private var showingToc = false
     @StateObject private var search = SearchState()
     @StateObject private var navigation = SectionNavigator()
@@ -23,6 +23,12 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
 
     init(itemId: String) {
         self.itemId = itemId
+        // Seeded synchronously from the Settings scene's Typography-tab
+        // defaults (`TypographyDefaults`, see AppSettings.swift) at init
+        // time, same as `progress` below -- a fresh install still gets
+        // `TypographySettings()`'s own defaults, since `TypographyDefaults`
+        // falls back to those exact values when nothing is persisted yet.
+        _typography = State(wrappedValue: TypographyDefaults.shared.current)
         // Seeded synchronously from UserDefaults at init time (not `.task`)
         // so the very first `Layout` instance already has the real
         // `initialFraction` to restore to, rather than a placeholder 0 that

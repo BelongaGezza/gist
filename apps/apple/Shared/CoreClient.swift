@@ -216,8 +216,9 @@ final class CoreClient: ObservableObject {
         guard let core else { return }
         drmProtectedFile = nil
         do {
-            _ = try core.importUrl(url: urlString)
+            let id = try core.importUrl(url: urlString)
             error = nil
+            await autoEncryptIfEnabled(itemId: id)
         } catch let gistError as GistError {
             switch gistError {
             case .DrmProtected:
@@ -360,8 +361,9 @@ final class CoreClient: ObservableObject {
         guard let core else { return }
         drmProtectedFile = nil
         do {
-            _ = try core.importFile(path: url.path)
+            let id = try core.importFile(path: url.path)
             error = nil
+            await autoEncryptIfEnabled(itemId: id)
         } catch let gistError as GistError {
             switch gistError {
             case .DrmProtected:
@@ -373,6 +375,19 @@ final class CoreClient: ObservableObject {
             self.error = "\(error)"
         }
         await reloadItems(clearErrorOnSuccess: false)
+    }
+
+    /// Settings scene's Import-tab default (`ImportDefaults
+    /// .autoEncryptOnImport`, see AppSettings.swift): when enabled, encrypts
+    /// a just-imported item at rest immediately via the same `encryptItems`
+    /// FFI path the Library's "Encrypt" action uses. Best-effort -- a
+    /// failure here doesn't fail the import itself (the item is already in
+    /// the library, plaintext, by the time this runs), matching the
+    /// best-effort framing already used for e.g. `removeItems`'s leftover
+    /// file cleanup.
+    private func autoEncryptIfEnabled(itemId: String) async {
+        guard let core, ImportDefaults.shared.autoEncryptOnImport else { return }
+        _ = try? core.encryptItems(ids: [itemId], keyProvider: KeychainKeyProvider())
     }
 
     /// Fetches an RSVP session for `itemId` and decodes it. `startRsvp` is a
