@@ -149,7 +149,33 @@ Goals: answer R1, make the environment reproducible.
   - Status 2026-09-21: local FlaUI smoke is green (`apps/windows/GIST.App.UITests`, 3 tests, opt-in via `GIST_RUN_UI_TESTS=1`, 7/7 consecutive runs passed on this machine); runner run and MSIX/Developer Mode still outstanding; window screenshots come out black in this session.
 - **Exit:** everything in spec §4 works; corresponding tests green; manual pass through spec §10 items 1–3, 8.
 
-### W3 — Sidebar, collections, tags, themes (1.5–2 weeks)
+### W3 — Sidebar, collections, tags, themes (1.5–2 weeks) — status 2026-09-26: DONE (engineering); human visual pass outstanding
+> **Closeout.** New Collection flow, Add-to-Collection and the Tag editor (§6) actually landed during W2 (the Library
+> screen needed them for its own toolbar) — `CollectionVM`/`CollectionViewModel`/`LibrarySelection` were also already
+> scaffolded in `GIST.Core` at that point, unused by any view. What W3 added: `GistThemes`/`ThemeManager`
+> (`GIST.Core.Theming`, UI-free — `IThemeSystemProvider`/`IThemeSettingsStore` are the seams, same `initialSystemIsDark`
+> shape as Apple's `ThemeManagerTests`; persistence is a plain file under the app's data root, not WinRT
+> `ApplicationData.LocalSettings`, the same UI-free trade `GistStoragePaths` already makes); `UiSettingsThemeSystemProvider`
+> (real OS dark-mode detection via `UISettings`' background-colour luminance — there is no direct API pre-24H2) and
+> `ThemeApplier` (brushes + `RequestedTheme` + Mica/solid backdrop rule, high-contrast bypass) in `GIST.App`; the
+> `AppearanceDialog` (§7.3); `CollectionPage` (§5, reusing `LibraryPage`'s row template and automation-id prefix so
+> `LibraryDriver`'s FlaUI helpers work unmodified); the sidebar's dynamic "Collections" section and the
+> "Appearance" footer item, both previously placeholders (`MainWindow.xaml`'s `TODO(W3)` comments, now resolved).
+> `LibraryDialogHost` gained a `CollectionViewModel` overload (separate from the `LibraryViewModel` one — the two
+> screens support different dialogs and, per §5, a genuinely different removal operation and wording — mirroring the
+> "two view models sharing a row template, not a removal" split already documented on `CollectionViewModel`);
+> `ShowTagEditorAsync` was generalised to `LibraryViewModelBase` since it only ever used base-class members. **Evidence:**
+> 20 new `GIST.Core.Tests` (`ThemeManagerTests`, `FileThemeSettingsStoreTests`), 224 total, all passing; `dotnet build
+> -warnaserror` clean (0 warnings); 5 new FlaUI tests in a new `CollectionAndThemeTests.cs` (sidebar hides the
+> Collections header with none, shows and navigates to a seeded one clearing the back stack, the Collection screen's
+> narrower command set, remove-from-collection detaches without touching the item, Appearance applies live and
+> persists across a restart) — all green, run alongside the existing 23 Library tests (27/28 passing; the one failure,
+> `Import_File_can_pick_a_file_by_typing_its_path_into_the_native_picker`, reproduced in isolation too but touches no
+> W3 code — see `docs/qa-manual-clickthrough-windows.md`'s "Known behaviour" section). **Not done:** no human has looked
+> at the window (theme rendering across all 5 themes, Mica vs. solid backdrop, high-contrast bypass, sidebar/Collection
+> screen layout — `docs/qa-manual-clickthrough-windows.md` §6/§9b/§10); no screenshots attached, for the same
+> already-documented reason as W1/W2 (this environment's window captures render black); ARM64/MSIX unaffected and
+> unchanged by this phase.
 - Sidebar/nav model, Collection screen (§5), New Collection flow, Add-to-Collection, Tag editor (§6), `ThemeManager` + 5 themes + theme dialog + high-contrast handling + Mica rules (§3.1).
 - **Exit:** spec §5/§6/§7.3 done; theme tests (incl. OLED `#000000`, persistence, OS-follow seam) green; screenshots of all 5 themes on the library screen attached to the PR.
 
