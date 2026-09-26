@@ -62,10 +62,17 @@ enum AnnotationMarkdownExporter {
         let notes = annotations.filter { $0.kind == .note }.sorted { $0.createdAt < $1.createdAt }
         let bookmarks = annotations.filter { $0.kind == .bookmark }.sorted { $0.createdAt < $1.createdAt }
 
-        var lines = ["# Annotations — \(document.metadata.title)", ""]
+        // (R5b localisation) This builds a Markdown file a person reads
+        // directly (see this file's own top note on why Markdown was
+        // chosen) via plain string interpolation/concatenation, never
+        // through `Text()` -- none of it reaches the catalog automatically,
+        // so every fixed English fragment below is wrapped explicitly.
+        // `document.metadata.title`/`sectionLabel`/`displayNoteText` are
+        // real document/user content, not translatable, and are left as-is.
+        var lines = [String(localized: "# Annotations — \(document.metadata.title)"), ""]
 
         if !highlights.isEmpty {
-            lines.append("## Highlights")
+            lines.append(String(localized: "## Highlights"))
             lines.append("")
             for highlight in highlights {
                 lines.append(contentsOf: highlightLines(highlight, notes: notes, document: document))
@@ -77,7 +84,7 @@ enum AnnotationMarkdownExporter {
             !highlights.contains { $0.anchor == note.anchor }
         }
         if !standaloneNotes.isEmpty {
-            lines.append("## Notes")
+            lines.append(String(localized: "## Notes"))
             lines.append("")
             for note in standaloneNotes {
                 lines.append("- \(document.sectionLabel(for: note)): \(note.displayNoteText ?? "")")
@@ -86,7 +93,7 @@ enum AnnotationMarkdownExporter {
         }
 
         if !bookmarks.isEmpty {
-            lines.append("## Bookmarks")
+            lines.append(String(localized: "## Bookmarks"))
             lines.append("")
             for bookmark in bookmarks {
                 lines.append("- \(document.sectionLabel(for: bookmark))")
@@ -95,7 +102,7 @@ enum AnnotationMarkdownExporter {
         }
 
         if highlights.isEmpty && notes.isEmpty && bookmarks.isEmpty {
-            lines.append("_No annotations yet._")
+            lines.append(String(localized: "_No annotations yet._"))
         }
 
         return lines.joined(separator: "\n")
@@ -111,8 +118,12 @@ enum AnnotationMarkdownExporter {
         notes: [AnnotationVM],
         document: FlowDocumentVM
     ) -> [String] {
-        let quote = document.annotatedText(for: highlight) ?? "(text unavailable)"
-        let colorLabel = highlight.highlightColor?.label ?? "Highlight"
+        let quote = document.annotatedText(for: highlight) ?? String(localized: "(text unavailable)")
+        // `highlightColor?.label` is already localized at its own
+        // definition (see `HighlightColor.label`); only this fallback
+        // (an annotation somehow missing a valid encoded colour) needs its
+        // own wrap.
+        let colorLabel = highlight.highlightColor?.label ?? String(localized: "Highlight")
         var result = ["- **[\(colorLabel)]** \(document.sectionLabel(for: highlight)): \u{201C}\(quote)\u{201D}"]
         for note in notes where note.anchor == highlight.anchor {
             if let text = note.displayNoteText, !text.isEmpty {

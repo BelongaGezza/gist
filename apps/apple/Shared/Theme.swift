@@ -18,13 +18,15 @@ enum ThemeSelection: String, CaseIterable, Identifiable, Codable {
 
     var id: String { rawValue }
 
+    // (R5b localisation) Read via `Text(selection.displayName)` in
+    // ThemeSettingsView, which takes the returned value, not a literal.
     var displayName: String {
         switch self {
-        case .system: return "Follow System"
-        case .light: return "Light"
-        case .dark: return "Dark"
-        case .sepia: return "Sepia"
-        case .oled: return "OLED (True Black)"
+        case .system: return String(localized: "Follow System")
+        case .light: return String(localized: "Light")
+        case .dark: return String(localized: "Dark")
+        case .sepia: return String(localized: "Sepia")
+        case .oled: return String(localized: "OLED (True Black)")
         }
     }
 }

@@ -8,10 +8,15 @@ import Vision
 enum OcrScanError: LocalizedError {
     case unreadableImage(URL)
 
+    // (R5b localisation) `errorDescription` ultimately surfaces as plain
+    // `String` text (via `error.localizedDescription` in
+    // `OcrImportModel.swift`), never through `Text()` directly -- wrap so
+    // the fixed English text reaches the catalog. `url.lastPathComponent`
+    // is the user's own file name (data, not translatable).
     var errorDescription: String? {
         switch self {
         case .unreadableImage(let url):
-            return "Couldn't read \(url.lastPathComponent) as an image."
+            return String(localized: "Couldn't read \(url.lastPathComponent) as an image.")
         }
     }
 }

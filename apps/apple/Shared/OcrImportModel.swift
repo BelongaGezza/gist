@@ -105,8 +105,13 @@ final class OcrImportState: ObservableObject {
         guard oversized.isEmpty else {
             let names = oversized.map(\.lastPathComponent).joined(separator: ", ")
             let limitMb = maxBytes / (1024 * 1024)
+            // (R5b localisation) `.failed` carries plain `String`, not
+            // `Text()` -- wrap so the fixed English text reaches the
+            // catalog. `names` (the user's own file names) stays as data.
             phase = .failed(
-                "These file(s) exceed GIST's \(limitMb) MB per-page limit and were not scanned: \(names)"
+                String(
+                    localized: "These file(s) exceed GIST's \(limitMb) MB per-page limit and were not scanned: \(names)"
+                )
             )
             return
         }
@@ -141,8 +146,13 @@ final class OcrImportState: ObservableObject {
                     )
                     phase = .scanning(completed: index + 1, total: urls.count)
                 } catch {
+                    // (R5b localisation) Wrap the fixed English prefix;
+                    // `error.localizedDescription` is already
+                    // system-provided text, not ours to translate here.
                     phase = .failed(
-                        "Couldn't recognize text on page \(index + 1) (\(url.lastPathComponent)): "
+                        String(
+                            localized: "Couldn't recognize text on page \(index + 1) (\(url.lastPathComponent)): "
+                        )
                             + error.localizedDescription
                     )
                     return

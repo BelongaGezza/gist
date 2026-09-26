@@ -72,7 +72,11 @@ struct OcrImportSheet: View {
         case .cancelled:
             terminalState(
                 title: "Scan Cancelled",
-                message: "No pages were imported.",
+                // (R5b localisation) `message`'s parameter type is plain
+                // `String` (it must also accept the dynamic `.failed`
+                // message below), so this literal needs an explicit wrap --
+                // see `terminalState`'s doc comment.
+                message: String(localized: "No pages were imported."),
                 systemImage: "xmark.circle"
             )
         case .failed(let message):
@@ -146,7 +150,14 @@ struct OcrImportSheet: View {
         .padding()
     }
 
-    private func terminalState(title: String, message: String, systemImage: String) -> some View {
+    // (R5b localisation) `title` is `LocalizedStringKey` -- every call site
+    // passes a fixed literal, so `Text(title)` below auto-localizes.
+    // `message` stays plain `String` because the `.failed(let message)`
+    // call site passes genuinely dynamic content (an underlying error's
+    // description); the one call site that passes a fixed literal message
+    // ("No pages were imported.") wraps it explicitly with
+    // `String(localized:)` instead, above.
+    private func terminalState(title: LocalizedStringKey, message: String, systemImage: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: systemImage)
                 .font(.system(size: 48))

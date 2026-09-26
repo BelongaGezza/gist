@@ -1031,9 +1031,14 @@ struct RsvpView: View {
         .background(theme.background)
     }
 
+    // (R5b localisation) Read via `Text(sessionStatsLine)`, which takes the
+    // returned value, not a literal -- wrap so "Words:"/"Time:"/"Pace:"/
+    // "wpm" reach the catalog. The numeric values themselves need no
+    // translation.
     private var sessionStatsLine: String {
         let stats = player.stats
-        return "Words: \(stats.wordsShown) • Time: \(stats.formattedElapsed)"
-            + " • Pace: \(Int(stats.achievedWpm.rounded())) wpm"
+        return String(
+            localized: "Words: \(stats.wordsShown) • Time: \(stats.formattedElapsed) • Pace: \(Int(stats.achievedWpm.rounded())) wpm"
+        )
     }
 }

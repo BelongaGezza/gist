@@ -53,7 +53,20 @@ final class CoreClient: ObservableObject {
             )
         } catch {
             self.core = nil
-            self.error = "Failed to initialise GIST core: \(error)"
+            // (R5b localisation) Plain string interpolation, not passed
+            // through Text() -- wrap so the fixed prefix reaches the
+            // catalog. `error` itself is a system-provided description,
+            // not further localisable here.
+            // `String(describing:)` explicitly, per the compiler's own
+            // suggestion: `error: Error` has no built-in
+            // `String.LocalizationValue` interpolation support (it's an
+            // existential, not `CustomLocalizedStringResourceConvertible`),
+            // so interpolating it directly emits a deprecation warning
+            // about producing an unlocalized debug description -- which is
+            // exactly what's wanted here (this fixed prefix is the only
+            // part meant to be localized; the underlying error's own text
+            // is diagnostic, not further localizable by us).
+            self.error = String(localized: "Failed to initialise GIST core: \(String(describing: error))")
         }
     }
 
@@ -72,7 +85,20 @@ final class CoreClient: ObservableObject {
             core = try GistCore(dbPath: dbPath, storageDir: storageDir)
         } catch {
             self.core = nil
-            self.error = "Failed to initialise GIST core: \(error)"
+            // (R5b localisation) Plain string interpolation, not passed
+            // through Text() -- wrap so the fixed prefix reaches the
+            // catalog. `error` itself is a system-provided description,
+            // not further localisable here.
+            // `String(describing:)` explicitly, per the compiler's own
+            // suggestion: `error: Error` has no built-in
+            // `String.LocalizationValue` interpolation support (it's an
+            // existential, not `CustomLocalizedStringResourceConvertible`),
+            // so interpolating it directly emits a deprecation warning
+            // about producing an unlocalized debug description -- which is
+            // exactly what's wanted here (this fixed prefix is the only
+            // part meant to be localized; the underlying error's own text
+            // is diagnostic, not further localizable by us).
+            self.error = String(localized: "Failed to initialise GIST core: \(String(describing: error))")
         }
     }
 
@@ -92,7 +118,20 @@ final class CoreClient: ObservableObject {
             )
         } catch {
             self.core = nil
-            self.error = "Failed to initialise GIST core: \(error)"
+            // (R5b localisation) Plain string interpolation, not passed
+            // through Text() -- wrap so the fixed prefix reaches the
+            // catalog. `error` itself is a system-provided description,
+            // not further localisable here.
+            // `String(describing:)` explicitly, per the compiler's own
+            // suggestion: `error: Error` has no built-in
+            // `String.LocalizationValue` interpolation support (it's an
+            // existential, not `CustomLocalizedStringResourceConvertible`),
+            // so interpolating it directly emits a deprecation warning
+            // about producing an unlocalized debug description -- which is
+            // exactly what's wanted here (this fixed prefix is the only
+            // part meant to be localized; the underlying error's own text
+            // is diagnostic, not further localizable by us).
+            self.error = String(localized: "Failed to initialise GIST core: \(String(describing: error))")
         }
     }
 
@@ -126,7 +165,11 @@ final class CoreClient: ObservableObject {
         ffiItems.map { item in
             LibraryItemVM(
                 id: item.id,
-                title: item.title ?? "Untitled",
+                // (R5b localisation) `?? "Untitled"` forces this to plain
+                // String, losing Text()'s automatic literal handling at
+                // every call site that renders `title` -- wrap here, once,
+                // at the source.
+                title: item.title ?? String(localized: "Untitled"),
                 authors: item.authors,
                 sourcePath: item.sourcePath,
                 contentEncrypted: item.contentEncrypted
@@ -632,7 +675,7 @@ final class CoreClient: ObservableObject {
     /// shown, never silently swallowed.
     func importScannedDocument(pagePaths: [String], engine: OcrEngine) async -> OcrImportOutcome {
         guard let core else {
-            return .failure("GIST core is not available.")
+            return .failure(String(localized: "GIST core is not available."))
         }
         do {
             let result = try core.importImageWithOcr(paths: pagePaths, engine: engine)
@@ -693,18 +736,31 @@ struct EncryptItemsSummary {
 
     /// A short, human-readable summary line, e.g. "2 items encrypted, 1 was
     /// already encrypted, 1 failed." Only mentions the parts that happened.
+    // (R5b localisation) Built via string interpolation/concatenation, not
+    // `Text("literal")`, so none of this reaches the catalog automatically.
+    // Each fragment is wrapped individually with `String(localized:)` --
+    // scaffolding only (see this file's top note): true plural-aware
+    // grammar (String Catalog's `%#@format@` plural variables) isn't set
+    // up here, since English is the only shipping locale for v1.0 and each
+    // singular/plural variant is already spelled out explicitly.
     var message: String {
         var parts: [String] = []
         if encryptedCount > 0 {
-            parts.append("\(encryptedCount) item\(encryptedCount == 1 ? "" : "s") encrypted")
+            parts.append(String(localized: "\(encryptedCount) item\(encryptedCount == 1 ? "" : "s") encrypted"))
         }
         if alreadyEncryptedCount > 0 {
-            parts.append("\(alreadyEncryptedCount) \(alreadyEncryptedCount == 1 ? "was" : "were") already encrypted")
+            parts.append(
+                String(
+                    localized: "\(alreadyEncryptedCount) \(alreadyEncryptedCount == 1 ? "was" : "were") already encrypted"
+                )
+            )
         }
         if failedCount > 0 {
-            parts.append("\(failedCount) failed")
+            parts.append(String(localized: "\(failedCount) failed"))
         }
-        return parts.isEmpty ? "No items were selected." : parts.joined(separator: ", ") + "."
+        return parts.isEmpty
+            ? String(localized: "No items were selected.")
+            : parts.joined(separator: ", ") + "."
     }
 }
 
@@ -724,10 +780,12 @@ struct RemoveItemsSummary {
     /// e.g. "1 file for the removed item could not be deleted (something
     /// else may have it open). It has been reclaimed from your library --
     /// GIST will retry deleting the leftover file automatically."
+    // (R5b localisation) See `EncryptItemsSummary.message`'s note above --
+    // same reasoning applies here.
     var message: String {
-        "\(filesFailedCount) file\(filesFailedCount == 1 ? "" : "s") for the removed item\(removedCount == 1 ? "" : "s") "
-            + "could not be deleted (something else may have it open). "
-            + "It has been reclaimed from your library — GIST will retry deleting the leftover file\(filesFailedCount == 1 ? "" : "s") automatically."
+        String(
+            localized: "\(filesFailedCount) file\(filesFailedCount == 1 ? "" : "s") for the removed item\(removedCount == 1 ? "" : "s") could not be deleted (something else may have it open). It has been reclaimed from your library — GIST will retry deleting the leftover file\(filesFailedCount == 1 ? "" : "s") automatically."
+        )
     }
 }
 
