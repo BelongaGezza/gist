@@ -398,12 +398,21 @@ final class AnnotationState: ObservableObject {
     /// just keyed on an annotation id instead of a section id.
     @Published var pendingJumpAnnotationId: String?
 
-    /// Refetches `items` from `core.listAnnotations(itemId:)`, replacing
-    /// whatever was there. Used both for the initial load and any time a
-    /// caller would rather re-derive the full list than reason about a
-    /// local edit (e.g. after an update-note round trip).
+    /// Refetches `items`, replacing whatever was there, via
+    /// `core.reanchorAnnotations(itemId:)` rather than the plain
+    /// `listAnnotations` -- this re-verifies every annotation's anchor
+    /// against the document's *current* content (ADR-003) before the
+    /// sidebar/flow view render, silently correcting a shifted anchor
+    /// (`.reanchored`) and stamping `AnnotationVM.anchorStatus` so an
+    /// `.orphaned` one can show a visible indicator (see
+    /// `AnnotationsSidebarView`). Used both for the initial load and any
+    /// time a caller would rather re-derive the full list than reason about
+    /// a local edit (e.g. after an update-note round trip) -- re-running
+    /// re-anchoring on every reload is deliberately cheap/idempotent (an
+    /// already-`.valid` annotation just re-verifies as `.valid`), not
+    /// gated behind "only on first open."
     func reload(itemId: String, core: CoreClient) async {
-        items = await core.listAnnotations(itemId: itemId)
+        items = await core.reanchorAnnotations(itemId: itemId).map(\.annotation)
     }
 }
 

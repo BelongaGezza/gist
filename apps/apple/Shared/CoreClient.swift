@@ -476,7 +476,7 @@ final class CoreClient: ObservableObject {
         do {
             let ffiAnnotations = try core.listAnnotationsForItem(itemId: itemId)
             error = nil
-            return ffiAnnotations.map(AnnotationVM.init(ffi:))
+            return ffiAnnotations.map { AnnotationVM(ffi: $0) }
         } catch {
             self.error = "\(error)"
             return []
@@ -522,6 +522,28 @@ final class CoreClient: ObservableObject {
         } catch {
             self.error = "\(error)"
             return 0
+        }
+    }
+
+    /// Re-verifies/re-anchors every stored annotation for `itemId` against
+    /// the document's *current* content (ADR-003) via
+    /// `GistCore.reanchorAnnotations`. A `.reanchored` result has already
+    /// been rewritten and persisted server-side by the time this returns; a
+    /// `.orphaned` one is left completely untouched in the store. Matches
+    /// the FFI doc comment's stated call pattern: call this when opening a
+    /// reading view, before rendering highlights/notes/bookmarks --
+    /// `AnnotationState.reload` (`FlowDocumentModel.swift`) does exactly
+    /// that on every load. Returns `[]` (with `error` set) on failure,
+    /// same convention as `listAnnotations`.
+    func reanchorAnnotations(itemId: String) async -> [AnnotationAnchorResult] {
+        guard let core else { return [] }
+        do {
+            let ffiResults = try core.reanchorAnnotations(itemId: itemId)
+            error = nil
+            return ffiResults.map(AnnotationAnchorResult.init(ffi:))
+        } catch {
+            self.error = "\(error)"
+            return []
         }
     }
 

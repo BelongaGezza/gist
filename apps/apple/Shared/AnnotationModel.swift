@@ -165,8 +165,14 @@ struct AnnotationVM: Identifiable, Equatable {
     let noteText: String?
     let createdAt: Int64
     let updatedAt: Int64
+    /// This annotation's most recently known re-anchoring status (ADR-003),
+    /// stamped on by `CoreClient.reanchorAnnotations`'s Swift wrapper --
+    /// `nil` until that step has run at least once for this annotation
+    /// (e.g. a value fetched via the plain `listAnnotations`, which never
+    /// re-anchors). See `AnnotationAnchorStatus` below.
+    let anchorStatus: AnnotationAnchorStatus?
 
-    init(ffi: FfiAnnotation) {
+    init(ffi: FfiAnnotation, anchorStatus: AnnotationAnchorStatus? = nil) {
         id = ffi.id
         itemId = ffi.itemId
         kind = ffi.kind
@@ -178,6 +184,7 @@ struct AnnotationVM: Identifiable, Equatable {
         noteText = ffi.noteText
         createdAt = ffi.createdAt
         updatedAt = ffi.updatedAt
+        self.anchorStatus = anchorStatus
     }
 
     /// Test/preview-friendly direct initializer, mirroring `LibraryItemVM`'s
@@ -194,7 +201,8 @@ struct AnnotationVM: Identifiable, Equatable {
         quoteHash: UInt64,
         noteText: String?,
         createdAt: Int64,
-        updatedAt: Int64
+        updatedAt: Int64,
+        anchorStatus: AnnotationAnchorStatus? = nil
     ) {
         self.id = id
         self.itemId = itemId
@@ -207,6 +215,7 @@ struct AnnotationVM: Identifiable, Equatable {
         self.noteText = noteText
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.anchorStatus = anchorStatus
     }
 
     var anchor: AnnotationAnchor { AnnotationAnchor(blockId: blockId, start: start, len: len) }
@@ -225,22 +234,49 @@ struct AnnotationVM: Identifiable, Equatable {
         guard kind == .note, let noteText, !noteText.isEmpty else { return nil }
         return noteText
     }
-
-    /// Reserved for a future "this annotation's anchor may have moved"
-    /// status badge, once the concurrent ADR-003 re-anchoring work lands
-    /// (see CLAUDE.md's M3 role register) -- deliberately always `nil`
-    /// today. Kept here, rather than added later as a breaking change to
-    /// every row view, purely so call sites already have a stable slot to
-    /// switch on without themselves fetching or computing any real
-    /// anchor-status data (explicitly out of scope for this role).
-    var anchorStatus: AnnotationAnchorStatus? { nil }
 }
 
-/// Placeholder type for the reserved `AnnotationVM.anchorStatus` slot above
-/// -- intentionally empty. A follow-up role adds real cases (e.g.
-/// `.orphaned`) once re-anchoring lands; this file does not construct or
-/// interpret any case of it.
-enum AnnotationAnchorStatus {}
+/// Client-side mirror of `FfiAnchorStatus` (ADR-003 re-anchoring --
+/// `crates/gist-ffi/src/lib.rs`), stamped onto `AnnotationVM.anchorStatus` by
+/// `CoreClient.reanchorAnnotations`/`AnnotationAnchorResult` below.
+///
+/// `.valid` and `.reanchored` both mean "this annotation currently resolves
+/// to real text in the document" -- `.reanchored` has already been silently
+/// corrected and persisted (its `start` rewritten) by the time this status
+/// is observed, so from the UI's perspective it's `.valid`-equivalent going
+/// forward. Only `.orphaned` (the quoted text could not be found anywhere in
+/// its block) needs a visible indicator -- see `AnnotationsSidebarView`.
+enum AnnotationAnchorStatus: Equatable {
+    case valid
+    case reanchored
+    case orphaned
+
+    init(ffi: FfiAnchorStatus) {
+        switch ffi {
+        case .valid: self = .valid
+        case .reanchored: self = .reanchored
+        case .orphaned: self = .orphaned
+        }
+    }
+}
+
+/// Swift-friendly wrapper around `FfiAnnotationAnchorResult`, returned by
+/// `CoreClient.reanchorAnnotations` -- one annotation's re-anchoring outcome,
+/// pairing the (possibly just-corrected) `AnnotationVM` with what happened
+/// to it. `oldStart` is non-`nil` only when `status == .reanchored`, mirroring
+/// the FFI record's own doc comment.
+struct AnnotationAnchorResult {
+    let annotation: AnnotationVM
+    let status: AnnotationAnchorStatus
+    let oldStart: Int?
+
+    init(ffi: FfiAnnotationAnchorResult) {
+        let status = AnnotationAnchorStatus(ffi: ffi.status)
+        self.status = status
+        self.oldStart = ffi.oldStart.map(Int.init)
+        self.annotation = AnnotationVM(ffi: ffi.annotation, anchorStatus: status)
+    }
+}
 
 // ── Document-relative helpers (snippets, section labels) ───────────────────
 
