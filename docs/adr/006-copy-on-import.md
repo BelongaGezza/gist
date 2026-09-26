@@ -165,3 +165,21 @@ refusal is logged at `debug!` and counted in nothing, for the same reason
 `source_ref` is not counted: it is not one of GIST's own files. Canonicalising
 also means a symlink or junction planted inside `originals/` cannot redirect a
 delete outside it.
+
+### 4. Multi-page OCR imports: one bundled copy per item, not N (2026-09-26)
+
+`Core::import_image_with_ocr` (M3, ADR-009) takes multiple page-image paths
+per item, but `Metadata.source_copy_ref`/`library_items.source_copy_path` are
+single-value fields — extending them to a list would need a schema change and
+would also require `remove_items`/the orphan-reference-counting logic in §2
+above to handle N paths per row instead of one. Rather than do that, every
+page's raw bytes are concatenated into one length-prefixed blob and stored as
+a single content-addressed copy via the existing `store_original_copy` —
+same removal guarantee (never touches the user's real files, same
+reference-counted keep/delete semantics as any other copy), zero `gist-store`
+schema changes. This is safe only because nothing reads an original copy's
+content back for *any* import type today (confirmed against `A4`/`A5` in
+`CLAUDE.md`'s security register) — if a future feature ever needs to read a
+copy back (e.g. "re-run OCR on the original scan"), this bundle format would
+need its own reader, or the schema would need to grow a real one-to-many
+relationship. Revisit then, not speculatively now.

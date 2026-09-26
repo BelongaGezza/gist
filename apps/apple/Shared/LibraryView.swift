@@ -61,13 +61,15 @@ enum LibrarySortOrder: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    // (R5b localisation) Read via `Text(order.label)` in the Sort menu,
+    // which takes the returned value, not a literal.
     var label: String {
         switch self {
-        case .dateAddedNewest: return "Date Added (Newest)"
-        case .dateAddedOldest: return "Date Added (Oldest)"
-        case .titleAZ: return "Title (A–Z)"
-        case .titleZA: return "Title (Z–A)"
-        case .authorAZ: return "Author (A–Z)"
+        case .dateAddedNewest: return String(localized: "Date Added (Newest)")
+        case .dateAddedOldest: return String(localized: "Date Added (Oldest)")
+        case .titleAZ: return String(localized: "Title (A–Z)")
+        case .titleZA: return String(localized: "Title (Z–A)")
+        case .authorAZ: return String(localized: "Author (A–Z)")
         }
     }
 }
@@ -77,6 +79,7 @@ struct LibraryView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @Binding var navigationPath: [ReadingDestination]
     @State private var showImporter = false
+    @State private var showOcrImportSheet = false
     @State private var searchText = ""
     @State private var searchTask: Task<Void, Never>?
     @State private var selection = Set<String>()
@@ -134,6 +137,9 @@ struct LibraryView: View {
                     .toolbar { toolbarContent }
                     .sheet(item: $tagEditorTarget) { target in
                         TagEditorView(itemId: target.id, itemTitle: target.title)
+                    }
+                    .sheet(isPresented: $showOcrImportSheet) {
+                        OcrImportSheet()
                     }
                     .fileImporter(
                         isPresented: $showImporter,
@@ -221,6 +227,11 @@ struct LibraryView: View {
             }
         }
         ToolbarItem(placement: .primaryAction) {
+            Button { showOcrImportSheet = true } label: {
+                Label("Scan/Import Images", systemImage: "doc.text.viewfinder")
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
             Menu {
                 Picker("Sort By", selection: $sortOrder) {
                     ForEach(LibrarySortOrder.allCases) { order in
@@ -301,7 +312,10 @@ struct LibraryView: View {
         ToolbarItem(placement: .primaryAction) {
             Button {
                 if let id = selection.first {
-                    navigationPath.append(.rsvp(itemId: id))
+                    // Settings scene's Reading tab default (RSVP vs Flow
+                    // View) -- the context menu's explicit "Open in
+                    // Reader"/"Open in Flow View" items are unaffected.
+                    navigationPath.append(ReadingSettings.shared.defaultMode.destination(for: id))
                 }
             } label: {
                 Label("Open", systemImage: "book")
@@ -338,8 +352,17 @@ struct LibraryView: View {
             ) {
                 Button("OK", role: .cancel) { core.drmProtectedFile = nil }
             } message: {
+                // (R5b localisation) `?? "This file"` forces this whole
+                // interpolated expression to plain `String` (the `??`
+                // operator's other side is a `String?`), so it loses
+                // `Text`'s automatic LocalizedStringKey literal handling --
+                // wrap explicitly so the fixed English text still reaches
+                // the catalog. `lastPathComponent` itself is the user's own
+                // file name (data, not translatable).
                 Text(
-                    "\(core.drmProtectedFile?.lastPathComponent ?? "This file") is protected by DRM and can't be imported. GIST never attempts to circumvent copy protection."
+                    String(
+                        localized: "\(core.drmProtectedFile?.lastPathComponent ?? String(localized: "This file")) is protected by DRM and can't be imported. GIST never attempts to circumvent copy protection."
+                    )
                 )
             }
             .alert(
@@ -389,8 +412,13 @@ struct LibraryView: View {
                 Button("Remove", role: .destructive) {
                     let ids = Array(selection)
                     selection.removeAll()
+                    // Was hardcoded `true` -- now reads the Settings-scene
+                    // default (Storage tab), see `StorageSettings
+                    // .deleteSourceFilesOnRemoval`'s doc comment for why
+                    // `true` remains the out-of-the-box default.
+                    let deleteSourceFiles = StorageSettings.shared.deleteSourceFilesOnRemoval
                     Task {
-                        let summary = await core.removeItems(ids: ids, deleteSourceFiles: true)
+                        let summary = await core.removeItems(ids: ids, deleteSourceFiles: deleteSourceFiles)
                         if summary.hasFailures { removeWarning = summary }
                     }
                 }

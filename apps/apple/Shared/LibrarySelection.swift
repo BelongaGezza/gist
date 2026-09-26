@@ -15,10 +15,13 @@ enum LibrarySelection: Hashable {
     case collection(CollectionVM)
 
     /// Title for the detail pane's navigation bar.
+    // (R5b localisation) `.collection`'s branch returns the user's own
+    // collection name (data, not translatable); only the `.all` fallback is
+    // a fixed UI string, so only that one is wrapped.
     var title: String {
         switch self {
         case .all:
-            return "Library"
+            return String(localized: "Library")
         case .collection(let collection):
             return collection.name
         }

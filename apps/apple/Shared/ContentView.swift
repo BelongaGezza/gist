@@ -35,7 +35,7 @@ struct ContentView: View {
                     .navigationDestination(for: ReadingDestination.self) { destination in
                         switch destination {
                         case .rsvp(let itemId):
-                            RsvpView(itemId: itemId)
+                            RsvpView(itemId: itemId, navigationPath: $navigationPath)
                         case .flow(let itemId):
                             FlowReaderContainer<FlowViewSwiftUINative>(itemId: itemId)
                         }

@@ -53,7 +53,20 @@ final class CoreClient: ObservableObject {
             )
         } catch {
             self.core = nil
-            self.error = "Failed to initialise GIST core: \(error)"
+            // (R5b localisation) Plain string interpolation, not passed
+            // through Text() -- wrap so the fixed prefix reaches the
+            // catalog. `error` itself is a system-provided description,
+            // not further localisable here.
+            // `String(describing:)` explicitly, per the compiler's own
+            // suggestion: `error: Error` has no built-in
+            // `String.LocalizationValue` interpolation support (it's an
+            // existential, not `CustomLocalizedStringResourceConvertible`),
+            // so interpolating it directly emits a deprecation warning
+            // about producing an unlocalized debug description -- which is
+            // exactly what's wanted here (this fixed prefix is the only
+            // part meant to be localized; the underlying error's own text
+            // is diagnostic, not further localizable by us).
+            self.error = String(localized: "Failed to initialise GIST core: \(String(describing: error))")
         }
     }
 
@@ -72,7 +85,20 @@ final class CoreClient: ObservableObject {
             core = try GistCore(dbPath: dbPath, storageDir: storageDir)
         } catch {
             self.core = nil
-            self.error = "Failed to initialise GIST core: \(error)"
+            // (R5b localisation) Plain string interpolation, not passed
+            // through Text() -- wrap so the fixed prefix reaches the
+            // catalog. `error` itself is a system-provided description,
+            // not further localisable here.
+            // `String(describing:)` explicitly, per the compiler's own
+            // suggestion: `error: Error` has no built-in
+            // `String.LocalizationValue` interpolation support (it's an
+            // existential, not `CustomLocalizedStringResourceConvertible`),
+            // so interpolating it directly emits a deprecation warning
+            // about producing an unlocalized debug description -- which is
+            // exactly what's wanted here (this fixed prefix is the only
+            // part meant to be localized; the underlying error's own text
+            // is diagnostic, not further localizable by us).
+            self.error = String(localized: "Failed to initialise GIST core: \(String(describing: error))")
         }
     }
 
@@ -92,7 +118,20 @@ final class CoreClient: ObservableObject {
             )
         } catch {
             self.core = nil
-            self.error = "Failed to initialise GIST core: \(error)"
+            // (R5b localisation) Plain string interpolation, not passed
+            // through Text() -- wrap so the fixed prefix reaches the
+            // catalog. `error` itself is a system-provided description,
+            // not further localisable here.
+            // `String(describing:)` explicitly, per the compiler's own
+            // suggestion: `error: Error` has no built-in
+            // `String.LocalizationValue` interpolation support (it's an
+            // existential, not `CustomLocalizedStringResourceConvertible`),
+            // so interpolating it directly emits a deprecation warning
+            // about producing an unlocalized debug description -- which is
+            // exactly what's wanted here (this fixed prefix is the only
+            // part meant to be localized; the underlying error's own text
+            // is diagnostic, not further localizable by us).
+            self.error = String(localized: "Failed to initialise GIST core: \(String(describing: error))")
         }
     }
 
@@ -126,7 +165,11 @@ final class CoreClient: ObservableObject {
         ffiItems.map { item in
             LibraryItemVM(
                 id: item.id,
-                title: item.title ?? "Untitled",
+                // (R5b localisation) `?? "Untitled"` forces this to plain
+                // String, losing Text()'s automatic literal handling at
+                // every call site that renders `title` -- wrap here, once,
+                // at the source.
+                title: item.title ?? String(localized: "Untitled"),
                 authors: item.authors,
                 sourcePath: item.sourcePath,
                 contentEncrypted: item.contentEncrypted
@@ -216,8 +259,9 @@ final class CoreClient: ObservableObject {
         guard let core else { return }
         drmProtectedFile = nil
         do {
-            _ = try core.importUrl(url: urlString)
+            let id = try core.importUrl(url: urlString)
             error = nil
+            await autoEncryptIfEnabled(itemId: id)
         } catch let gistError as GistError {
             switch gistError {
             case .DrmProtected:
@@ -360,8 +404,9 @@ final class CoreClient: ObservableObject {
         guard let core else { return }
         drmProtectedFile = nil
         do {
-            _ = try core.importFile(path: url.path)
+            let id = try core.importFile(path: url.path)
             error = nil
+            await autoEncryptIfEnabled(itemId: id)
         } catch let gistError as GistError {
             switch gistError {
             case .DrmProtected:
@@ -373,6 +418,19 @@ final class CoreClient: ObservableObject {
             self.error = "\(error)"
         }
         await reloadItems(clearErrorOnSuccess: false)
+    }
+
+    /// Settings scene's Import-tab default (`ImportDefaults
+    /// .autoEncryptOnImport`, see AppSettings.swift): when enabled, encrypts
+    /// a just-imported item at rest immediately via the same `encryptItems`
+    /// FFI path the Library's "Encrypt" action uses. Best-effort -- a
+    /// failure here doesn't fail the import itself (the item is already in
+    /// the library, plaintext, by the time this runs), matching the
+    /// best-effort framing already used for e.g. `removeItems`'s leftover
+    /// file cleanup.
+    private func autoEncryptIfEnabled(itemId: String) async {
+        guard let core, ImportDefaults.shared.autoEncryptOnImport else { return }
+        _ = try? core.encryptItems(ids: [itemId], keyProvider: KeychainKeyProvider())
     }
 
     /// Fetches an RSVP session for `itemId` and decodes it. `startRsvp` is a
@@ -407,6 +465,128 @@ final class CoreClient: ObservableObject {
         } catch {
             self.error = "\(error)"
             return nil
+        }
+    }
+
+    // MARK: - Annotations (ADR-003)
+
+    /// Creates a new annotation (highlight/note/bookmark), anchored per
+    /// ADR-003 as `(block_id, start, len, prefix_hash, quote_hash)`.
+    /// `prefixHash`/`quoteHash` must already be computed by the caller (see
+    /// `AnnotationAnchoring` in `AnnotationModel.swift`) -- this call only
+    /// persists them, exactly mirroring `GistCore.createAnnotation`'s own
+    /// doc comment. Returns the new annotation's id, or `nil` on failure
+    /// (with `error` set).
+    @discardableResult
+    func createAnnotation(
+        itemId: String,
+        kind: FfiAnnotationKind,
+        blockId: String,
+        start: Int,
+        len: Int,
+        prefixHash: UInt64,
+        quoteHash: UInt64,
+        noteText: String?
+    ) async -> String? {
+        guard let core else { return nil }
+        do {
+            let id = try core.createAnnotation(
+                itemId: itemId,
+                kind: kind,
+                blockId: blockId,
+                start: UInt64(start),
+                len: UInt64(len),
+                prefixHash: prefixHash,
+                quoteHash: quoteHash,
+                noteText: noteText
+            )
+            error = nil
+            return id
+        } catch {
+            self.error = "\(error)"
+            return nil
+        }
+    }
+
+    /// Returns all annotations for one item, newest first, via
+    /// `GistCore.listAnnotationsForItem`. Like `listItemsInCollection`/
+    /// `listItemsByTag`, this doesn't publish into a shared `@Published`
+    /// property -- callers (`FlowReaderContainer`'s `AnnotationState`) hold
+    /// the result as their own state, since only one document's annotations
+    /// are ever being browsed at a time.
+    func listAnnotations(itemId: String) async -> [AnnotationVM] {
+        guard let core else { return [] }
+        do {
+            let ffiAnnotations = try core.listAnnotationsForItem(itemId: itemId)
+            error = nil
+            return ffiAnnotations.map { AnnotationVM(ffi: $0) }
+        } catch {
+            self.error = "\(error)"
+            return []
+        }
+    }
+
+    /// Updates an annotation's note text (a `.note`'s real body, or a
+    /// `.highlight`'s colour encoding -- see `HighlightColor`'s doc
+    /// comment) via `GistCore.updateAnnotationNote`. Never touches the
+    /// anchor fields (`blockId`/`start`/`len`/hashes) -- re-anchoring is out
+    /// of scope here, matching the Rust method's own doc comment.
+    func updateAnnotationNote(id: String, noteText: String?) async {
+        guard let core else { return }
+        do {
+            try core.updateAnnotationNote(id: id, noteText: noteText)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    /// Deletes a single annotation via `GistCore.deleteAnnotation`.
+    func deleteAnnotation(id: String) async {
+        guard let core else { return }
+        do {
+            try core.deleteAnnotation(id: id)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    /// Deletes one or more annotations; unknown ids are silently skipped
+    /// (mirrors `removeItems`'s multi-id semantics). Returns the number
+    /// actually deleted.
+    @discardableResult
+    func deleteAnnotations(ids: [String]) async -> Int {
+        guard let core else { return 0 }
+        do {
+            let count = try core.deleteAnnotations(ids: ids)
+            error = nil
+            return Int(count)
+        } catch {
+            self.error = "\(error)"
+            return 0
+        }
+    }
+
+    /// Re-verifies/re-anchors every stored annotation for `itemId` against
+    /// the document's *current* content (ADR-003) via
+    /// `GistCore.reanchorAnnotations`. A `.reanchored` result has already
+    /// been rewritten and persisted server-side by the time this returns; a
+    /// `.orphaned` one is left completely untouched in the store. Matches
+    /// the FFI doc comment's stated call pattern: call this when opening a
+    /// reading view, before rendering highlights/notes/bookmarks --
+    /// `AnnotationState.reload` (`FlowDocumentModel.swift`) does exactly
+    /// that on every load. Returns `[]` (with `error` set) on failure,
+    /// same convention as `listAnnotations`.
+    func reanchorAnnotations(itemId: String) async -> [AnnotationAnchorResult] {
+        guard let core else { return [] }
+        do {
+            let ffiResults = try core.reanchorAnnotations(itemId: itemId)
+            error = nil
+            return ffiResults.map(AnnotationAnchorResult.init(ffi:))
+        } catch {
+            self.error = "\(error)"
+            return []
         }
     }
 
@@ -478,6 +658,40 @@ final class CoreClient: ObservableObject {
         )
     }
 
+    // MARK: - OCR import (role R8)
+
+    /// Commits a multi-page OCR scan via `GistCore.importImageWithOcr`.
+    /// `engine` is expected to be a `ReviewedOcrEngine` (see
+    /// VisionOcrEngine.swift), built from the OCR review screen's
+    /// already-recognized -- and possibly user-edited -- per-page text and
+    /// confidence: unlike `importFile`/`importUrl`, there is no separate
+    /// "commit, then find out something's wrong" step for content itself,
+    /// since the review screen already resolved that client-side before
+    /// this is ever called. There's also no DRM branch here (OCR imports
+    /// have no DRM concept) -- any `GistError` case (most notably the
+    /// ADR-009-addendum-2 byte-size cap surfacing as `.Core`) is returned as
+    /// a plain, presentable failure message, matching this codebase's
+    /// standing rule that a typed error from this path is real and must be
+    /// shown, never silently swallowed.
+    func importScannedDocument(pagePaths: [String], engine: OcrEngine) async -> OcrImportOutcome {
+        guard let core else {
+            return .failure(String(localized: "GIST core is not available."))
+        }
+        do {
+            let result = try core.importImageWithOcr(paths: pagePaths, engine: engine)
+            error = nil
+            await reloadItems(clearErrorOnSuccess: false)
+            return .success(itemId: result.itemId, pageConfidences: result.pageConfidences)
+        } catch let gistError as GistError {
+            let message = "\(gistError)"
+            self.error = message
+            return .failure(message)
+        } catch {
+            self.error = "\(error)"
+            return .failure("\(error)")
+        }
+    }
+
     /// Persists the current token index so playback can resume later.
     func saveProgress(itemId: String, tokenIndex: Int) async {
         guard let core else { return }
@@ -522,18 +736,31 @@ struct EncryptItemsSummary {
 
     /// A short, human-readable summary line, e.g. "2 items encrypted, 1 was
     /// already encrypted, 1 failed." Only mentions the parts that happened.
+    // (R5b localisation) Built via string interpolation/concatenation, not
+    // `Text("literal")`, so none of this reaches the catalog automatically.
+    // Each fragment is wrapped individually with `String(localized:)` --
+    // scaffolding only (see this file's top note): true plural-aware
+    // grammar (String Catalog's `%#@format@` plural variables) isn't set
+    // up here, since English is the only shipping locale for v1.0 and each
+    // singular/plural variant is already spelled out explicitly.
     var message: String {
         var parts: [String] = []
         if encryptedCount > 0 {
-            parts.append("\(encryptedCount) item\(encryptedCount == 1 ? "" : "s") encrypted")
+            parts.append(String(localized: "\(encryptedCount) item\(encryptedCount == 1 ? "" : "s") encrypted"))
         }
         if alreadyEncryptedCount > 0 {
-            parts.append("\(alreadyEncryptedCount) \(alreadyEncryptedCount == 1 ? "was" : "were") already encrypted")
+            parts.append(
+                String(
+                    localized: "\(alreadyEncryptedCount) \(alreadyEncryptedCount == 1 ? "was" : "were") already encrypted"
+                )
+            )
         }
         if failedCount > 0 {
-            parts.append("\(failedCount) failed")
+            parts.append(String(localized: "\(failedCount) failed"))
         }
-        return parts.isEmpty ? "No items were selected." : parts.joined(separator: ", ") + "."
+        return parts.isEmpty
+            ? String(localized: "No items were selected.")
+            : parts.joined(separator: ", ") + "."
     }
 }
 
@@ -553,11 +780,24 @@ struct RemoveItemsSummary {
     /// e.g. "1 file for the removed item could not be deleted (something
     /// else may have it open). It has been reclaimed from your library --
     /// GIST will retry deleting the leftover file automatically."
+    // (R5b localisation) See `EncryptItemsSummary.message`'s note above --
+    // same reasoning applies here.
     var message: String {
-        "\(filesFailedCount) file\(filesFailedCount == 1 ? "" : "s") for the removed item\(removedCount == 1 ? "" : "s") "
-            + "could not be deleted (something else may have it open). "
-            + "It has been reclaimed from your library — GIST will retry deleting the leftover file\(filesFailedCount == 1 ? "" : "s") automatically."
+        String(
+            localized: "\(filesFailedCount) file\(filesFailedCount == 1 ? "" : "s") for the removed item\(removedCount == 1 ? "" : "s") could not be deleted (something else may have it open). It has been reclaimed from your library — GIST will retry deleting the leftover file\(filesFailedCount == 1 ? "" : "s") automatically."
+        )
     }
+}
+
+/// Outcome of `CoreClient.importScannedDocument`. Returned as a value
+/// (rather than only setting `core.error`, like most other `CoreClient`
+/// methods) because `OcrImportState.commit` drives its own
+/// `OcrImportPhase` state machine and needs to distinguish "committed
+/// successfully" from "failed" without depending on `core.error` as a side
+/// channel that some other concurrent operation could also be writing to.
+enum OcrImportOutcome {
+    case success(itemId: String, pageConfidences: [Float])
+    case failure(String)
 }
 
 struct CollectionVM: Identifiable, Hashable {

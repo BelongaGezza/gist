@@ -14,12 +14,22 @@ infer            = "0.22"
 gist-rsvp      = { path = "../gist-rsvp" }
 gist-store     = { path = "../gist-store" }
 gist-web       = { path = "../gist-web" }
+# R2b (2026-09-26): `Core::import_image_with_ocr` calls `prepare_image`
+# directly. `gist-imageprep` depends on `gist-model` (for `ParseError`, moved
+# there for exactly this reason) rather than back on `gist-core`, so this
+# stays a one-directional edge, not a cycle.
+gist-imageprep = { path = "../gist-imageprep" }
 serde_json     = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }
 
 [dev-dependencies]
 tempfile        = "3"
+# Tests only: builds tiny real PNGs for `import_image_with_ocr`'s happy-path
+# test, so it exercises a real `gist_imageprep::prepare_image` decode rather
+# than a hand-built byte string. Same version/feature set gist-imageprep
+# itself already uses.
+image           = { version = "0.25", default-features = false, features = ["png"] }
 # Tests only: proves a user's own original file is byte-for-byte unchanged
 # after a removal, rather than merely still present. Same version the rest of
 # the workspace already uses (gist-store), so this adds no new dependency.
