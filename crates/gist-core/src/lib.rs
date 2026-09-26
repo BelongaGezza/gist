@@ -3462,7 +3462,7 @@ mod tests {
     #[test]
     fn removing_both_sharers_in_one_batch_deletes_the_shared_stored_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let (core, storage, [id_a, id_b], [src_a, src_b], shared) =
+        let (core, _storage, [id_a, id_b], [src_a, src_b], shared) =
             two_items_sharing_one_stored_copy(dir.path());
         let (hash_a, hash_b) = (sha256_hex(&src_a), sha256_hex(&src_b));
         let shared_sidecar = std::path::PathBuf::from(format!("{}.blake3", shared.display()));
@@ -3608,7 +3608,7 @@ mod tests {
     #[test]
     fn no_residue_referencing_a_removed_item_remains_in_the_storage_tree() {
         let dir = tempfile::tempdir().unwrap();
-        let (core, storage, [id_a, id_b], [src_a, src_b], shared) =
+        let (core, storage, [id_a, id_b], [src_a, _src_b], shared) =
             two_items_sharing_one_stored_copy(dir.path());
         let hash_a = sha256_hex(&src_a);
 
