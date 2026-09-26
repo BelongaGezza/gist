@@ -1596,9 +1596,9 @@ impl Store {
     /// bump `updated_at`. Pass `None` to clear the text (e.g. converting a
     /// `Note` back to a plain `Highlight`). The anchor fields
     /// (`block_id`/`start`/`len`/`prefix_hash`/`quote_hash`) are never
-    /// touched by this method — re-anchoring after a hash mismatch is
-    /// reading-view logic, out of scope for this backend slice (see
-    /// `gist_model::Annotation`'s doc comment).
+    /// touched by this method — see `update_annotation_anchor` below for
+    /// the write path ADR-003 re-anchoring (`gist_core::Core::
+    /// reanchor_annotations`) uses instead.
     pub fn update_annotation_note(
         &self,
         id: &str,
@@ -1609,6 +1609,50 @@ impl Store {
         let affected = conn.execute(
             "UPDATE annotations SET note_text = ?1, updated_at = ?2 WHERE id = ?3",
             params![note_text, now_ms, id],
+        )?;
+        if affected == 0 {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Persist a corrected anchor for annotation `id` after ADR-003
+    /// re-anchoring (`gist_core::Core::reanchor_annotations`, via
+    /// `gist_core::anchoring::reanchor`) found its `quote_hash` at a new
+    /// position within the same block. Rewrites every anchor field
+    /// (`block_id`/`start`/`len`/`prefix_hash`/`quote_hash`) and bumps
+    /// `updated_at` — the complement to `update_annotation_note` above,
+    /// which deliberately never touches these fields. `quote_hash` is
+    /// accepted (not recomputed here) so this method stays a pure
+    /// persist-what-I'm-given operation, matching `create_annotation`'s own
+    /// convention; the caller is responsible for the hash actually matching
+    /// the text at `start`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_annotation_anchor(
+        &self,
+        id: &str,
+        block_id: &str,
+        start: usize,
+        len: usize,
+        prefix_hash: u64,
+        quote_hash: u64,
+    ) -> Result<(), StoreError> {
+        let now_ms = now_millis();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let affected = conn.execute(
+            "UPDATE annotations
+             SET block_id = ?1, start_offset = ?2, len_bytes = ?3, prefix_hash = ?4,
+                 quote_hash = ?5, updated_at = ?6
+             WHERE id = ?7",
+            params![
+                block_id,
+                start as i64,
+                len as i64,
+                prefix_hash as i64,
+                quote_hash as i64,
+                now_ms,
+                id,
+            ],
         )?;
         if affected == 0 {
             return Err(StoreError::NotFound(id.to_string()));
@@ -2393,6 +2437,49 @@ mod tests {
     fn update_annotation_note_on_unknown_id_returns_not_found() {
         let (_dir, store) = open_test_store();
         let result = store.update_annotation_note("does-not-exist", Some("x"));
+        assert!(matches!(result, Err(StoreError::NotFound(ref id)) if id == "does-not-exist"));
+    }
+
+    #[test]
+    fn update_annotation_anchor_rewrites_every_anchor_field_and_bumps_updated_at() {
+        let (_dir, store) = open_test_store();
+        let item_id = insert_test_item(&store);
+        let id = store
+            .create_annotation(
+                &item_id,
+                gist_model::AnnotationKind::Highlight,
+                "s0",
+                10,
+                5,
+                111,
+                222,
+                None,
+            )
+            .unwrap();
+        let before = store.list_annotations_for_item(&item_id).unwrap().remove(0);
+
+        // Ensure a strictly later millisecond timestamp is observable.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store
+            .update_annotation_anchor(&id, "s1", 42, 7, 333, 444)
+            .unwrap();
+
+        let after = store.list_annotations_for_item(&item_id).unwrap().remove(0);
+        assert_eq!(after.block_id, "s1");
+        assert_eq!(after.start, 42);
+        assert_eq!(after.len, 7);
+        assert_eq!(after.prefix_hash, 333);
+        assert_eq!(after.quote_hash, 444);
+        assert_eq!(after.created_at, before.created_at);
+        assert!(after.updated_at >= before.updated_at);
+        // Note text is untouched by an anchor-only update.
+        assert_eq!(after.note_text, before.note_text);
+    }
+
+    #[test]
+    fn update_annotation_anchor_on_unknown_id_returns_not_found() {
+        let (_dir, store) = open_test_store();
+        let result = store.update_annotation_anchor("does-not-exist", "s0", 0, 1, 1, 1);
         assert!(matches!(result, Err(StoreError::NotFound(ref id)) if id == "does-not-exist"));
     }
 

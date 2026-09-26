@@ -256,6 +256,65 @@ impl From<gist_core::Annotation> for FfiAnnotation {
     }
 }
 
+// ── Annotation re-anchoring (ADR-003) ───────────────────────────────────────
+
+/// Mirrors `gist_core::anchoring::AnchorStatus` as a uniffi-exportable enum.
+/// Kept data-free, like every other uniffi enum in this file, since a
+/// uniffi enum with a per-variant payload doesn't map as cleanly to Swift
+/// as a flat enum plus an `Option` field on the containing record (the same
+/// pattern `FfiEncryptItemResult` above uses) — `FfiAnnotationAnchorResult
+/// .old_start` carries `Reanchored`'s only payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiAnchorStatus {
+    /// `prefix_hash`/`quote_hash` both matched at the stored position —
+    /// nothing changed.
+    Valid,
+    /// The stored anchor didn't verify in place, but the quoted text was
+    /// found elsewhere in the same block and the anchor was rewritten.
+    Reanchored,
+    /// The quoted text could not be found anywhere in the block. Left
+    /// exactly as stored — never deleted or silently moved.
+    Orphaned,
+}
+
+impl From<&gist_core::AnchorStatus> for FfiAnchorStatus {
+    fn from(s: &gist_core::AnchorStatus) -> Self {
+        match s {
+            gist_core::AnchorStatus::Valid => FfiAnchorStatus::Valid,
+            gist_core::AnchorStatus::Reanchored { .. } => FfiAnchorStatus::Reanchored,
+            gist_core::AnchorStatus::Orphaned => FfiAnchorStatus::Orphaned,
+        }
+    }
+}
+
+/// Result of re-anchoring one annotation via
+/// `GistCore::reanchor_annotations` (ADR-003): the annotation's state after
+/// the check — already rewritten in the store if `status == .reanchored` —
+/// paired with what happened. `old_start` is `Some` only when
+/// `status == .reanchored`, letting a reading view explain the move (e.g.
+/// "this highlight moved") without a second round trip.
+#[derive(uniffi::Record)]
+pub struct FfiAnnotationAnchorResult {
+    pub annotation: FfiAnnotation,
+    pub status: FfiAnchorStatus,
+    pub old_start: Option<u64>,
+}
+
+impl From<gist_core::AnnotationAnchorResult> for FfiAnnotationAnchorResult {
+    fn from(r: gist_core::AnnotationAnchorResult) -> Self {
+        let status = FfiAnchorStatus::from(&r.status);
+        let old_start = match r.status {
+            gist_core::AnchorStatus::Reanchored { old_start, .. } => Some(old_start as u64),
+            _ => None,
+        };
+        FfiAnnotationAnchorResult {
+            annotation: r.annotation.into(),
+            status,
+            old_start,
+        }
+    }
+}
+
 // ── Per-item encryption (ADR-014) ──────────────────────────────────────────
 
 /// Mirrors `gist_store::EncryptOutcome` as a uniffi-exportable enum.
@@ -854,6 +913,31 @@ impl GistCore {
                 .delete_annotations(&ids)
                 .map(|n| n as u64)
                 .map_err(GistError::from)
+        })
+    }
+
+    /// Verify every annotation on `item_id` against the document's current
+    /// text and re-anchor/orphan as needed (ADR-003). Call this when
+    /// opening a reading view, before rendering highlights/notes/
+    /// bookmarks, so annotations created before a re-import or content
+    /// edit still point at the right text, or are clearly flagged when
+    /// they can't be found any more. A `.reanchored` result has already
+    /// been persisted by this call; `list_annotations_for_item` afterward
+    /// would return the same corrected position. See
+    /// `gist_core::Core::reanchor_annotations`.
+    pub fn reanchor_annotations(
+        &self,
+        item_id: String,
+    ) -> Result<Vec<FfiAnnotationAnchorResult>, GistError> {
+        ffi_catch!({
+            let results = self
+                .inner
+                .reanchor_annotations(&item_id)
+                .map_err(GistError::from)?;
+            Ok(results
+                .into_iter()
+                .map(FfiAnnotationAnchorResult::from)
+                .collect())
         })
     }
 
