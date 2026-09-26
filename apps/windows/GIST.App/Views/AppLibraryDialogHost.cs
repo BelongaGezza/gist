@@ -11,5 +11,7 @@ internal sealed class AppLibraryDialogHost : ILibraryDialogHost
 
     public Task HandleAsync(LibraryViewModel vm, XamlRoot xamlRoot) => _inner.HandleAsync(vm, xamlRoot);
 
+    public Task HandleAsync(CollectionViewModel vm, XamlRoot xamlRoot) => _inner.HandleAsync(vm, xamlRoot);
+
     public Task<string?> PickImportFileAsync(Window window) => LibraryDialogHost.PickImportFileAsync(window);
 }

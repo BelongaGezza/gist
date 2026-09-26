@@ -111,6 +111,58 @@ public sealed class LibraryDialogHost
     }
 
     /// <summary>
+    /// The Collection screen's counterpart of <see cref="HandleAsync(LibraryViewModel, XamlRoot)"/>.
+    /// Kept separate rather than generalised over <see cref="LibraryViewModelBase"/>: the two
+    /// screens support different dialogs (no Import/New Collection/Encrypt here) and, per §5, removal
+    /// itself is a different operation with different wording — the same "two view models sharing a
+    /// row template, not a removal" split <see cref="Gist.Core.ViewModels.CollectionViewModel"/>'s
+    /// own doc comment describes.
+    /// </summary>
+    public async Task HandleAsync(CollectionViewModel vm, XamlRoot xamlRoot)
+    {
+        ArgumentNullException.ThrowIfNull(vm);
+        ArgumentNullException.ThrowIfNull(xamlRoot);
+
+        await Gate.WaitAsync();
+        try
+        {
+            for (var i = 0; i < MaxChainedDialogs && vm.PendingDialog != LibraryDialog.None; i++)
+            {
+                var requested = vm.PendingDialog;
+                bool displayed;
+                try
+                {
+                    await ShowAsync(vm, xamlRoot, requested);
+                    displayed = true;
+                }
+                catch (Exception)
+                {
+                    displayed = false;
+                }
+
+                if (!displayed)
+                {
+                    return;
+                }
+
+                if (vm.PendingDialog == requested)
+                {
+                    await vm.DismissDialogAsync();
+                }
+            }
+
+            if (vm.PendingDialog != LibraryDialog.None)
+            {
+                await vm.DismissDialogAsync();
+            }
+        }
+        finally
+        {
+            Gate.Release();
+        }
+    }
+
+    /// <summary>
     /// Opens <paramref name="dialog"/>, retrying briefly while WinUI refuses because another
     /// <c>ContentDialog</c> in the same window has not finished closing.
     /// </summary>
@@ -150,6 +202,56 @@ public sealed class LibraryDialogHost
         LibraryDialog.TagEditor => ShowTagEditorAsync(vm, xamlRoot),
         _ => Task.CompletedTask,
     };
+
+    private Task ShowAsync(CollectionViewModel vm, XamlRoot xamlRoot, LibraryDialog which) => which switch
+    {
+        LibraryDialog.RemoveConfirm => ShowCollectionRemoveAsync(vm, xamlRoot),
+        LibraryDialog.TagEditor => ShowTagEditorAsync(vm, xamlRoot),
+        LibraryDialog.Error => ShowMessageAsync(
+            xamlRoot, DialogContent.ErrorTitle, DialogContent.ErrorMessage(vm.LastError?.Kind)),
+        _ => Task.CompletedTask,
+    };
+
+    // ── Collection remove (§5: detach, not delete) ────────────────────────
+
+    private static async Task ShowCollectionRemoveAsync(CollectionViewModel vm, XamlRoot xamlRoot)
+    {
+        var preview = vm.RemovePreview();
+
+        var panel = new StackPanel { Spacing = 8 };
+        foreach (var title in preview.Titles)
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = title,
+                TextWrapping = TextWrapping.NoWrap,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            });
+        }
+
+        if (preview.MoreText is { } more)
+        {
+            panel.Children.Add(Body(more));
+        }
+
+        panel.Children.Add(Body(preview.Message));
+
+        var dialog = NewDialog(xamlRoot, preview.Title);
+
+        // Not destructive (items stay in the library — only their membership of this collection
+        // goes), so unlike the Library screen's Remove this gets an ordinary primary button, not
+        // the destructive style.
+        dialog.PrimaryButtonText = DialogContent.CollectionRemoveButton;
+        dialog.CloseButtonText = DialogContent.CancelButton;
+        dialog.DefaultButton = ContentDialogButton.Close;
+        dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 360 };
+
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
+        {
+            await vm.RemoveAsync();
+        }
+    }
 
     private static ContentDialog NewDialog(XamlRoot xamlRoot, string title)
     {
@@ -324,7 +426,7 @@ public sealed class LibraryDialogHost
 
     // ── Tag editor (§6) ────────────────────────────────────────────────────
 
-    private static async Task ShowTagEditorAsync(LibraryViewModel vm, XamlRoot xamlRoot)
+    private static async Task ShowTagEditorAsync(LibraryViewModelBase vm, XamlRoot xamlRoot)
     {
         var item = vm.SingleSelectedItem;
         if (item is null)
