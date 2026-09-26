@@ -77,6 +77,7 @@ struct LibraryView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @Binding var navigationPath: [ReadingDestination]
     @State private var showImporter = false
+    @State private var showOcrImportSheet = false
     @State private var searchText = ""
     @State private var searchTask: Task<Void, Never>?
     @State private var selection = Set<String>()
@@ -134,6 +135,9 @@ struct LibraryView: View {
                     .toolbar { toolbarContent }
                     .sheet(item: $tagEditorTarget) { target in
                         TagEditorView(itemId: target.id, itemTitle: target.title)
+                    }
+                    .sheet(isPresented: $showOcrImportSheet) {
+                        OcrImportSheet()
                     }
                     .fileImporter(
                         isPresented: $showImporter,
@@ -218,6 +222,11 @@ struct LibraryView: View {
         ToolbarItem(placement: .primaryAction) {
             Button { showUrlImportAlert = true } label: {
                 Label("Import URL", systemImage: "link")
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { showOcrImportSheet = true } label: {
+                Label("Scan/Import Images", systemImage: "doc.text.viewfinder")
             }
         }
         ToolbarItem(placement: .primaryAction) {
