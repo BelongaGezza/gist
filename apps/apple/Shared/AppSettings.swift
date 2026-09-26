@@ -28,10 +28,13 @@ enum ReadingModeDefault: String, CaseIterable, Identifiable, Codable {
 
     var id: String { rawValue }
 
+    // (R5b localisation) Read via `Text(mode.displayName)` in SettingsView,
+    // which takes the returned value, not a literal -- wrap here so the
+    // catalog captures these.
     var displayName: String {
         switch self {
-        case .rsvp: return "RSVP"
-        case .flow: return "Flow View"
+        case .rsvp: return String(localized: "RSVP")
+        case .flow: return String(localized: "Flow View")
         }
     }
 

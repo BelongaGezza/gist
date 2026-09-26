@@ -371,8 +371,17 @@ struct FlowViewSwiftUINative: ReadingLayout {
                             await annotations.reload(itemId: document.id, core: core)
                         }
                     } label: {
+                        // (R5b localisation) The `displayNoteText ?? "Note —
+                        // Delete"` branch forces the whole ternary
+                        // (including the sibling "Bookmark — Delete"
+                        // literal) to plain `String`, losing `Label`'s
+                        // automatic literal handling for both fallbacks --
+                        // wrap each explicitly. `displayNoteText` itself is
+                        // the user's own note content (data).
                         Label(
-                            point.kind == .bookmark ? "Bookmark — Delete" : (point.displayNoteText ?? "Note — Delete"),
+                            point.kind == .bookmark
+                                ? String(localized: "Bookmark — Delete")
+                                : (point.displayNoteText ?? String(localized: "Note — Delete")),
                             systemImage: point.kind == .bookmark ? "bookmark.fill" : "note.text"
                         )
                     }
@@ -415,9 +424,14 @@ struct FlowViewSwiftUINative: ReadingLayout {
     /// A short label describing where a standalone note is being added --
     /// shown inside `NoteComposerSheet` for context, since that sheet has no
     /// other way to show the user what they're annotating.
+    // (R5b localisation) `section.heading?.text` is real document content
+    // (data) when present; only the two fallback literals below are fixed
+    // UI strings, so only those are wrapped.
     private func sectionContextLabel(for entry: FlowBlockEntry) -> String {
-        guard let section = sectionsById[entry.sectionId] else { return "This location" }
-        return section.heading?.text ?? "This paragraph"
+        guard let section = sectionsById[entry.sectionId] else {
+            return String(localized: "This location")
+        }
+        return section.heading?.text ?? String(localized: "This paragraph")
     }
 
     private func headingFont(level: Int) -> Font {

@@ -138,7 +138,11 @@ struct AnnotationsSidebarView: View {
                     Text(document.sectionLabel(for: highlight))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(document.annotatedText(for: highlight) ?? "(text unavailable)")
+                    // (R5b localisation) `?? "(text unavailable)"` forces
+                    // this to plain String -- wrap the fallback so it still
+                    // reaches the catalog. The quoted text itself is real
+                    // document content when present (data, not translatable).
+                    Text(document.annotatedText(for: highlight) ?? String(localized: "(text unavailable)"))
                         .font(.body)
                         .lineLimit(3)
                 }
@@ -272,7 +276,18 @@ struct AnnotationsSidebarView: View {
     private func editNoteSheet(for annotation: AnnotationVM) -> some View {
         let isNewAttachedNote = annotation.id.hasPrefix("new-note-for-")
         VStack(alignment: .leading, spacing: 12) {
-            Text(isNewAttachedNote ? "Add Note" : "Edit Note").font(.headline)
+            // (R5b localisation) Split into two separate `Text("literal")`
+            // calls rather than `Text(isNewAttachedNote ? "Add Note" : "Edit
+            // Note")` -- both branches here are pure literals so that
+            // ternary form would in fact still resolve to LocalizedStringKey,
+            // but keeping each call a bare Text("...") literal is the
+            // simplest way to guarantee it beyond doubt and matches the
+            // pattern used elsewhere in this codebase.
+            if isNewAttachedNote {
+                Text("Add Note").font(.headline)
+            } else {
+                Text("Edit Note").font(.headline)
+            }
             TextField("Note", text: $editedNoteText, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(3...8)

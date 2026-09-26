@@ -254,11 +254,13 @@ enum ReadingFontDesign: String, CaseIterable, Identifiable, Equatable {
 
     var id: String { rawValue }
 
+    // (R5b localisation) Read via `Text(design.label)` in the typography
+    // menu, which takes the returned value, not a literal.
     var label: String {
         switch self {
-        case .system: return "Default"
-        case .serif: return "Serif"
-        case .rounded: return "Rounded"
+        case .system: return String(localized: "Default")
+        case .serif: return String(localized: "Serif")
+        case .rounded: return String(localized: "Rounded")
         }
     }
 
@@ -281,11 +283,13 @@ enum LineSpacingOption: String, CaseIterable, Identifiable, Equatable {
 
     var id: String { rawValue }
 
+    // (R5b localisation) Read via `Text(option.label)` in the typography
+    // menu, which takes the returned value, not a literal.
     var label: String {
         switch self {
-        case .compact: return "Compact"
-        case .regular: return "Regular"
-        case .relaxed: return "Relaxed"
+        case .compact: return String(localized: "Compact")
+        case .regular: return String(localized: "Regular")
+        case .relaxed: return String(localized: "Relaxed")
         }
     }
 

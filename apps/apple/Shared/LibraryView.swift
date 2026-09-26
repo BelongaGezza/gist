@@ -61,13 +61,15 @@ enum LibrarySortOrder: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    // (R5b localisation) Read via `Text(order.label)` in the Sort menu,
+    // which takes the returned value, not a literal.
     var label: String {
         switch self {
-        case .dateAddedNewest: return "Date Added (Newest)"
-        case .dateAddedOldest: return "Date Added (Oldest)"
-        case .titleAZ: return "Title (A–Z)"
-        case .titleZA: return "Title (Z–A)"
-        case .authorAZ: return "Author (A–Z)"
+        case .dateAddedNewest: return String(localized: "Date Added (Newest)")
+        case .dateAddedOldest: return String(localized: "Date Added (Oldest)")
+        case .titleAZ: return String(localized: "Title (A–Z)")
+        case .titleZA: return String(localized: "Title (Z–A)")
+        case .authorAZ: return String(localized: "Author (A–Z)")
         }
     }
 }
@@ -350,8 +352,17 @@ struct LibraryView: View {
             ) {
                 Button("OK", role: .cancel) { core.drmProtectedFile = nil }
             } message: {
+                // (R5b localisation) `?? "This file"` forces this whole
+                // interpolated expression to plain `String` (the `??`
+                // operator's other side is a `String?`), so it loses
+                // `Text`'s automatic LocalizedStringKey literal handling --
+                // wrap explicitly so the fixed English text still reaches
+                // the catalog. `lastPathComponent` itself is the user's own
+                // file name (data, not translatable).
                 Text(
-                    "\(core.drmProtectedFile?.lastPathComponent ?? "This file") is protected by DRM and can't be imported. GIST never attempts to circumvent copy protection."
+                    String(
+                        localized: "\(core.drmProtectedFile?.lastPathComponent ?? String(localized: "This file")) is protected by DRM and can't be imported. GIST never attempts to circumvent copy protection."
+                    )
                 )
             }
             .alert(

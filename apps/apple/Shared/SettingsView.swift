@@ -186,7 +186,9 @@ private struct StorageSettingsTab: View {
                 create: false
             )
         else {
-            return "Unavailable"
+            // (R5b localisation) Read via `Text(storageLocation)`, which
+            // takes the returned value, not a literal.
+            return String(localized: "Unavailable")
         }
         return supportDir.appendingPathComponent("GIST", isDirectory: true).path
     }
@@ -217,13 +219,15 @@ private struct StorageSettingsTab: View {
 // MARK: - About
 
 private struct AboutSettingsTab: View {
+    // (R5b localisation) Read via `Text(versionString)`, which takes the
+    // returned value, not a literal.
     private var versionString: String {
         let shortVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
         switch (shortVersion, build) {
-        case let (.some(v), .some(b)): return "Version \(v) (\(b))"
-        case let (.some(v), nil): return "Version \(v)"
-        default: return "Version unavailable (debug build)"
+        case let (.some(v), .some(b)): return String(localized: "Version \(v) (\(b))")
+        case let (.some(v), nil): return String(localized: "Version \(v)")
+        default: return String(localized: "Version unavailable (debug build)")
         }
     }
 

@@ -94,14 +94,19 @@ enum HighlightColor: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    // (R5b localisation) These are read via `Text(color.label)`/`.help(color.label)`
+    // -- both take `color.label`'s *value* at the call site, not a literal, so
+    // they don't get SwiftUI's automatic Text("literal") -> LocalizedStringKey
+    // treatment. Wrapping the literal here with `String(localized:)` is what
+    // actually gets each case's name into the String Catalog.
     var label: String {
         switch self {
-        case .yellow: return "Yellow"
-        case .green: return "Green"
-        case .blue: return "Blue"
-        case .pink: return "Pink"
-        case .orange: return "Orange"
-        case .purple: return "Purple"
+        case .yellow: return String(localized: "Yellow")
+        case .green: return String(localized: "Green")
+        case .blue: return String(localized: "Blue")
+        case .pink: return String(localized: "Pink")
+        case .orange: return String(localized: "Orange")
+        case .purple: return String(localized: "Purple")
         }
     }
 
@@ -302,8 +307,11 @@ extension FlowDocumentVM {
     /// its heading text if it has one, else "Section N" (1-based).
     func sectionLabel(for annotation: AnnotationVM) -> String {
         guard let index = sections.firstIndex(where: { $0.id == annotation.blockId }) else {
-            return "Unknown section"
+            return String(localized: "Unknown section")
         }
-        return sections[index].heading?.text ?? "Section \(index + 1)"
+        // `heading?.text` is real document content (untranslatable data) when
+        // present; only the "Section N" fallback used in its absence is a
+        // fixed UI string, so only that branch is wrapped for localisation.
+        return sections[index].heading?.text ?? String(localized: "Section \(index + 1)")
     }
 }
