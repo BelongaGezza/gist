@@ -59,7 +59,7 @@ Key design decisions are recorded as ADRs in [`docs/adr/`](./docs/adr/). Start w
 
 ## Security
 
-GIST handles a user's personal reading material and imports from both local files and arbitrary URLs, so security review is an ongoing part of the project — see [`docs/security-review-v2.md`](./docs/security-review-v2.md) and the security register in `CLAUDE.md`. To report a vulnerability, see [`SECURITY.md`](./SECURITY.md).
+GIST handles a user's personal reading material and imports from both local files and arbitrary URLs, so security review is an ongoing part of the project — see [`docs/security-review-v2.md`](./docs/security-review-v2.md) and the security register in `CLAUDE.md`. To report a vulnerability, see [`SECURITY.md`](./SECURITY.md). For what GIST stores, what (if anything) leaves the device, and the current state of encryption at rest, see [`docs/PRIVACY.md`](./docs/PRIVACY.md).
 
 ## Contributing
 
