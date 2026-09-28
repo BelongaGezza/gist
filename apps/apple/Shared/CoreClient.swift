@@ -135,27 +135,86 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    /// Page size for `listItems` calls. `gist-store::list_items` already
+    /// supports real SQL `LIMIT`/`OFFSET` pagination (see its doc comment),
+    /// but until M4 role R2 (`docs/m4-agent-roles.md` §2) this Swift layer
+    /// never actually used it as pagination -- `reloadItems` made one
+    /// unbounded-in-practice call with `limit: 500`, so any library past 500
+    /// items silently lost its tail with no way to ever see it, which is a
+    /// real gap against product-spec §9.1(b) ("library with 1,000+ items
+    /// must remain responsive (virtualised lists, paged library API)").
+    /// Fixed by loading a bounded first page here and paging in further
+    /// pages via `loadMoreItemsIfNeeded` as the list is scrolled, mirroring
+    /// the usual SwiftUI `List` infinite-scroll idiom.
+    private let pageSize: UInt64 = 200
+
+    /// `true` once a `listItems` page has come back short of `pageSize`,
+    /// i.e. the end of the library has been reached and there is no more to
+    /// load. Read by `LibraryView` to decide whether to keep triggering
+    /// `loadMoreItemsIfNeeded` as rows scroll into view.
+    @Published private(set) var hasMoreItems = false
+    private var isLoadingMore = false
+
     func refresh() async {
-        await reloadItems(clearErrorOnSuccess: true)
+        await reloadFirstPage(clearErrorOnSuccess: true)
     }
 
-    /// Reloads `items`. `clearErrorOnSuccess` is false when this reload is the
-    /// tail end of another operation (import, remove, encrypt) that has
-    /// already published its own outcome -- a successful reload must not wipe
-    /// a failure the user hasn't seen yet, or the DRM alert (and any other
-    /// error) would never appear. Mirrors the Windows `CoreClient` split
-    /// (`RefreshAsync`/`ReloadItemsAsync`) -- see PENDING_APPLE_CHANGES.md's
-    /// 2026-09-21 entry for the bug this fixes.
-    private func reloadItems(clearErrorOnSuccess: Bool) async {
+    /// Reloads `items` from the first page. `clearErrorOnSuccess` is false
+    /// when this reload is the tail end of another operation (import,
+    /// remove, encrypt) that has already published its own outcome -- a
+    /// successful reload must not wipe a failure the user hasn't seen yet,
+    /// or the DRM alert (and any other error) would never appear. Mirrors
+    /// the Windows `CoreClient` split (`RefreshAsync`/`ReloadItemsAsync`) --
+    /// see PENDING_APPLE_CHANGES.md's 2026-09-21 entry for the bug this
+    /// fixes.
+    private func reloadFirstPage(clearErrorOnSuccess: Bool) async {
         guard let core else { return }
         isLoading = true
         defer { isLoading = false }
         do {
-            let ffiItems = try core.listItems(offset: 0, limit: 500)
+            let ffiItems = try core.listItems(offset: 0, limit: pageSize)
             items = mapItems(ffiItems)
+            hasMoreItems = UInt64(ffiItems.count) == pageSize
             if clearErrorOnSuccess {
                 error = nil
             }
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    /// Backward-compatible alias -- every existing internal call site below
+    /// (`removeItems`, `importUrl`, `importFile`, `encryptItems`, …) reloads
+    /// the library after an operation that changed it; they all want "reset
+    /// to a fresh first page", not "append the next page", so this just
+    /// forwards to `reloadFirstPage`.
+    private func reloadItems(clearErrorOnSuccess: Bool) async {
+        await reloadFirstPage(clearErrorOnSuccess: clearErrorOnSuccess)
+    }
+
+    /// Loads the next page and appends it to `items`, if `currentItem` is
+    /// near the end of what's currently loaded and more remain. Call this
+    /// from a row's `.onAppear` while iterating the un-searched, un-filtered
+    /// full library list (`LibraryView.itemList`) -- the standard SwiftUI
+    /// `List` infinite-scroll idiom. A no-op while search/tag-filter results
+    /// (which use their own, separately-bounded FFI calls) are what's
+    /// actually displayed, since `items` isn't what's on screen then.
+    func loadMoreItemsIfNeeded(currentItem: LibraryItemVM) async {
+        guard let core else { return }
+        guard hasMoreItems, !isLoadingMore else { return }
+        guard let index = items.firstIndex(where: { $0.id == currentItem.id }) else { return }
+        // Trigger once the row within 10 of the end of what's loaded scrolls
+        // into view, so the next page is ready before the user reaches the
+        // true end of the currently-loaded list.
+        let prefetchThreshold = 10
+        guard index >= items.count - prefetchThreshold else { return }
+
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+        do {
+            let ffiItems = try core.listItems(offset: UInt64(items.count), limit: pageSize)
+            items.append(contentsOf: mapItems(ffiItems))
+            hasMoreItems = UInt64(ffiItems.count) == pageSize
         } catch {
             self.error = "\(error)"
         }
