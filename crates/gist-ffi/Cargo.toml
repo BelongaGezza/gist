@@ -19,6 +19,12 @@ serde_json = { workspace = true }
 thiserror  = { workspace = true }
 tracing    = { workspace = true }
 
+[dev-dependencies]
+# Tests only (R3, ADR-013 / `A4`): a real temp-dir `GistCore` round trip for
+# `verify_item_integrity`/`verify_library_integrity`, same version the rest
+# of the workspace already uses (gist-core/gist-store).
+tempfile = "3"
+
 [features]
 # Pulls in uniffi's clap-based CLI so `uniffi-bindgen` can be built and
 # installed as a standalone binary (uniffi 0.28+ no longer ships one on

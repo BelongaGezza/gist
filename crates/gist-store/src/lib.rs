@@ -190,6 +190,70 @@ fn write_checksum_sidecar(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Tri/four-state classification of one on-disk file's BLAKE3 checksum
+/// sidecar (ADR-013 / security register `A4`) against its current bytes —
+/// the information [`verify_checksum`]'s plain `Result<(), StoreError>`
+/// deliberately collapses (a missing sidecar and a matching one are both
+/// "fine to proceed" for the read path) but which an explicit integrity
+/// report (`R3`, [`Store::verify_item_integrity`]) needs kept apart, so a
+/// user can be told "this predates checksums" separately from "this is
+/// confirmed intact" separately from "this is genuinely corrupted."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChecksumStatus {
+    /// A sidecar exists and its digest matches the file's current bytes.
+    Verified,
+    /// The file exists but has no checksum sidecar — written before
+    /// ADR-013 landed, or (for an `originals/` copy) deduplicated against a
+    /// pre-existing file that predates it. Not an error; there is nothing
+    /// to compare against. See [`verify_checksum`]'s backfill policy.
+    Unverified,
+    /// A sidecar exists but its digest disagrees with the file's current
+    /// bytes — the file has been corrupted (bit rot, disk fault, manual
+    /// tampering) since it was written.
+    Mismatch,
+    /// The file itself does not exist on disk at all. Deliberately its own
+    /// state, not folded into `Unverified`: a missing *sidecar* is routine
+    /// (pre-`A4` data) but a missing *content file* means the row's own
+    /// data is gone, which is a stronger signal — see
+    /// [`Store::verify_item_integrity`]'s aggregation for how a caller is
+    /// expected to weigh it.
+    Missing,
+}
+
+/// Classify `bytes` (already read from `path`) against `path`'s checksum
+/// sidecar, if one exists. Never returns [`ChecksumStatus::Missing`] — the
+/// caller already has `bytes` in hand, so `path` plainly exists; that state
+/// is only produced by [`checksum_status_of_file`], which does the read.
+fn checksum_status(path: &str, bytes: &[u8]) -> Result<ChecksumStatus, StoreError> {
+    let sidecar = checksum_sidecar_path(Path::new(path));
+    let expected = match std::fs::read_to_string(&sidecar) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ChecksumStatus::Unverified)
+        }
+        Err(e) => return Err(StoreError::Io(e)),
+    };
+    if expected.trim() != checksum_hex(bytes) {
+        Ok(ChecksumStatus::Mismatch)
+    } else {
+        Ok(ChecksumStatus::Verified)
+    }
+}
+
+/// Read `path` fresh from disk and classify it against its checksum
+/// sidecar. Unlike [`checksum_status`], this can report
+/// [`ChecksumStatus::Missing`] when `path` itself doesn't exist. Used by
+/// [`Store::verify_item_integrity`]/[`Store::verify_library_integrity`]
+/// (`R3`) — an explicit integrity check, not the ordinary read path, so a
+/// missing file is reported rather than treated as "nothing to verify."
+fn checksum_status_of_file(path: &str) -> Result<ChecksumStatus, StoreError> {
+    match std::fs::read(path) {
+        Ok(bytes) => checksum_status(path, &bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ChecksumStatus::Missing),
+        Err(e) => Err(StoreError::Io(e)),
+    }
+}
+
 /// Verify `bytes` (freshly read from `path`) against `path`'s checksum
 /// sidecar, if one exists.
 ///
@@ -202,18 +266,15 @@ fn write_checksum_sidecar(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 /// spuriously flagged as corrupt, but also never silently credited with an
 /// integrity guarantee it doesn't have.
 fn verify_checksum(path: &str, bytes: &[u8]) -> Result<(), StoreError> {
-    let sidecar = checksum_sidecar_path(Path::new(path));
-    let expected = match std::fs::read_to_string(&sidecar) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(StoreError::Io(e)),
-    };
-    if expected.trim() != checksum_hex(bytes) {
-        return Err(StoreError::ChecksumMismatch {
+    match checksum_status(path, bytes)? {
+        ChecksumStatus::Mismatch => Err(StoreError::ChecksumMismatch {
             path: path.to_string(),
-        });
+        }),
+        // `Missing` is unreachable here (bytes were already read
+        // successfully) but matched for exhaustiveness rather than `_`, so
+        // a future new variant can't silently fall through unconsidered.
+        ChecksumStatus::Verified | ChecksumStatus::Unverified | ChecksumStatus::Missing => Ok(()),
     }
-    Ok(())
 }
 
 // ── Long database paths on Windows (review Q10) ────────────────────────────
@@ -375,6 +436,30 @@ pub struct ReferencedFiles {
     /// *same* path can appear for more than one row — which is exactly why
     /// the sweep keeps a file while **any** row still references it.
     pub source_copy_path: Option<String>,
+}
+
+// ── Item integrity report (ADR-013 / security register `A4`, `R3`) ─────────
+
+/// Per-file [`ChecksumStatus`] breakdown for one `library_items` row, as
+/// returned by [`Store::verify_item_integrity`]/
+/// [`Store::verify_library_integrity`]. `gist_core::Core` aggregates this
+/// into a single pass/fail/unverified verdict; kept here as the full
+/// breakdown so a caller that wants more than the three-state summary
+/// (e.g. "your original copy is missing but your reading copy is fine")
+/// doesn't need a second call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemIntegrityReport {
+    pub id: String,
+    /// Status of the `<id>.json` document blob (ADR-007).
+    pub doc_status: ChecksumStatus,
+    /// Status of the `<id>.tokens.json` blob. `Unverified` (not `Missing`)
+    /// when this item predates ADR-007's separate tokens file and has none
+    /// — see [`Store::verify_item_integrity`]'s implementation note.
+    pub tokens_status: ChecksumStatus,
+    /// Status of the ADR-006 sandboxed `originals/` copy, or `None` if
+    /// this item has no such copy (a URL import, or one that predates
+    /// ADR-006).
+    pub original_copy_status: Option<ChecksumStatus>,
 }
 
 // ── Collection ──────────────────────────────────────────────────────────────
@@ -916,6 +1001,118 @@ impl Store {
     pub fn verify_original_copy(&self, path: &str) -> Result<(), StoreError> {
         let bytes = std::fs::read(path)?;
         verify_checksum(path, &bytes)
+    }
+
+    /// Per-item integrity report built from [`ChecksumStatus`], the
+    /// primitive [`Store::verify_item_integrity`]/
+    /// [`Store::verify_library_integrity`] (`R3`, `A4`) share for a single
+    /// `library_items` row's on-disk files: the `<id>.json` document blob,
+    /// its `<id>.tokens.json` sibling, and — when one exists — the ADR-006
+    /// `originals/` copy. Shared with [`Store::verify_original_copy`]'s
+    /// underlying checksum logic, just kept at the finer four-state
+    /// granularity ([`ChecksumStatus`]) that an explicit report needs and a
+    /// plain `Result<(), StoreError>` read-path gate does not.
+    fn integrity_report_for(
+        id: &str,
+        doc_path: &str,
+        source_copy_path: Option<&str>,
+    ) -> Result<ItemIntegrityReport, StoreError> {
+        let doc_status = checksum_status_of_file(doc_path)?;
+
+        // Mirrors `Store::get_tokens`'s own path derivation exactly, and
+        // its fallback: a legacy item with no separate tokens file is not
+        // an error (it reads the full document instead at RSVP-time), so a
+        // missing tokens file here is `Unverified` (nothing to check), not
+        // `Missing` (which would read as "this item's data is gone" — it
+        // isn't, it's just stored differently).
+        let tokens_path = doc_path
+            .strip_suffix(".json")
+            .map(|s| format!("{s}.tokens.json"))
+            .unwrap_or_else(|| format!("{doc_path}.tokens.json"));
+        let tokens_status = if Path::new(&tokens_path).exists() {
+            checksum_status_of_file(&tokens_path)?
+        } else {
+            ChecksumStatus::Unverified
+        };
+
+        let original_copy_status = match source_copy_path {
+            Some(p) => Some(checksum_status_of_file(p)?),
+            None => None,
+        };
+
+        Ok(ItemIntegrityReport {
+            id: id.to_string(),
+            doc_status,
+            tokens_status,
+            original_copy_status,
+        })
+    }
+
+    /// Check one library item's on-disk integrity (`R3`, `A4`): its
+    /// document/tokens blobs and, if it has one, its ADR-006 sandboxed
+    /// original copy — each classified via [`ChecksumStatus`], never
+    /// decrypting anything, since checksums cover on-disk bytes
+    /// (ciphertext when this `Store` is encrypted, ADR-011) rather than
+    /// plaintext (see [`Store::read_maybe_encrypted`]'s doc comment). This
+    /// is why, unlike [`Store::get_item`]/[`Store::get_tokens`], this
+    /// method needs no `KeyProvider` and cannot fail with
+    /// [`StoreError::MissingKeyProvider`].
+    ///
+    /// Returns `Ok(None)` if `id` matches no row, mirroring
+    /// [`Store::get_item_by_id`]. Aggregating the per-file report into a
+    /// single pass/fail/unverified verdict is `gist_core::Core`'s job (`R3`
+    /// keeps that policy decision at the facade layer, not here).
+    pub fn verify_item_integrity(
+        &self,
+        id: &str,
+    ) -> Result<Option<ItemIntegrityReport>, StoreError> {
+        let row: Option<(String, Option<String>)> = {
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.query_row(
+                "SELECT doc_path, source_copy_path FROM library_items WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+        };
+
+        match row {
+            None => Ok(None),
+            Some((doc_path, source_copy_path)) => {
+                Self::integrity_report_for(id, &doc_path, source_copy_path.as_deref()).map(Some)
+            }
+        }
+    }
+
+    /// [`Store::verify_item_integrity`], for every item in the library.
+    ///
+    /// Fails the whole call only on a genuinely unexpected I/O error (e.g.
+    /// permission denied reading a file that does exist) — a *missing*
+    /// file is not such an error, it's reported as
+    /// [`ChecksumStatus::Missing`] within that item's report, so one item's
+    /// absent file can never abort the rest of the library's report. This
+    /// mirrors this crate's general policy (see [`Store::remove_items`]'s
+    /// unknown-id handling) of degrading gracefully per-row rather than
+    /// letting one bad row take down a bulk operation, applied here at the
+    /// file layer instead of the DB layer.
+    pub fn verify_library_integrity(&self) -> Result<Vec<ItemIntegrityReport>, StoreError> {
+        let rows: Vec<(String, String, Option<String>)> = {
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt =
+                conn.prepare("SELECT id, doc_path, source_copy_path FROM library_items")?;
+            let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            let mut out = Vec::new();
+            for r in mapped {
+                out.push(r?);
+            }
+            out
+        };
+
+        rows.iter()
+            .map(|(id, doc_path, source_copy_path)| {
+                Self::integrity_report_for(id, doc_path, source_copy_path.as_deref())
+            })
+            .collect()
     }
 
     /// Remove a single item. Thin wrapper around [`Store::remove_items`] so
@@ -3342,6 +3539,122 @@ mod tests {
              encrypted content, got {:?}",
             result
         );
+    }
+
+    // ── Item integrity reports (`R3`, ADR-013 / `A4`) ────────────────────
+
+    #[test]
+    fn verify_item_integrity_reports_verified_for_a_clean_item() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("xi");
+        store.insert_item(&doc).unwrap();
+
+        let report = store
+            .verify_item_integrity(&doc.id)
+            .unwrap()
+            .expect("just-inserted item must be found");
+        assert_eq!(report.id, doc.id);
+        assert_eq!(report.doc_status, ChecksumStatus::Verified);
+        assert_eq!(report.tokens_status, ChecksumStatus::Verified);
+        assert_eq!(
+            report.original_copy_status, None,
+            "doc_with_title stamps no source_copy_ref"
+        );
+    }
+
+    #[test]
+    fn verify_item_integrity_returns_none_for_an_unknown_id() {
+        let (_dir, store) = open_test_store();
+        assert!(store
+            .verify_item_integrity("not-a-real-id")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn verify_item_integrity_reports_mismatch_for_a_corrupted_doc_blob() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("omicron");
+        store.insert_item(&doc).unwrap();
+
+        let doc_path = dir.path().join("storage").join(format!("{}.json", doc.id));
+        corrupt_file(&doc_path);
+
+        let report = store.verify_item_integrity(&doc.id).unwrap().unwrap();
+        assert_eq!(report.doc_status, ChecksumStatus::Mismatch);
+        assert_eq!(
+            report.tokens_status,
+            ChecksumStatus::Verified,
+            "corrupting the doc blob must not affect the (untouched) tokens blob's status"
+        );
+    }
+
+    #[test]
+    fn verify_item_integrity_reports_unverified_for_a_pre_a4_item_with_no_sidecar() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("pi");
+        store.insert_item(&doc).unwrap();
+
+        let storage = dir.path().join("storage");
+        let doc_path = storage.join(format!("{}.json", doc.id));
+        let tokens_path = storage.join(format!("{}.tokens.json", doc.id));
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&tokens_path)).unwrap();
+
+        let report = store.verify_item_integrity(&doc.id).unwrap().unwrap();
+        assert_eq!(
+            report.doc_status,
+            ChecksumStatus::Unverified,
+            "a missing sidecar must be reported as unverified, never as corrupt"
+        );
+        assert_eq!(report.tokens_status, ChecksumStatus::Unverified);
+    }
+
+    #[test]
+    fn verify_item_integrity_covers_the_original_copy_when_one_exists() {
+        let (_dir, store) = open_test_store();
+        let copy = store.store_original_copy(b"rho content", "txt").unwrap();
+        let mut doc = doc_with_title("rho");
+        doc.metadata.source_copy_ref = Some(copy.clone());
+        store.insert_item(&doc).unwrap();
+
+        let report = store.verify_item_integrity(&doc.id).unwrap().unwrap();
+        assert_eq!(report.original_copy_status, Some(ChecksumStatus::Verified));
+
+        corrupt_file(std::path::Path::new(&copy));
+        let report = store.verify_item_integrity(&doc.id).unwrap().unwrap();
+        assert_eq!(report.original_copy_status, Some(ChecksumStatus::Mismatch));
+    }
+
+    #[test]
+    fn verify_library_integrity_reports_one_entry_per_item_including_the_corrupted_one() {
+        let (dir, store) = open_test_store();
+        let clean = doc_with_title("sigma");
+        let corrupted = doc_with_title("tau");
+        store.insert_item(&clean).unwrap();
+        store.insert_item(&corrupted).unwrap();
+
+        let corrupted_path = dir
+            .path()
+            .join("storage")
+            .join(format!("{}.json", corrupted.id));
+        corrupt_file(&corrupted_path);
+
+        let mut reports = store.verify_library_integrity().unwrap();
+        reports.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(reports.len(), 2);
+
+        let clean_report = reports.iter().find(|r| r.id == clean.id).unwrap();
+        assert_eq!(clean_report.doc_status, ChecksumStatus::Verified);
+
+        let corrupted_report = reports.iter().find(|r| r.id == corrupted.id).unwrap();
+        assert_eq!(corrupted_report.doc_status, ChecksumStatus::Mismatch);
+    }
+
+    #[test]
+    fn verify_library_integrity_on_an_empty_library_returns_an_empty_vec() {
+        let (_dir, store) = open_test_store();
+        assert_eq!(store.verify_library_integrity().unwrap(), Vec::new());
     }
 
     // ── Per-item encryption (ADR-014) ────────────────────────────────────
