@@ -693,6 +693,7 @@ dependencies = [
  "gist-store",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tracing",
  "uniffi",

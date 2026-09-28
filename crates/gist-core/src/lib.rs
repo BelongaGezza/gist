@@ -709,6 +709,84 @@ pub struct EncryptItemOutcome {
     pub result: Result<EncryptOutcome, gist_store::StoreError>,
 }
 
+// ── At-rest integrity verification (ADR-013 / security register `A4`, `R3`) ─
+
+/// Re-exported from `gist-store` for the same reason `KeyProvider` is above:
+/// `gist_store::ChecksumStatus`/`ItemIntegrityReport` are the primitives
+/// [`Core::verify_item_integrity`]/[`Core::verify_library_integrity`]
+/// aggregate; callers that only see `gist-core`'s facade (like `gist-ffi`)
+/// can still name them as `gist_core::ChecksumStatus`/`ItemIntegrityReport`.
+pub use gist_store::{ChecksumStatus, ItemIntegrityReport};
+
+/// Overall verdict for one library item, aggregated from its
+/// [`ItemIntegrityReport`]'s per-file [`ChecksumStatus`]es into the
+/// three-state summary a UI actually wants (`R4`): "this file was
+/// corrupted, consider re-importing it" is a fundamentally different
+/// message from "this predates checksums, nothing is known either way" —
+/// collapsing them into one generic "problem" would misrepresent data this
+/// project has no actual evidence is bad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityStatus {
+    /// Every file this item has (its doc/tokens blobs, plus its ADR-006
+    /// original copy if it has one) matched its recorded checksum.
+    Pass,
+    /// No file disagreed with its checksum, but at least one has no
+    /// checksum to check against — a missing sidecar (pre-`A4` data) or a
+    /// missing file outright — so nothing here is confirmed bad, but
+    /// nothing is confirmed good either. Deliberately not `Failed`: per
+    /// ADR-013's backfill policy, "unknown" and "corrupt" must never be
+    /// presented as the same thing.
+    Unverified,
+    /// At least one file's on-disk bytes no longer match its recorded
+    /// checksum — genuine corruption, not merely unconfirmed.
+    Failed,
+}
+
+/// Per-item result of [`Core::verify_item_integrity`]/
+/// [`Core::verify_library_integrity`]: the three-state verdict plus the
+/// full per-file breakdown it was computed from, so a caller that wants
+/// more detail than the summary (e.g. "your original copy is missing but
+/// your reading copy is fine") doesn't need a second call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemIntegrityOutcome {
+    pub id: String,
+    pub status: IntegrityStatus,
+    pub report: ItemIntegrityReport,
+}
+
+/// Aggregates one [`ItemIntegrityReport`]'s per-file statuses into a single
+/// [`IntegrityStatus`]: any `Mismatch` anywhere makes the whole item
+/// `Failed`; otherwise any `Unverified`/`Missing` anywhere makes it
+/// `Unverified`; only every file being `Verified` (or absent, for the
+/// optional original copy) makes it `Pass`. A missing *file* (not just a
+/// missing sidecar) is folded into `Unverified` rather than given its own
+/// `IntegrityStatus`, deliberately: `ChecksumStatus::Mismatch` means "we
+/// have evidence this is corrupted," which a missing file is not — it may
+/// simply have been moved or cleaned up outside GIST — so treating it as
+/// `Failed` would overstate what's actually known.
+fn aggregate_integrity(report: &ItemIntegrityReport) -> IntegrityStatus {
+    let statuses = [
+        Some(report.doc_status),
+        Some(report.tokens_status),
+        report.original_copy_status,
+    ];
+
+    let mut unverified = false;
+    for status in statuses.into_iter().flatten() {
+        match status {
+            ChecksumStatus::Mismatch => return IntegrityStatus::Failed,
+            ChecksumStatus::Unverified | ChecksumStatus::Missing => unverified = true,
+            ChecksumStatus::Verified => {}
+        }
+    }
+
+    if unverified {
+        IntegrityStatus::Unverified
+    } else {
+        IntegrityStatus::Pass
+    }
+}
+
 /// Initialise `Core` with document/original-file content encrypted at rest
 /// (ADR-011, AES-256-GCM) using a key from `key_provider` — the encrypted
 /// counterpart to [`Core::init`]. See [`gist_store::Store::open_encrypted`]
@@ -1510,6 +1588,54 @@ impl Core {
                 result: self.store.encrypt_item(id, &key),
             })
             .collect()
+    }
+
+    // ── At-rest integrity verification (ADR-013 / `A4`, `R3`) ────────────
+
+    /// Check one library item's on-disk integrity: its document/tokens
+    /// blobs and, if it has one, its ADR-006 sandboxed original copy, each
+    /// checked against its BLAKE3 checksum sidecar (ADR-013) and rolled up
+    /// into a single pass/fail/unverified verdict (see
+    /// [`aggregate_integrity`] for exactly how). Returns `Ok(None)` if `id`
+    /// matches no item.
+    ///
+    /// Never needs decryption: checksums cover on-disk bytes (ciphertext
+    /// when this item is encrypted, ADR-011), not plaintext, so this can't
+    /// fail with [`gist_store::StoreError::MissingKeyProvider`] the way
+    /// [`Core::get_document`]/[`Core::start_rsvp`] can.
+    pub fn verify_item_integrity(
+        &self,
+        id: &str,
+    ) -> Result<Option<ItemIntegrityOutcome>, CoreError> {
+        Ok(self.store.verify_item_integrity(id)?.map(|report| {
+            let status = aggregate_integrity(&report);
+            ItemIntegrityOutcome {
+                id: report.id.clone(),
+                status,
+                report,
+            }
+        }))
+    }
+
+    /// [`Core::verify_item_integrity`], for every item in the library.
+    /// Returns one [`ItemIntegrityOutcome`] per item, in no guaranteed
+    /// order — a "Verify Library Integrity" action (`R4`) reads the whole
+    /// `Vec` to build a pass/fail/unverified summary rather than presenting
+    /// items one at a time.
+    pub fn verify_library_integrity(&self) -> Result<Vec<ItemIntegrityOutcome>, CoreError> {
+        Ok(self
+            .store
+            .verify_library_integrity()?
+            .into_iter()
+            .map(|report| {
+                let status = aggregate_integrity(&report);
+                ItemIntegrityOutcome {
+                    id: report.id.clone(),
+                    status,
+                    report,
+                }
+            })
+            .collect())
     }
 
     /// Import one or more page images (one raw file per page — the natural
@@ -3983,5 +4109,156 @@ mod tests {
             .import_image_with_ocr(&[], &PanicIfCalledEngine)
             .unwrap_err();
         assert!(matches!(err, ImportError::UnsupportedType(_)));
+    }
+
+    // ── At-rest integrity verification (ADR-013 / `A4`, `R3`) ────────────
+
+    /// Flips a byte roughly in the middle of `path`'s content — enough to
+    /// invalidate a BLAKE3 checksum without depending on exactly which byte
+    /// gets hit. Mirrors `gist-store`'s own private test helper of the same
+    /// name/shape, duplicated here since it's `gist-store`-internal.
+    fn corrupt_file(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        assert!(!bytes.is_empty(), "cannot corrupt an empty file");
+        let idx = bytes.len() / 2;
+        bytes[idx] ^= 0xFF;
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn verify_item_integrity_passes_for_a_freshly_imported_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("clean.txt");
+        std::fs::write(&txt, b"a perfectly ordinary imported document").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let outcome = core
+            .verify_item_integrity(&id)
+            .unwrap()
+            .expect("just-imported item must be found");
+        assert_eq!(outcome.id, id);
+        assert_eq!(outcome.status, IntegrityStatus::Pass);
+    }
+
+    #[test]
+    fn verify_item_integrity_returns_none_for_an_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        assert!(core
+            .verify_item_integrity("not-a-real-id")
+            .unwrap()
+            .is_none());
+    }
+
+    /// The concrete `R3` scenario: a corrupted document blob must surface
+    /// as `IntegrityStatus::Failed`, not an opaque error and not
+    /// `Unverified` — this is the "your file was corrupted, consider
+    /// re-importing it" case `R4`'s UI is meant to distinguish from a
+    /// merely-unconfirmed item.
+    #[test]
+    fn verify_item_integrity_reports_failed_for_a_corrupted_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("corrupted.txt");
+        std::fs::write(&txt, b"this document is about to be corrupted on disk").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let doc_path = storage.join(format!("{id}.json"));
+        corrupt_file(&doc_path);
+
+        let outcome = core.verify_item_integrity(&id).unwrap().unwrap();
+        assert_eq!(outcome.status, IntegrityStatus::Failed);
+        assert_eq!(outcome.report.doc_status, ChecksumStatus::Mismatch);
+    }
+
+    /// A pre-`A4` item (imported before checksum sidecars existed —
+    /// simulated by deleting them after the fact) must report
+    /// `Unverified`, never `Failed`: per ADR-013's backfill policy, "we
+    /// have no evidence either way" and "we have evidence this is
+    /// corrupted" must never be presented as the same outcome.
+    #[test]
+    fn verify_item_integrity_reports_unverified_not_failed_for_a_pre_a4_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("legacy.txt");
+        std::fs::write(&txt, b"an item that predates at-rest checksums").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let doc_path = storage.join(format!("{id}.json"));
+        let tokens_path = storage.join(format!("{id}.tokens.json"));
+        std::fs::remove_file(format!("{}.blake3", doc_path.display())).unwrap();
+        std::fs::remove_file(format!("{}.blake3", tokens_path.display())).unwrap();
+
+        let outcome = core.verify_item_integrity(&id).unwrap().unwrap();
+        assert_eq!(outcome.status, IntegrityStatus::Unverified);
+    }
+
+    #[test]
+    fn verify_library_integrity_reports_all_pass_for_a_clean_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        for i in 0..3 {
+            let txt = dir.path().join(format!("book{i}.txt"));
+            std::fs::write(&txt, format!("book number {i}")).unwrap();
+            core.import_file(&txt, &NullObserver).unwrap();
+        }
+
+        let outcomes = core.verify_library_integrity().unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(|o| o.status == IntegrityStatus::Pass));
+    }
+
+    /// A mixed library — one clean item, one corrupted — must report each
+    /// item's own status independently rather than one bad item degrading
+    /// (or the whole call failing on) the rest of the library's report.
+    #[test]
+    fn verify_library_integrity_reports_each_items_status_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let clean_txt = dir.path().join("clean.txt");
+        std::fs::write(&clean_txt, b"a clean item").unwrap();
+        let clean_id = core.import_file(&clean_txt, &NullObserver).unwrap();
+
+        let corrupted_txt = dir.path().join("corrupted.txt");
+        std::fs::write(&corrupted_txt, b"an item about to be corrupted").unwrap();
+        let corrupted_id = core.import_file(&corrupted_txt, &NullObserver).unwrap();
+        corrupt_file(&storage.join(format!("{corrupted_id}.json")));
+
+        let outcomes = core.verify_library_integrity().unwrap();
+        assert_eq!(outcomes.len(), 2);
+
+        let clean_status = outcomes.iter().find(|o| o.id == clean_id).unwrap().status;
+        let corrupted_status = outcomes
+            .iter()
+            .find(|o| o.id == corrupted_id)
+            .unwrap()
+            .status;
+        assert_eq!(clean_status, IntegrityStatus::Pass);
+        assert_eq!(corrupted_status, IntegrityStatus::Failed);
     }
 }
