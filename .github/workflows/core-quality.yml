@@ -27,3 +27,23 @@ jobs:
       # fuzz/ is a separate workspace with its own tracked lockfile; the
       # bare `cargo audit` above only sees the root Cargo.lock.
       - run: cargo audit --file fuzz/Cargo.lock
+
+  # M4 role R2 (docs/m4-agent-roles.md §2): criterion benches for
+  # gist-parse-{txt,epub,docx} and gist-store against product-spec §9.1's
+  # performance targets. Deliberately a separate job (not a step in
+  # `quality` above) with `continue-on-error: true` on the bench step
+  # itself, so a benchmark regression/flake never blocks a PR the way
+  # `quality`'s licence/advisory gates do — this job is evidence-gathering,
+  # informational only, not a blocking threshold. criterion's own textual
+  # report (printed to the step's log) is the artifact; no separate upload
+  # step, matching how this repo already treats one-off local `cargo bench`
+  # runs (see CLAUDE.md's M4 R2 dated update for the numbers from the last
+  # local run).
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+      - name: cargo bench --workspace (informational only)
+        continue-on-error: true
+        run: cargo bench --workspace
