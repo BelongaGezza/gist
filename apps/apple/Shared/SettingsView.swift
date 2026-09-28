@@ -239,6 +239,12 @@ private struct AboutSettingsTab: View {
         }
     }
 
+    /// R6: license attribution screen. A `@State` flag + `.sheet`, matching
+    /// `SidebarView`'s `showThemeSettings`/`ThemeSettingsView` pattern,
+    /// rather than a `NavigationLink` -- this `Form`-less tab has no
+    /// `NavigationStack` of its own to push into.
+    @State private var showLicenses = false
+
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "book.pages")
@@ -257,8 +263,13 @@ private struct AboutSettingsTab: View {
                 .foregroundStyle(.secondary)
             Link("View source on GitHub", destination: URL(string: "https://github.com/BelongaGezza/gist")!)
                 .font(.caption)
+            Button("Third-Party Notices…") { showLicenses = true }
+                .font(.caption)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+        .sheet(isPresented: $showLicenses) {
+            LicensesView()
+        }
     }
 }
