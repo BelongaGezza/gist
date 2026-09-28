@@ -119,6 +119,61 @@ final class GISTTests: XCTestCase {
         XCTAssertTrue(client.items.isEmpty)
     }
 
+    // MARK: - Pagination (M4 role R2, docs/m4-agent-roles.md §2)
+    //
+    // `gist-store::list_items` already supported real SQL `LIMIT`/`OFFSET`
+    // pagination at the store layer, but `CoreClient` used to fetch a
+    // single, effectively-unbounded `limit: 500` page via `reloadItems` and
+    // never loaded further -- any library past 500 items silently lost its
+    // tail, a real gap against product-spec §9.1(b) ("library with 1,000+
+    // items must remain responsive ... paged library API"). Fixed by
+    // loading real pages (`pageSize` items at a time, see CoreClient's doc
+    // comment) and exposing `hasMoreItems`/`loadMoreItemsIfNeeded` for
+    // `LibraryView` to page through the rest as rows scroll into view.
+
+    func testLibraryUnderOnePageReportsNoMoreItems() async throws {
+        let fixture = try importableFixtureURL()
+        for _ in 0..<3 {
+            await client.importFile(url: fixture)
+        }
+
+        await client.refresh()
+
+        XCTAssertEqual(client.items.count, 3)
+        XCTAssertFalse(client.hasMoreItems, "a 3-item library is well under one page")
+    }
+
+    /// Regression test for the actual bug this role fixed: a library larger
+    /// than one page used to be silently truncated to a single
+    /// unbounded-in-practice fetch. Imports more than one page's worth of
+    /// items (reusing the same fixture file's bytes -- each import still
+    /// gets its own UUIDv7 row, so this legitimately produces that many
+    /// distinct library items), confirms `refresh()` only loads the first
+    /// page with `hasMoreItems == true`, then drives `loadMoreItemsIfNeeded`
+    /// (exactly as `LibraryView`'s row `.onAppear` does) off the last loaded
+    /// item until the whole library is present.
+    func testLibraryOverOnePageLoadsFurtherPagesViaLoadMoreItemsIfNeeded() async throws {
+        let fixture = try importableFixtureURL()
+        let totalItems = 205
+        for _ in 0..<totalItems {
+            await client.importFile(url: fixture)
+        }
+
+        await client.refresh()
+
+        XCTAssertEqual(client.items.count, 200, "first page should be exactly one page, not the whole library")
+        XCTAssertTrue(client.hasMoreItems)
+
+        guard let lastLoaded = client.items.last else {
+            XCTFail("expected a non-empty first page")
+            return
+        }
+        await client.loadMoreItemsIfNeeded(currentItem: lastLoaded)
+
+        XCTAssertEqual(client.items.count, totalItems, "loading the next page should reach the full library")
+        XCTAssertFalse(client.hasMoreItems, "the library is now fully loaded")
+    }
+
     // MARK: - Search
 
     func testSearchFindsImportedItemByContent() async throws {
