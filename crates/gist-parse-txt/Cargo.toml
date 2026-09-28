@@ -10,3 +10,10 @@ gist-model = { path = "../gist-model" }
 encoding_rs = "0.8"
 chardetng = "1.0"
 thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "parse_bench"
+harness = false
