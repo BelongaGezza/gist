@@ -45,13 +45,13 @@ Confirmed against current source, 2026-09-28:
 
 | # | Role | Scope | Primary files/crates | Depends on | Status |
 |---|---|---|---|---|---|
-| R1 | Rust — crash/error-path sweep + fuzz review | §5 M4 bullet 2 | all `crates/`, `fuzz/` | — | Pending |
-| R2 | Rust — performance benchmarks vs §9.1 | new `benches/`, `gist-parse-*`, `gist-store` | — | Pending |
-| R3 | Rust/FFI — `[A4]` checksum-mismatch surfacing | `crates/gist-ffi/`, `crates/gist-core/` | — | Pending |
-| R4 | Swift — storage management UI | `apps/apple/Shared/SettingsView.swift`, `CoreClient.swift` | R3 | Pending |
-| R5 | Docs — `docs/PRIVACY.md` (`[F12]`) | `docs/PRIVACY.md` | — | Pending |
-| R6 | Docs/Swift — license attribution screen | `docs/THIRD-PARTY.md`, new Swift view under Settings → About | — | Pending |
-| R7 | Release engineering — real `release-macos.yml` + local unsigned DMG script | `.github/workflows/release-macos.yml`, new `tools/build-dmg.sh` | — | Pending |
+| R1 | Rust — crash/error-path sweep + fuzz review | §5 M4 bullet 2 | all `crates/`, `fuzz/` | — | ✅ Done 2026-09-29 |
+| R2 | Rust — performance benchmarks vs §9.1 | new `benches/`, `gist-parse-*`, `gist-store` | — | ✅ Done 2026-09-28 |
+| R3 | Rust/FFI — `[A4]` checksum-mismatch surfacing | `crates/gist-ffi/`, `crates/gist-core/` | — | ✅ Done 2026-09-28 |
+| R4 | Swift — storage management UI | `apps/apple/Shared/SettingsView.swift`, `CoreClient.swift` | R3 | ✅ Done 2026-09-29 |
+| R5 | Docs — `docs/PRIVACY.md` (`[F12]`) | `docs/PRIVACY.md` | — | ✅ Done 2026-09-28 |
+| R6 | Docs/Swift — license attribution screen | `docs/THIRD-PARTY.md`, new Swift view under Settings → About | — | ✅ Done 2026-09-28 |
+| R7 | Release engineering — real `release-macos.yml` + local unsigned DMG script | `.github/workflows/release-macos.yml`, new `tools/build-dmg.sh` | — | ✅ Done 2026-09-28 (unsigned path only — signing/notarization blocked on credentials) |
 | — | `[N8]` signed-Release runtime verification | n/a | n/a | **Blocked — needs a human with a real Developer ID cert + notarization credentials. Not assigned to an agent.** |
 | — | Public beta (~20–50 users) + triage | n/a | n/a | **Out of scope for agent execution — a human/product task, not code.** |
 
