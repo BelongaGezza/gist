@@ -180,6 +180,12 @@ private struct ImportSettingsTab: View {
 
 private struct StorageSettingsTab: View {
     @ObservedObject private var settings = StorageSettings.shared
+    @ObservedObject private var core = CoreClient.shared
+
+    @State private var usage: StorageUsage?
+    @State private var isComputingUsage = false
+    @State private var isVerifyingIntegrity = false
+    @State private var integritySummary: LibraryIntegritySummary?
 
     /// Read-only display of where GIST stores its library -- computed the
     /// same way `CoreClient.init()` computes its own storage directory, but
@@ -218,9 +224,193 @@ private struct StorageSettingsTab: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
+
+            Section("Storage Usage") {
+                if let usage {
+                    LabeledContent("Original files", value: usage.originalsFormatted)
+                    LabeledContent("Reading data", value: usage.blobFormatted)
+                    LabeledContent("Total", value: usage.totalFormatted)
+                } else if isComputingUsage {
+                    HStack {
+                        ProgressView()
+                        Text("Calculating…")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("Not yet calculated.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Recalculate") {
+                    Task { await refreshUsage() }
+                }
+                .disabled(isComputingUsage)
+            }
+
+            Section("Library Integrity") {
+                Text(
+                    "Checks every item's stored files against their recorded checksums (ADR-013). This only reports results -- it never deletes or changes anything."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if isVerifyingIntegrity {
+                    HStack {
+                        ProgressView()
+                        Text("Verifying…")
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let summary = integritySummary {
+                    Label {
+                        Text(summary.message)
+                    } icon: {
+                        Image(systemName: summary.hasFailures ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    }
+                    .foregroundStyle(summary.hasFailures ? .orange : .secondary)
+
+                    if let detail = summary.detailMessage {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Button("Verify Library Integrity") {
+                    Task { await runIntegrityCheck() }
+                }
+                .disabled(isVerifyingIntegrity)
+            }
         }
         .formStyle(.grouped)
         .padding()
+        .task { await refreshUsage() }
+    }
+
+    private func refreshUsage() async {
+        isComputingUsage = true
+        usage = await Task.detached(priority: .utility) { StorageUsage.compute() }.value
+        isComputingUsage = false
+    }
+
+    private func runIntegrityCheck() async {
+        isVerifyingIntegrity = true
+        let outcomes = await core.verifyLibraryIntegrity()
+        integritySummary = LibraryIntegritySummary(outcomes: outcomes)
+        isVerifyingIntegrity = false
+    }
+}
+
+/// Disk-usage breakdown for the app's storage directory
+/// (`<Application Support>/GIST/storage` -- the same root `CoreClient`
+/// points `GistCore` at), broken into the two categories `docs/
+/// m4-agent-roles.md`'s R4 spec calls for: the ADR-006 `originals/`
+/// sandboxed-copy directory, and everything else directly in `storage/`
+/// (the ADR-007 `<id>.json`/`<id>.tokens.json` IR blobs plus their ADR-013
+/// `.blake3` checksum sidecars -- there is no separate "IR blob
+/// subdirectory" on disk, they live flat alongside `originals/`).
+///
+/// Computed via plain `FileManager` directory enumeration rather than a new
+/// FFI export -- per the role spec, this is simple enough not to need
+/// walking the DB, and it's purely a reporting concern the Rust core has no
+/// reason to track itself.
+private struct StorageUsage {
+    let originalsBytes: Int64
+    let blobBytes: Int64
+
+    var totalBytes: Int64 { originalsBytes + blobBytes }
+
+    private static let formatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+
+    var originalsFormatted: String { Self.formatter.string(fromByteCount: originalsBytes) }
+    var blobFormatted: String { Self.formatter.string(fromByteCount: blobBytes) }
+    var totalFormatted: String { Self.formatter.string(fromByteCount: totalBytes) }
+
+    /// Walks `<Application Support>/GIST/storage` off the main actor
+    /// (called via `Task.detached` from `StorageSettingsTab.refreshUsage`).
+    /// Returns an all-zero breakdown, not `nil`, if the directory doesn't
+    /// exist yet (e.g. a fresh install with nothing imported) -- that's "no
+    /// usage yet," not a failure to report.
+    static func compute() -> StorageUsage {
+        guard
+            let supportDir = try? FileManager.default.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: false
+            )
+        else {
+            return StorageUsage(originalsBytes: 0, blobBytes: 0)
+        }
+
+        let storageDir = supportDir
+            .appendingPathComponent("GIST", isDirectory: true)
+            .appendingPathComponent("storage", isDirectory: true)
+
+        var isDirectory: ObjCBool = false
+        guard
+            FileManager.default.fileExists(atPath: storageDir.path, isDirectory: &isDirectory),
+            isDirectory.boolValue
+        else {
+            return StorageUsage(originalsBytes: 0, blobBytes: 0)
+        }
+
+        let originalsDir = storageDir.appendingPathComponent("originals", isDirectory: true)
+        let originalsBytes = recursiveFileSize(of: originalsDir)
+        let blobBytes = topLevelFileSize(of: storageDir, excludingDirectoryNamed: "originals")
+        return StorageUsage(originalsBytes: originalsBytes, blobBytes: blobBytes)
+    }
+
+    /// Sums the size of every regular file directly inside `directory`,
+    /// skipping subdirectories (`originals/`, accounted for separately by
+    /// `recursiveFileSize`). This is where `<id>.json`/`<id>.tokens.json`
+    /// (ADR-007) and their `.blake3` checksum sidecars (ADR-013) live.
+    private static func topLevelFileSize(of directory: URL, excludingDirectoryNamed excluded: String) -> Int64 {
+        guard
+            let entries = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return 0 }
+
+        var total: Int64 = 0
+        for entry in entries where entry.lastPathComponent != excluded {
+            guard
+                let values = try? entry.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                values.isRegularFile == true,
+                let size = values.fileSize
+            else { continue }
+            total += Int64(size)
+        }
+        return total
+    }
+
+    /// Sums every regular file's size under `directory`, recursively --
+    /// `originals/` is flat today, but this stays correct if that ever
+    /// changes.
+    private static func recursiveFileSize(of directory: URL) -> Int64 {
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: directory,
+                includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return 0 }
+
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard
+                let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                values.isRegularFile == true,
+                let size = values.fileSize
+            else { continue }
+            total += Int64(size)
+        }
+        return total
     }
 }
 

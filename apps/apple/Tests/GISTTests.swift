@@ -423,6 +423,69 @@ final class GISTTests: XCTestCase {
         XCTAssertEqual(beforeBytes, afterBytes, "encryptItems must never touch the ADR-006 sandboxed copy")
     }
 
+    // MARK: - Integrity verification (ADR-013 / [A4], M4 role R4)
+
+    /// Corrupts the stored `<itemId>.json` document blob's bytes in place,
+    /// deliberately *keeping* its `.blake3` checksum sidecar (unlike
+    /// `rewriteFirstParagraphRun`, which drops the sidecar to simulate a
+    /// legitimate edit) -- this is what makes it a genuine checksum
+    /// mismatch (`IntegrityStatusVM.failed`) rather than "unverified."
+    private func corruptDocumentBlob(itemId: String) throws {
+        let docPath = URL(fileURLWithPath: storageDir).appendingPathComponent("\(itemId).json")
+        var data = try Data(contentsOf: docPath)
+        data.append(contentsOf: [0x00, 0xFF, 0x00, 0xFF])
+        try data.write(to: docPath)
+    }
+
+    func testVerifyLibraryIntegrityReportsAllPassForACleanLibrary() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        let outcomes = await client.verifyLibraryIntegrity()
+        XCTAssertNil(client.error)
+        XCTAssertEqual(outcomes.count, 1)
+        XCTAssertEqual(outcomes.first?.id, item.id)
+        XCTAssertEqual(outcomes.first?.status, .pass)
+
+        let summary = LibraryIntegritySummary(outcomes: outcomes)
+        XCTAssertEqual(summary.totalCount, 1)
+        XCTAssertEqual(summary.passCount, 1)
+        XCTAssertEqual(summary.unverifiedCount, 0)
+        XCTAssertEqual(summary.failedCount, 0)
+        XCTAssertFalse(summary.hasFailures)
+        XCTAssertNil(summary.detailMessage, "a clean, fully-verified library has nothing extra to say")
+    }
+
+    func testVerifyLibraryIntegrityReportsFailedForACorruptedBlobNotAsAGenericError() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        try corruptDocumentBlob(itemId: item.id)
+
+        let outcomes = await client.verifyLibraryIntegrity()
+        XCTAssertNil(client.error, "a checksum mismatch is a reported outcome, not a thrown/opaque error")
+        XCTAssertEqual(outcomes.count, 1)
+        XCTAssertEqual(outcomes.first?.id, item.id)
+        XCTAssertEqual(outcomes.first?.status, .failed)
+
+        let summary = LibraryIntegritySummary(outcomes: outcomes)
+        XCTAssertEqual(summary.failedCount, 1)
+        XCTAssertTrue(summary.hasFailures)
+        XCTAssertNotNil(summary.detailMessage)
+        XCTAssertTrue(
+            summary.detailMessage?.localizedCaseInsensitiveContains("corrupted") ?? false,
+            "a Failed status must read as 'this file was corrupted,' not a generic error"
+        )
+    }
+
     // MARK: - Collections
 
     func testCreateListAddRemoveCollectionRoundTrips() async throws {
