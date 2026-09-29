@@ -881,11 +881,24 @@ final class GISTTests: XCTestCase {
     /// (`{"Paragraph": {"runs": [...]}}`) is exactly what serde's default
     /// derive produces and doesn't need a dedicated Codable type just for
     /// this one test helper to reach into it.
+    ///
+    /// Since ADR-019, `insert_item` writes the `Document` wrapped in an
+    /// `{"ir_version": N, "payload": {...}}` envelope (`gist-store`'s
+    /// `serialize_ir_blob`) rather than as a bare top-level object -- this
+    /// helper unwraps `payload` before editing and re-wraps it under the
+    /// same `ir_version` before writing back, so the rewritten blob is still
+    /// a valid envelope on the next real read.
     private func rewriteFirstParagraphRun(itemId: String, transform: (String) -> String) throws {
         let docPath = URL(fileURLWithPath: storageDir).appendingPathComponent("\(itemId).json")
         let data = try Data(contentsOf: docPath)
-        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            var sections = json["sections"] as? [[String: Any]],
+        guard let outer = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            XCTFail("unexpected stored document JSON shape -- not a JSON object")
+            return
+        }
+        let irVersion = outer["ir_version"]
+        var json = (irVersion != nil ? outer["payload"] as? [String: Any] : outer) ?? [:]
+
+        guard var sections = json["sections"] as? [[String: Any]],
             var firstSection = sections.first,
             var blocks = firstSection["blocks"] as? [[String: Any]],
             var firstBlock = blocks.first,
@@ -907,7 +920,13 @@ final class GISTTests: XCTestCase {
         sections[0] = firstSection
         json["sections"] = sections
 
-        let editedData = try JSONSerialization.data(withJSONObject: json)
+        let rewritten: [String: Any]
+        if let irVersion {
+            rewritten = ["ir_version": irVersion, "payload": json]
+        } else {
+            rewritten = json
+        }
+        let editedData = try JSONSerialization.data(withJSONObject: rewritten)
         try editedData.write(to: docPath)
         try? FileManager.default.removeItem(at: docPath.appendingPathExtension("blake3"))
     }
