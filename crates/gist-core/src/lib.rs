@@ -1689,6 +1689,20 @@ impl Core {
             ));
         }
 
+        // Step 0 (M4/R1): page-count cap, checked before any page's bytes are
+        // read — mirrors gist-parse-epub's spine-item-count check against
+        // `max_pages`. Without this, `paths.len()` was unbounded: every page's
+        // raw bytes would be read into `page_bytes` (all held in memory at
+        // once, since OCR runs after the full read loop below) before any
+        // limit fired, the same allocate-before-check shape F16/N4 fixed for
+        // zip/image decoding.
+        if paths.len() > limits.max_pages {
+            return Err(ImportError::ResourceLimitExceeded {
+                limit: format!("max_pages={}", limits.max_pages),
+                attempted: paths.len(),
+            });
+        }
+
         // Step 1: per-page byte-size cap, checked before that page's bytes
         // are ever read into memory (Addendum 2).
         let mut page_bytes: Vec<Vec<u8>> = Vec::with_capacity(paths.len());
@@ -4109,6 +4123,47 @@ mod tests {
             .import_image_with_ocr(&[], &PanicIfCalledEngine)
             .unwrap_err();
         assert!(matches!(err, ImportError::UnsupportedType(_)));
+    }
+
+    /// M4/R1 regression: a page list longer than `limits.max_pages` must be
+    /// rejected with `ImportError::ResourceLimitExceeded` before any page's
+    /// bytes are read (paths need not even exist — the count check runs
+    /// first) and before the OCR engine is ever invoked. Without this check,
+    /// `paths.len()` was unbounded and every page's raw bytes would be read
+    /// into memory before any limit fired.
+    #[test]
+    fn import_image_with_ocr_rejects_too_many_pages_before_reading_any() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let limits = ParseLimits::default();
+        // Nonexistent paths are fine: the count gate must fire before any
+        // `fs::metadata`/`fs::read` call ever touches the filesystem.
+        let paths: Vec<PathBuf> = (0..=limits.max_pages)
+            .map(|i| dir.path().join(format!("nonexistent_page_{i}.png")))
+            .collect();
+
+        struct PanicIfCalledEngine;
+        impl OcrEngine for PanicIfCalledEngine {
+            fn recognize_page(
+                &self,
+                _page_index: u32,
+                _image_bytes: Vec<u8>,
+            ) -> Option<OcrPageResult> {
+                panic!("recognize_page must never be called once the page-count gate fires");
+            }
+        }
+
+        let err = core
+            .import_image_with_ocr(&paths, &PanicIfCalledEngine)
+            .unwrap_err();
+        assert!(
+            matches!(err, ImportError::ResourceLimitExceeded { .. }),
+            "expected ResourceLimitExceeded, got {err:?}"
+        );
     }
 
     // ── At-rest integrity verification (ADR-013 / `A4`, `R3`) ────────────
