@@ -325,7 +325,7 @@ final class CoreClient: ObservableObject {
             switch gistError {
             case .DrmProtected:
                 drmProtectedFile = URL(string: urlString)
-            case .Core, .InternalPanic:
+            case .Core, .ChecksumMismatch, .InternalPanic:
                 error = "\(gistError)"
             }
         } catch {
@@ -470,7 +470,7 @@ final class CoreClient: ObservableObject {
             switch gistError {
             case .DrmProtected:
                 drmProtectedFile = url
-            case .Core, .InternalPanic:
+            case .Core, .ChecksumMismatch, .InternalPanic:
                 error = "\(gistError)"
             }
         } catch {
@@ -643,6 +643,29 @@ final class CoreClient: ObservableObject {
             let ffiResults = try core.reanchorAnnotations(itemId: itemId)
             error = nil
             return ffiResults.map(AnnotationAnchorResult.init(ffi:))
+        } catch {
+            self.error = "\(error)"
+            return []
+        }
+    }
+
+    // MARK: - Integrity verification (ADR-013 / [A4], M4 role R4)
+
+    /// Runs `GistCore.verifyLibraryIntegrity()` (R3) across every item in
+    /// the library, returning one `IntegrityOutcomeVM` per item -- each
+    /// item's document/tokens blobs and, if it has one, its ADR-006
+    /// sandboxed original copy, checked against its ADR-013 BLAKE3 checksum
+    /// sidecar. Backs the Storage settings tab's "Verify Library Integrity"
+    /// action (`SettingsView.swift`). Returns `[]` (with `error` set) on
+    /// failure, same convention as `listAnnotations`; doesn't publish into a
+    /// shared `@Published` property since only that one action ever
+    /// triggers a run, and it holds the result as local state.
+    func verifyLibraryIntegrity() async -> [IntegrityOutcomeVM] {
+        guard let core else { return [] }
+        do {
+            let outcomes = try core.verifyLibraryIntegrity()
+            error = nil
+            return outcomes.map(IntegrityOutcomeVM.init(ffi:))
         } catch {
             self.error = "\(error)"
             return []
@@ -845,6 +868,99 @@ struct RemoveItemsSummary {
         String(
             localized: "\(filesFailedCount) file\(filesFailedCount == 1 ? "" : "s") for the removed item\(removedCount == 1 ? "" : "s") could not be deleted (something else may have it open). It has been reclaimed from your library — GIST will retry deleting the leftover file\(filesFailedCount == 1 ? "" : "s") automatically."
         )
+    }
+}
+
+/// Client-side mirror of `FfiIntegrityStatus` (ADR-013 / `[A4]` -- see
+/// `crates/gist-ffi/src/lib.rs`), the three-state verdict
+/// `CoreClient.verifyLibraryIntegrity` reports per item.
+///
+/// `.unverified` (no checksum sidecar to check against -- e.g. the item
+/// predates ADR-013) is deliberately distinct from `.failed` (a real
+/// checksum mismatch, i.e. genuine on-disk corruption): the former is
+/// presented calmly, the latter as an actionable warning. See
+/// `LibraryIntegritySummary` below for how the Storage settings tab turns
+/// this into copy.
+enum IntegrityStatusVM: Equatable {
+    case pass
+    case unverified
+    case failed
+
+    init(ffi: FfiIntegrityStatus) {
+        switch ffi {
+        case .pass: self = .pass
+        case .unverified: self = .unverified
+        case .failed: self = .failed
+        }
+    }
+}
+
+/// One item's result from `CoreClient.verifyLibraryIntegrity`. `id` is the
+/// library item id (not, e.g., a per-file id) -- matches
+/// `FfiItemIntegrityOutcome.id`.
+struct IntegrityOutcomeVM: Identifiable {
+    let id: String
+    let status: IntegrityStatusVM
+
+    init(ffi: FfiItemIntegrityOutcome) {
+        self.id = ffi.id
+        self.status = IntegrityStatusVM(ffi: ffi.status)
+    }
+}
+
+/// Tallied summary of a `CoreClient.verifyLibraryIntegrity` run, for the
+/// Storage settings tab's "Verify Library Integrity" result presentation
+/// (M4 role R4). Deliberately keeps "unverified" and "failed" visually and
+/// textually distinct -- see `detailMessage`.
+struct LibraryIntegritySummary {
+    let outcomes: [IntegrityOutcomeVM]
+
+    var totalCount: Int { outcomes.count }
+    var passCount: Int { outcomes.filter { $0.status == .pass }.count }
+    var unverifiedCount: Int { outcomes.filter { $0.status == .unverified }.count }
+    var failedCount: Int { outcomes.filter { $0.status == .failed }.count }
+
+    /// Whether anything genuinely corrupt was found -- drives the
+    /// alarming-vs-calm presentation in the settings tab.
+    var hasFailures: Bool { failedCount > 0 }
+
+    // (R5b localisation) Built via string interpolation/concatenation, not
+    // `Text("literal")` -- see `EncryptItemsSummary.message`'s note above,
+    // same reasoning applies here.
+    var message: String {
+        guard !outcomes.isEmpty else {
+            return String(localized: "Your library is empty — nothing to verify.")
+        }
+        var parts: [String] = [
+            String(localized: "\(passCount) of \(totalCount) item\(totalCount == 1 ? "" : "s") passed")
+        ]
+        if unverifiedCount > 0 {
+            parts.append(String(localized: "\(unverifiedCount) unverified"))
+        }
+        if failedCount > 0 {
+            parts.append(String(localized: "\(failedCount) failed"))
+        }
+        return parts.joined(separator: ", ") + "."
+    }
+
+    /// A real `.failed` result reads as "this file was corrupted, consider
+    /// re-importing it" -- never a generic error. A library with only
+    /// `.unverified` items (no checksum recorded, e.g. pre-ADR-013 imports)
+    /// gets an explicitly reassuring note instead, per this role's spec:
+    /// "unverified" must never read as alarming. `nil` when there's nothing
+    /// worth adding beyond `message` (a clean, fully-verified library).
+    var detailMessage: String? {
+        if hasFailures {
+            return String(
+                localized: "One or more files no longer match their recorded checksum, which means they were corrupted on disk. Consider re-importing the affected item(s)."
+            )
+        }
+        if unverifiedCount > 0 {
+            return String(
+                localized: "Some items have no recorded checksum yet (they were imported before integrity tracking was added) — this doesn't mean anything is wrong."
+            )
+        }
+        return nil
     }
 }
 
