@@ -51,6 +51,16 @@ pub enum StoreError {
     /// those three via `annotation_kind_to_sql`.
     #[error("invalid annotation kind stored in database: {0}")]
     InvalidAnnotationKind(String),
+    /// An IR blob's (`<id>.json`/`<id>.tokens.json`, ADR-007) `ir_version`
+    /// envelope field (ADR-019) is newer than this binary's
+    /// `CURRENT_IR_VERSION` — the blob was written by a newer version of
+    /// GIST whose IR shape this binary does not know how to interpret.
+    /// Mirrors [`StoreError::SchemaTooNew`]'s shape for the SQLite schema,
+    /// applied to the per-document JSON envelope instead: refuse to guess
+    /// at unknown-shape fields rather than attempting a best-effort parse
+    /// that could silently misinterpret or drop data.
+    #[error("IR blob version {found} is newer than this app's known version {expected}; upgrade the app")]
+    IrVersionTooNew { found: u32, expected: u32 },
 }
 
 // ── Encryption at rest (ADR-011) ─────────────────────────────────────────────
@@ -274,6 +284,105 @@ fn verify_checksum(path: &str, bytes: &[u8]) -> Result<(), StoreError> {
         // successfully) but matched for exhaustiveness rather than `_`, so
         // a future new variant can't silently fall through unconsidered.
         ChecksumStatus::Verified | ChecksumStatus::Unverified | ChecksumStatus::Missing => Ok(()),
+    }
+}
+
+// ── IR envelope versioning (ADR-019, CLAUDE.md open question Q10) ─────────
+
+/// Current on-disk IR envelope format version. Bump this only when the
+/// `Document`/`Token` JSON shape changes in a way an older binary cannot
+/// safely interpret un-migrated (see ADR-019's migration story) — a plain
+/// additive field on `Document`/`Section`/`Block`/`Token`/`Metadata` does
+/// **not** require a bump, since `#[serde(default)]` (and the deliberate
+/// absence of `#[serde(deny_unknown_fields)]` anywhere in `gist-model`)
+/// already makes those forward/backward compatible without any version
+/// check at all.
+const CURRENT_IR_VERSION: u32 = 1;
+
+/// The on-disk envelope wrapping every IR blob `gist-store` writes
+/// (`<id>.json`/`<id>.tokens.json`, ADR-007) as of ADR-019. Lives here, not
+/// in `gist-model`, deliberately: this is an I/O-boundary/storage-format
+/// concern, not part of the pure IR model that must stay
+/// `wasm32-unknown-unknown`-compilable — `gist_model::Document`/`Token`
+/// themselves carry no version field and know nothing about this wrapper.
+///
+/// `payload` is kept as a borrowed reference on write ([`serialize_ir_blob`])
+/// and an owned value on read ([`deserialize_ir_blob`]) — two separate
+/// monomorphisations of the same shape rather than one generic struct
+/// shared byref/by-value, which would need a lifetime parameter threaded
+/// through call sites that don't otherwise need one.
+#[derive(Serialize)]
+struct IrEnvelopeRef<'a, T> {
+    ir_version: u32,
+    payload: &'a T,
+}
+
+/// Serialize `payload` wrapped in the current [`IrEnvelopeRef`] — what every
+/// new write of an IR blob produces from this version of GIST onward
+/// (ADR-019). The resulting JSON is still a single flat, human-readable
+/// object (`{"ir_version":1,"payload":{...}}`), preserving ADR-007's
+/// "inspectable with any editor" property.
+fn serialize_ir_blob<T: Serialize>(payload: &T) -> Result<String, StoreError> {
+    Ok(serde_json::to_string(&IrEnvelopeRef {
+        ir_version: CURRENT_IR_VERSION,
+        payload,
+    })?)
+}
+
+/// Deserialize an IR blob written by either this version of GIST (wrapped
+/// in an `{"ir_version": N, "payload": ...}` envelope, ADR-019) or by any
+/// version before ADR-019 landed (the bare `Document`/`Vec<Token>` JSON,
+/// with no envelope at all — ADR-007's original, still-unversioned format).
+///
+/// **Forward compatibility:** the version check happens *before* any
+/// attempt to deserialize `payload` into `T` — a blob whose `ir_version` is
+/// newer than [`CURRENT_IR_VERSION`] is rejected with
+/// [`StoreError::IrVersionTooNew`] immediately, never handed to `T`'s
+/// `Deserialize` impl at all. This matters: a future format's `payload`
+/// might not even be structurally parseable as today's `T`, and attempting
+/// it anyway could produce a misleading generic JSON error (or, worse, an
+/// incomplete-but-technically-valid `T` that silently drops fields this
+/// binary doesn't know about) instead of a clear "upgrade the app" signal.
+///
+/// **Backward compatibility / legacy blobs:** distinguishing the two shapes
+/// needs no separate on-disk marker. A pre-ADR-019 blob is either a JSON
+/// object with no `"ir_version"` key (a bare `Document`) or a JSON array (a
+/// bare `Vec<Token>`) — `serde_json::Value::get("ir_version")` returns
+/// `None` for both (arrays never match a string key; a bare `Document`
+/// object simply doesn't have that key), so the absence of the key is
+/// itself the signal that this is a legacy, implicitly-version-1 blob. It's
+/// deserialized directly as `T`, exactly as every binary before this change
+/// already did — this is the "existing users' libraries must not break"
+/// guarantee ADR-019 requires, and is covered by a dedicated test reading a
+/// blob in exactly this pre-existing shape.
+fn deserialize_ir_blob<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    match value.get("ir_version") {
+        Some(v) => {
+            // A malformed/non-numeric ir_version is treated as "at least as
+            // new as we can prove it isn't" — fail closed via
+            // IrVersionTooNew rather than falling through to a payload
+            // parse attempt whose error would be far less clear about what
+            // actually went wrong.
+            let found = v.as_u64().map(|n| n as u32).unwrap_or(u32::MAX);
+            if found > CURRENT_IR_VERSION {
+                return Err(StoreError::IrVersionTooNew {
+                    found,
+                    expected: CURRENT_IR_VERSION,
+                });
+            }
+            let payload = value
+                .get("payload")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            Ok(serde_json::from_value(payload)?)
+        }
+        // No `ir_version` key at all: a legacy, pre-ADR-019 blob (or a
+        // hypothetical future blob using a different envelope shape
+        // entirely — both are handled identically here by falling back to
+        // a direct parse, which is correct for the former and merely
+        // best-effort, not a security-relevant guarantee, for the latter).
+        None => Ok(serde_json::from_value(value)?),
     }
 }
 
@@ -830,9 +939,10 @@ impl Store {
     pub fn insert_item(&self, doc: &gist_model::Document) -> Result<(), StoreError> {
         let key = self.encryption_key();
 
-        // Write the full document blob.
+        // Write the full document blob, wrapped in the ADR-019 IR envelope
+        // so a future binary can tell what version of the IR shape this is.
         let doc_path = self.storage_dir.join(format!("{}.json", doc.id));
-        let doc_json = serde_json::to_string(doc)?;
+        let doc_json = serialize_ir_blob(doc)?;
         let doc_bytes = match &key {
             Some(k) => encrypt_at_rest(k, doc_json.as_bytes()),
             None => doc_json.into_bytes(),
@@ -840,9 +950,10 @@ impl Store {
         std::fs::write(&doc_path, &doc_bytes)?;
         write_checksum_sidecar(&doc_path, &doc_bytes)?;
 
-        // Write the token stream as a separate file for RSVP / FTS fast path.
+        // Write the token stream as a separate file for RSVP / FTS fast path
+        // (also ADR-019-enveloped).
         let token_path = self.storage_dir.join(format!("{}.tokens.json", doc.id));
-        let tokens_json = serde_json::to_string(&doc.token_stream)?;
+        let tokens_json = serialize_ir_blob(&doc.token_stream)?;
         let tokens_bytes = match &key {
             Some(k) => encrypt_at_rest(k, tokens_json.as_bytes()),
             None => tokens_json.into_bytes(),
@@ -1376,7 +1487,7 @@ impl Store {
             None => Ok(None),
             Some((path, content_encrypted)) => {
                 let bytes = self.read_maybe_encrypted(&path, content_encrypted)?;
-                let doc: gist_model::Document = serde_json::from_slice(&bytes)?;
+                let doc: gist_model::Document = deserialize_ir_blob(&bytes)?;
                 Ok(Some(doc))
             }
         }
@@ -1405,12 +1516,12 @@ impl Store {
 
                 if std::path::Path::new(&token_path).exists() {
                     let bytes = self.read_maybe_encrypted(&token_path, content_encrypted)?;
-                    let tokens: Vec<gist_model::Token> = serde_json::from_slice(&bytes)?;
+                    let tokens: Vec<gist_model::Token> = deserialize_ir_blob(&bytes)?;
                     Ok(Some(tokens))
                 } else {
                     // Fallback: load full document and extract token stream.
                     let bytes = self.read_maybe_encrypted(&path, content_encrypted)?;
-                    let doc: gist_model::Document = serde_json::from_slice(&bytes)?;
+                    let doc: gist_model::Document = deserialize_ir_blob(&bytes)?;
                     Ok(Some(doc.token_stream))
                 }
             }
@@ -3269,8 +3380,9 @@ mod tests {
         let legacy_doc_path = storage.join(format!("{}.json", legacy_id));
         let legacy_bytes = std::fs::read(&legacy_doc_path).unwrap();
         assert!(
-            serde_json::from_slice::<gist_model::Document>(&legacy_bytes).is_ok(),
-            "legacy item's on-disk blob must still be plain, un-re-encrypted JSON"
+            deserialize_ir_blob::<gist_model::Document>(&legacy_bytes).is_ok(),
+            "legacy item's on-disk blob must still be plain, un-re-encrypted JSON \
+             (ADR-019-enveloped, not encrypted)"
         );
 
         // A newly inserted item, after switching to open_encrypted, must be
@@ -3741,8 +3853,9 @@ mod tests {
         store.insert_item(&plain_doc).unwrap();
         let plain_on_disk = std::fs::read(storage.join(format!("{plain_id}.json"))).unwrap();
         assert!(
-            serde_json::from_slice::<gist_model::Document>(&plain_on_disk).is_ok(),
-            "a Store opened via open_with_read_key must still write NEW imports as plaintext"
+            deserialize_ir_blob::<gist_model::Document>(&plain_on_disk).is_ok(),
+            "a Store opened via open_with_read_key must still write NEW imports as plaintext \
+             (ADR-019-enveloped, not encrypted)"
         );
 
         // Encrypt a separate item on demand, then read it back through the
@@ -3965,5 +4078,228 @@ mod tests {
 
         let after = store.list_items(0, 10).unwrap();
         assert!(after.iter().find(|i| i.id == id).unwrap().content_encrypted);
+    }
+
+    // ── IR envelope versioning (ADR-019, Q10) ────────────────────────────
+
+    /// A document inserted (and therefore written through the current
+    /// `IrEnvelopeRef`/`CURRENT_IR_VERSION` envelope) round-trips through
+    /// `get_item`/`get_tokens` exactly as before — the envelope is
+    /// transparent to every existing caller.
+    #[test]
+    fn ir_envelope_current_version_blob_round_trips() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("ir-versioning-round-trip");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let loaded = store
+            .get_item(&id)
+            .unwrap()
+            .expect("current-version item must round-trip");
+        assert_eq!(loaded.metadata.title, "ir-versioning-round-trip");
+        assert_eq!(loaded.sections.len(), doc.sections.len());
+
+        let tokens = store
+            .get_tokens(&id)
+            .unwrap()
+            .expect("current-version tokens must round-trip");
+        assert_eq!(tokens.len(), doc.token_stream.len());
+
+        // And the on-disk shape really is the new envelope, not the bare
+        // pre-ADR-019 shape — confirms the test is exercising what it
+        // claims to.
+        let doc_path = store.storage_dir().join(format!("{id}.json"));
+        let raw = std::fs::read(&doc_path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(value["ir_version"], serde_json::json!(CURRENT_IR_VERSION));
+        assert!(value["payload"]["id"].is_string());
+    }
+
+    /// A blob whose `ir_version` is newer than this binary's
+    /// `CURRENT_IR_VERSION` is rejected with a typed
+    /// `StoreError::IrVersionTooNew` — never a panic, never a generic
+    /// `serde_json`/deserialize error, and critically, the payload (which
+    /// this binary has no business trying to interpret) is never even
+    /// attempted.
+    #[test]
+    fn ir_envelope_future_version_is_rejected_with_typed_error_not_a_panic() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("ir-versioning-future");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        // Overwrite with a fabricated future-version envelope. The payload
+        // is deliberately garbage (not a valid Document at all) to prove
+        // the version check runs *before* any attempt to interpret it.
+        let doc_path = store.storage_dir().join(format!("{id}.json"));
+        let future_blob = serde_json::json!({
+            "ir_version": 9999,
+            "payload": { "this_is_not": "a valid Document shape" },
+        });
+        std::fs::write(&doc_path, serde_json::to_vec(&future_blob).unwrap()).unwrap();
+        // Checksum sidecar now covers stale bytes; remove it so this test
+        // exercises IR-version rejection specifically, not a checksum
+        // mismatch (ADR-013 is a separate, already-tested concern).
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+
+        let result = store.get_item(&id);
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::IrVersionTooNew {
+                    found: 9999,
+                    expected: CURRENT_IR_VERSION
+                })
+            ),
+            "expected a typed IrVersionTooNew error, got {result:?}"
+        );
+    }
+
+    /// A blob at the current (understood) version whose `payload` carries
+    /// an extra, unrecognised JSON field — simulating a hypothetical future
+    /// version that's still additively decodable — still deserializes
+    /// successfully. Confirms the "unknown fields are tolerated, never a
+    /// hard error" policy ADR-019 documents (no type in the IR graph sets
+    /// `#[serde(deny_unknown_fields)]`).
+    #[test]
+    fn ir_envelope_extra_unknown_payload_field_still_deserializes() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("ir-versioning-extra-field");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let doc_path = store.storage_dir().join(format!("{id}.json"));
+        let raw = std::fs::read(&doc_path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        value["payload"]["a_field_this_binary_has_never_heard_of"] =
+            serde_json::json!("from a hypothetically newer, still-decodable version");
+        std::fs::write(&doc_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+
+        let loaded = store
+            .get_item(&id)
+            .unwrap()
+            .expect("an extra unknown field in payload must not break deserialization");
+        assert_eq!(loaded.metadata.title, "ir-versioning-extra-field");
+    }
+
+    /// **The most important test in this role.** A blob written in the
+    /// exact pre-ADR-019 on-disk shape — a bare `Document`/`Vec<Token>`
+    /// JSON object/array, no `{"ir_version": ..., "payload": ...}` envelope
+    /// at all, exactly what `insert_item` produced for this entire
+    /// project's history up to and including the immediately-preceding
+    /// commit — must still read correctly through `get_item`/`get_tokens`.
+    /// Existing users' on-disk libraries must not break when they upgrade
+    /// to a binary built from this change.
+    #[test]
+    fn pre_adr019_unenveloped_blob_is_still_readable() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("legacy-unenveloped-blob");
+        let id = doc.id.clone();
+
+        // Insert normally (to get a valid library_items row + tokens
+        // indexed for FTS), then overwrite both on-disk blobs with the bare,
+        // unenveloped JSON shape every binary before this change wrote —
+        // simulating a library that predates ADR-019.
+        store.insert_item(&doc).unwrap();
+
+        let storage = dir.path().join("storage");
+        let doc_path = storage.join(format!("{id}.json"));
+        let tokens_path = storage.join(format!("{id}.tokens.json"));
+
+        let bare_doc_json = serde_json::to_vec(&doc).unwrap();
+        std::fs::write(&doc_path, &bare_doc_json).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+
+        let bare_tokens_json = serde_json::to_vec(&doc.token_stream).unwrap();
+        std::fs::write(&tokens_path, &bare_tokens_json).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&tokens_path)).unwrap();
+
+        let loaded = store
+            .get_item(&id)
+            .unwrap()
+            .expect("a pre-ADR-019 unenveloped document blob must still be readable");
+        assert_eq!(loaded.metadata.title, "legacy-unenveloped-blob");
+        assert_eq!(loaded.sections.len(), doc.sections.len());
+
+        let tokens = store
+            .get_tokens(&id)
+            .unwrap()
+            .expect("a pre-ADR-019 unenveloped tokens blob must still be readable");
+        assert_eq!(tokens.len(), doc.token_stream.len());
+    }
+
+    /// Same as above, but for the `get_tokens` fallback path (no
+    /// `<id>.tokens.json` present at all, so it falls back to loading the
+    /// full document and extracting `token_stream`) — confirms that
+    /// fallback also tolerates a pre-ADR-019 unenveloped `<id>.json`.
+    #[test]
+    fn pre_adr019_unenveloped_doc_blob_readable_via_get_tokens_fallback() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("legacy-unenveloped-fallback");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let storage = dir.path().join("storage");
+        let doc_path = storage.join(format!("{id}.json"));
+        let tokens_path = storage.join(format!("{id}.tokens.json"));
+
+        std::fs::write(&doc_path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+        // No tokens file at all, forcing get_tokens's document-fallback path.
+        std::fs::remove_file(&tokens_path).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&tokens_path)).unwrap();
+
+        let tokens = store
+            .get_tokens(&id)
+            .unwrap()
+            .expect("fallback must still work against a pre-ADR-019 unenveloped doc blob");
+        assert_eq!(tokens.len(), doc.token_stream.len());
+    }
+
+    /// `deserialize_ir_blob` directly, at the unit level, for the two
+    /// legacy shapes IR blobs actually take on disk: a bare JSON object
+    /// (`Document`) and a bare JSON array (`Vec<Token>`) — neither has an
+    /// `"ir_version"` key, and `serde_json::Value::get("ir_version")` must
+    /// return `None` for both (not panic, not misparse) so the fallback
+    /// branch in `deserialize_ir_blob` is reached correctly regardless of
+    /// whether the legacy payload was an object or an array.
+    #[test]
+    fn deserialize_ir_blob_falls_back_correctly_for_both_object_and_array_legacy_shapes() {
+        let doc = doc_with_title("unit-level-legacy-object");
+        let doc_bytes = serde_json::to_vec(&doc).unwrap();
+        let decoded: gist_model::Document = deserialize_ir_blob(&doc_bytes).unwrap();
+        assert_eq!(decoded.metadata.title, "unit-level-legacy-object");
+
+        let tokens_bytes = serde_json::to_vec(&doc.token_stream).unwrap();
+        let decoded_tokens: Vec<gist_model::Token> = deserialize_ir_blob(&tokens_bytes).unwrap();
+        assert_eq!(decoded_tokens.len(), doc.token_stream.len());
+    }
+
+    /// Backward-compatibility policy for additive fields (ADR-019): a JSON
+    /// blob that predates a field's addition — lacking the key entirely —
+    /// must still deserialize cleanly via that field's `#[serde(default)]`.
+    /// `Metadata::source_copy_ref` (ADR-006, added after `Metadata` already
+    /// existed) is a real, already-shipped example of exactly this
+    /// scenario, not a hypothetical one: this locks in that a `Metadata`
+    /// JSON object with no `source_copy_ref` key at all (the literal shape
+    /// every `Metadata` blob had before ADR-006 landed) still deserializes,
+    /// defaulting to `None`.
+    #[test]
+    fn metadata_json_missing_a_field_added_after_the_fact_deserializes_via_serde_default() {
+        let json = serde_json::json!({
+            "title": "pre-ADR-006 metadata",
+            "author": null,
+            "source_type": "txt",
+            "source_ref": "/tmp/old.txt",
+            // Deliberately no "source_copy_ref" key at all.
+            "import_date": null,
+            "language": null,
+            "word_count": 42,
+        });
+        let meta: gist_model::Metadata = serde_json::from_value(json).unwrap();
+        assert_eq!(meta.title, "pre-ADR-006 metadata");
+        assert_eq!(meta.source_copy_ref, None);
     }
 }
