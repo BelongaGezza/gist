@@ -82,6 +82,7 @@ gist/
 | 012 | macOS app sandbox (entitlements) |
 | 013 | At-rest integrity: BLAKE3 checksum sidecar files, verified on read, missing = unverified not corrupt |
 | 014 | Per-item on-demand encryption (`Store::encrypt_item`), plus decoupling read-decrypt capability from write-auto-encrypt behavior (`Store::open_with_read_key`) |
+| 019 | IR/schema versioning: `ir_version` envelope at the `gist-store` storage boundary (not on `gist_model::Document`); forward-compat rejection (`StoreError::IrVersionTooNew`) mirrors `SchemaTooNew`; additive changes need no version bump |
 
 ## Independent security audit (2026-09-12, main @ 59cff8c)
 
@@ -141,7 +142,7 @@ Exit criterion: a team member can use it as their daily reader. Getting close, n
 | Q | Must decide by |
 |---|----------------|
 | Q3: Paginated view — v1.0 or v1.1? (plan says v1.1; flow view uses ReadingLayout abstraction, kept generic partly so this can conform later) | M2 start |
-| Q10: Schema/IR versioning + forward compatibility policy | M4 start |
+| Q10: Schema/IR versioning + forward compatibility policy. **Closed 2026-09-29 (M5 role R1).** `docs/adr/019-ir-versioning.md` decides an `ir_version` envelope at the `gist-store` storage boundary (not on `gist_model::Document` itself, keeping the IR model crate's `wasm32` target untouched) — `{"ir_version": N, "payload": ...}` wrapping every `<id>.json`/`<id>.tokens.json` write. A newer-than-understood `ir_version` is rejected with a new typed `StoreError::IrVersionTooNew`, mirroring `SchemaTooNew`'s shape, checked before the payload is ever interpreted. Additive IR changes stay compatible both directions with no version bump (confirmed by tests, not just asserted), and a versioned-decoder migration mechanism is specified for the first future breaking change. A pre-existing, unversioned on-disk blob — the format every GIST binary wrote before this change — is confirmed still readable: existing users' libraries are not broken. See `docs/development-plan-v2.md` §7's matching closure note for the full decision. | M4 start |
 | Q11: At-rest document *confidentiality and* integrity — BLAKE3 checksums, **and** (broadened 2026-09-12 per audit finding `A6`) whether IR blobs (ADR-007) and original-copy files (ADR-006) need encryption-at-rest, not just checksums. Personal reading material is currently plaintext on disk. Needs a new ADR-011, OS-native keychain-backed (iOS Data Protection / macOS equivalent) — not custom crypto. | M4 start |
 
 ## Build & toolchain
