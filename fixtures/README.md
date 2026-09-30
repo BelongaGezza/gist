@@ -23,6 +23,7 @@ Plain-text files consumed by `gist-parse-txt::parse(bytes, limits)`.
 | `empty.txt` | 0 bytes | Zero-byte file. | `Ok(Document)` with empty or minimal content (not a panic, not an error). |
 | `single_line.txt` | 50,000 bytes | One line of 50 000 ASCII `'A'` characters, no trailing newline. | `Ok(Document)` — parser must not over-allocate per-line structures. |
 | `bench_20page.txt` | ~58 KB, ~8,900 words | 172 Lorem-ipsum paragraphs, blank-line-separated — a realistic stand-in for §9.1's "20-page document" performance target (not part of the corpus test; used by `crates/gist-parse-txt/benches/parse_bench.rs`, M4 R2). | `Ok(Document)` — used for `cargo bench`, not correctness. |
+| `line_endings.txt` | ~340 bytes | Five paragraphs, each separated by a differently-spelled "blank line": CRLF-CRLF, bare-CR-CR, a line with a single space, a line with a single tab. Regression fixture for issue #76 (paragraphs previously only split on a literal `"\n\n"`). | `Ok(Document)` with exactly 5 non-empty paragraph blocks. |
 | `adversarial/all_null_bytes.bin` | 1,024 bytes | 1 024 null bytes.  Extension is `.bin` so `Core::import_file` returns `ImportError::UnsupportedType`; pass bytes directly to `parse()` to test that path. | When called directly: `Ok` or a recognised `ParseError`, never a panic. |
 | `adversarial/max_lines.txt` | ~285 KB | 5 000 short lines ("Line 00000: The quick brown fox…"). | `Ok(Document)` — stress test line-count handling without hitting memory limits. |
 
