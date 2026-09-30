@@ -1,0 +1,7 @@
+First paragraph, ASCII text with a normal LF line ending.
+
+Second paragraph, following a CRLF-CRLF blank line (Windows-style).Third paragraph, following a bare-CR blank line (classic Mac / Word paragraph marks).
+ 
+Fourth paragraph, following a line containing only a single space.
+	
+Fifth paragraph, following a line containing only a tab.
