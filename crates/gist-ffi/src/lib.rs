@@ -16,13 +16,34 @@ pub enum GistError {
     /// presentation instead of parsing `Core`'s message text.
     #[error("this document is protected by DRM and cannot be imported")]
     DrmProtected,
+    /// Mirrors `gist_store::StoreError::ChecksumMismatch` (ADR-013 /
+    /// security register `A4`, `R3`) as its own variant, for the same
+    /// reason `DrmProtected` is one: so Swift can switch on
+    /// `.ChecksumMismatch` for a dedicated "this file was corrupted,
+    /// consider re-importing it" presentation instead of parsing `Core`'s
+    /// generic message text. Reachable from any call that reads document
+    /// content (`get_document_json`, `start_rsvp`, …), not just the
+    /// explicit `verify_item_integrity`/`verify_library_integrity` checks
+    /// below — a real read hitting corrupted content should surface just
+    /// as distinctly as an explicit integrity check finding it. `path` is
+    /// this app's own internal storage path (e.g. `<id>.json` under the
+    /// sandboxed storage directory), never the user's original file — see
+    /// `CLAUDE.md`'s "Source paths" policy for why that distinction
+    /// matters; `source_ref`/`source_path` never appear here.
+    #[error("checksum mismatch for {path}: file appears corrupted on disk")]
+    ChecksumMismatch { path: String },
     #[error("internal error")]
     InternalPanic,
 }
 
 impl From<gist_core::CoreError> for GistError {
     fn from(e: gist_core::CoreError) -> Self {
-        GistError::Core(e.to_string())
+        match e {
+            gist_core::CoreError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
+                GistError::ChecksumMismatch { path }
+            }
+            other => GistError::Core(other.to_string()),
+        }
     }
 }
 
@@ -30,6 +51,9 @@ impl From<gist_core::ImportError> for GistError {
     fn from(e: gist_core::ImportError) -> Self {
         match e {
             gist_core::ImportError::DrmProtected => GistError::DrmProtected,
+            gist_core::ImportError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
+                GistError::ChecksumMismatch { path }
+            }
             other => GistError::Core(other.to_string()),
         }
     }
@@ -377,6 +401,107 @@ impl From<gist_core::EncryptItemOutcome> for FfiEncryptItemResult {
                 outcome: None,
                 error: Some(e.to_string()),
             },
+        }
+    }
+}
+
+// ── At-rest integrity verification (ADR-013 / security register `A4`, `R3`) ─
+
+/// Mirrors `gist_core::ChecksumStatus` (re-exported from `gist-store`) as a
+/// uniffi-exportable enum. Kept data-free like every other enum in this
+/// file, so `FfiItemIntegrityReport`'s fields carry it directly rather than
+/// needing a companion `Option` payload field the way
+/// `FfiAnnotationAnchorResult.old_start` does for `Reanchored`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiChecksumStatus {
+    /// A checksum sidecar exists and matches the file's current bytes.
+    Verified,
+    /// The file exists but has no checksum sidecar (pre-`A4` data). Not an
+    /// error — see `gist_store::verify_checksum`'s backfill policy.
+    Unverified,
+    /// A checksum sidecar exists but disagrees with the file's current
+    /// bytes — genuine corruption.
+    Mismatch,
+    /// The file itself does not exist on disk at all.
+    Missing,
+}
+
+impl From<gist_core::ChecksumStatus> for FfiChecksumStatus {
+    fn from(s: gist_core::ChecksumStatus) -> Self {
+        match s {
+            gist_core::ChecksumStatus::Verified => FfiChecksumStatus::Verified,
+            gist_core::ChecksumStatus::Unverified => FfiChecksumStatus::Unverified,
+            gist_core::ChecksumStatus::Mismatch => FfiChecksumStatus::Mismatch,
+            gist_core::ChecksumStatus::Missing => FfiChecksumStatus::Missing,
+        }
+    }
+}
+
+/// Mirrors `gist_core::IntegrityStatus` as a uniffi-exportable enum — the
+/// three-state verdict `GistCore::verifyItemIntegrity`/
+/// `verifyLibraryIntegrity` (`R4`'s "Verify Library Integrity" action)
+/// present per item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiIntegrityStatus {
+    /// Every file this item has matched its recorded checksum.
+    Pass,
+    /// No file disagreed with its checksum, but at least one has no
+    /// checksum to check against — not confirmed bad, not confirmed good.
+    Unverified,
+    /// At least one file's bytes no longer match its recorded checksum —
+    /// genuine corruption.
+    Failed,
+}
+
+impl From<gist_core::IntegrityStatus> for FfiIntegrityStatus {
+    fn from(s: gist_core::IntegrityStatus) -> Self {
+        match s {
+            gist_core::IntegrityStatus::Pass => FfiIntegrityStatus::Pass,
+            gist_core::IntegrityStatus::Unverified => FfiIntegrityStatus::Unverified,
+            gist_core::IntegrityStatus::Failed => FfiIntegrityStatus::Failed,
+        }
+    }
+}
+
+/// Mirrors `gist_core::ItemIntegrityReport`'s underlying
+/// `gist_store::ItemIntegrityReport`: the per-file breakdown one
+/// `FfiItemIntegrityOutcome.status` was aggregated from, for a caller that
+/// wants more detail than the three-state summary (e.g. "your original
+/// copy is missing but your reading copy is fine").
+#[derive(uniffi::Record)]
+pub struct FfiItemIntegrityReport {
+    pub doc_status: FfiChecksumStatus,
+    pub tokens_status: FfiChecksumStatus,
+    /// `None` when this item has no ADR-006 sandboxed original copy (a URL
+    /// import, or one that predates ADR-006).
+    pub original_copy_status: Option<FfiChecksumStatus>,
+}
+
+impl From<gist_core::ItemIntegrityReport> for FfiItemIntegrityReport {
+    fn from(r: gist_core::ItemIntegrityReport) -> Self {
+        FfiItemIntegrityReport {
+            doc_status: r.doc_status.into(),
+            tokens_status: r.tokens_status.into(),
+            original_copy_status: r.original_copy_status.map(FfiChecksumStatus::from),
+        }
+    }
+}
+
+/// Per-item result of `GistCore::verifyItemIntegrity`/
+/// `verifyLibraryIntegrity` (`R3`, ADR-013 / `A4`).
+#[derive(uniffi::Record)]
+pub struct FfiItemIntegrityOutcome {
+    pub id: String,
+    pub status: FfiIntegrityStatus,
+    pub report: FfiItemIntegrityReport,
+}
+
+impl From<gist_core::ItemIntegrityOutcome> for FfiItemIntegrityOutcome {
+    fn from(o: gist_core::ItemIntegrityOutcome) -> Self {
+        FfiItemIntegrityOutcome {
+            id: o.id,
+            status: o.status.into(),
+            report: o.report.into(),
         }
     }
 }
@@ -990,6 +1115,42 @@ impl GistCore {
         })
     }
 
+    /// Check one library item's on-disk integrity (ADR-013 / security
+    /// register `A4`, `R3`): its document/tokens blobs and, if it has one,
+    /// its ADR-006 sandboxed original copy, each checked against its
+    /// BLAKE3 checksum sidecar. Returns `None` if `item_id` matches no
+    /// item. See `gist_core::Core::verify_item_integrity` for the
+    /// pass/fail/unverified aggregation policy.
+    pub fn verify_item_integrity(
+        &self,
+        item_id: String,
+    ) -> Result<Option<FfiItemIntegrityOutcome>, GistError> {
+        ffi_catch!({
+            self.inner
+                .verify_item_integrity(&item_id)
+                .map(|maybe_outcome| maybe_outcome.map(FfiItemIntegrityOutcome::from))
+                .map_err(GistError::from)
+        })
+    }
+
+    /// `verify_item_integrity`, for every item in the library — the
+    /// primitive a "Verify Library Integrity" action (`R4`) calls to build
+    /// a pass/fail/unverified summary. Returns one
+    /// [`FfiItemIntegrityOutcome`] per item, in no guaranteed order.
+    pub fn verify_library_integrity(&self) -> Result<Vec<FfiItemIntegrityOutcome>, GistError> {
+        ffi_catch!({
+            self.inner
+                .verify_library_integrity()
+                .map(|outcomes| {
+                    outcomes
+                        .into_iter()
+                        .map(FfiItemIntegrityOutcome::from)
+                        .collect()
+                })
+                .map_err(GistError::from)
+        })
+    }
+
     /// Import one or more page images (one raw file per page) and run OCR
     /// using the provided engine. Returns the new document's id plus each
     /// page's OCR confidence, in page order. See
@@ -1044,6 +1205,129 @@ mod tests {
         }
 
         assert_eq!(succeeds().unwrap(), 42);
+    }
+
+    // ── At-rest integrity verification (ADR-013 / `A4`, `R3`) ────────────
+
+    /// `GistError::from(CoreError)` must surface a checksum mismatch as its
+    /// own distinct variant, not folded into the generic `Core(String)`
+    /// case — so Swift can pattern-match `.ChecksumMismatch` the same way
+    /// it already does `.DrmProtected`, instead of string-matching an
+    /// error message.
+    #[test]
+    fn checksum_mismatch_core_error_maps_to_its_own_gisterror_variant() {
+        let core_err = gist_core::CoreError::Store(gist_store::StoreError::ChecksumMismatch {
+            path: "/storage/some-id.json".to_string(),
+        });
+        let ffi_err = GistError::from(core_err);
+        match ffi_err {
+            GistError::ChecksumMismatch { path } => {
+                assert_eq!(path, "/storage/some-id.json");
+            }
+            other => panic!("expected GistError::ChecksumMismatch, got {other:?}"),
+        }
+    }
+
+    /// Every other `CoreError` must still fall through to the generic
+    /// `Core(String)` case — this new mapping must not swallow unrelated
+    /// errors.
+    #[test]
+    fn non_checksum_core_error_still_maps_to_generic_core_variant() {
+        let core_err = gist_core::CoreError::NotFound("missing-id".to_string());
+        let ffi_err = GistError::from(core_err);
+        assert!(matches!(ffi_err, GistError::Core(_)));
+    }
+
+    fn corrupt_file(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        assert!(!bytes.is_empty(), "cannot corrupt an empty file");
+        let idx = bytes.len() / 2;
+        bytes[idx] ^= 0xFF;
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// End-to-end through the real `GistCore` FFI surface: a corrupted
+    /// item's document blob must make `verify_item_integrity` report
+    /// `.failed`, and a normal content read through the same corrupted
+    /// item (`get_document_json`) must surface the dedicated
+    /// `GistError::ChecksumMismatch`, not an opaque `Core(String)`.
+    #[test]
+    fn verify_item_integrity_and_a_real_read_both_surface_a_corrupted_item_distinctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = GistCore::new(
+            db.to_string_lossy().into_owned(),
+            storage.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let txt = dir.path().join("corrupt_me.txt");
+        std::fs::write(&txt, b"this item is about to be corrupted on disk").unwrap();
+        let id = core
+            .import_file(txt.to_string_lossy().into_owned())
+            .unwrap();
+
+        let doc_path = storage.join(format!("{id}.json"));
+        corrupt_file(&doc_path);
+
+        let outcome = core
+            .verify_item_integrity(id.clone())
+            .unwrap()
+            .expect("corrupted item must still be found");
+        assert!(matches!(outcome.status, FfiIntegrityStatus::Failed));
+        assert!(matches!(
+            outcome.report.doc_status,
+            FfiChecksumStatus::Mismatch
+        ));
+
+        let read_result = core.get_document_json(id);
+        assert!(
+            matches!(read_result, Err(GistError::ChecksumMismatch { .. })),
+            "expected a real read of corrupted content to surface \
+             GistError::ChecksumMismatch, got {read_result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_item_integrity_returns_none_for_an_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = GistCore::new(
+            db.to_string_lossy().into_owned(),
+            storage.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        assert!(core
+            .verify_item_integrity("not-a-real-id".to_string())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn verify_library_integrity_reports_all_pass_for_a_clean_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = GistCore::new(
+            db.to_string_lossy().into_owned(),
+            storage.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let txt = dir.path().join("clean.txt");
+        std::fs::write(&txt, b"a perfectly ordinary imported document").unwrap();
+        core.import_file(txt.to_string_lossy().into_owned())
+            .unwrap();
+
+        let outcomes = core.verify_library_integrity().unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(outcomes[0].status, FfiIntegrityStatus::Pass));
     }
 }
 

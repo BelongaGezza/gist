@@ -301,3 +301,80 @@ impl Document {
         tokens
     }
 }
+
+// ── tests ────────────────────────────────────────────────────────────────
+
+/// Backward/forward-compatibility policy for the IR graph (ADR-019, Q10):
+/// no type here sets `#[serde(deny_unknown_fields)]`, and every field added
+/// after its containing struct first shipped carries `#[serde(default)]`
+/// (see `Metadata::source_copy_ref`). These tests lock in that this is a
+/// deliberate, tested policy, not just an absence of an attribute nobody
+/// happened to add — `gist-store` (ADR-019's envelope/version-rejection
+/// layer) depends on this holding for every type in this crate, not just
+/// `Document` itself.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_document() -> Document {
+        let section = Section {
+            id: "s0".to_string(),
+            heading: Some((1, "Chapter One".to_string())),
+            blocks: vec![Block::Paragraph {
+                runs: vec![TextRun::plain("hello world")],
+            }],
+        };
+        Document::new(Metadata::minimal("Sample"), vec![section])
+    }
+
+    /// A `Document` (and therefore every nested `Section`/`Block`/`Token`)
+    /// survives an ordinary JSON round trip unchanged — the baseline this
+    /// module's other tests build on.
+    #[test]
+    fn document_round_trips_through_json() {
+        let doc = sample_document();
+        let json = serde_json::to_string(&doc).unwrap();
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, doc.id);
+        assert_eq!(back.metadata.title, doc.metadata.title);
+        assert_eq!(back.sections.len(), doc.sections.len());
+        assert_eq!(back.token_stream.len(), doc.token_stream.len());
+    }
+
+    /// Forward-compat: a JSON object carrying a field this version of the
+    /// type has never heard of must not error — the default serde
+    /// behaviour this crate relies on instead of
+    /// `#[serde(deny_unknown_fields)]`. Exercised at every level of the IR
+    /// graph a single `Document` touches (top-level, and one nested
+    /// `Metadata` field), not just the outermost type.
+    #[test]
+    fn document_json_with_an_extra_unknown_field_still_deserializes() {
+        let doc = sample_document();
+        let mut value = serde_json::to_value(&doc).unwrap();
+        value["a_field_from_a_newer_version"] =
+            serde_json::json!("this binary has never seen this key");
+        value["metadata"]["another_new_field"] = serde_json::json!(123);
+        let back: Document = serde_json::from_value(value).unwrap();
+        assert_eq!(back.id, doc.id);
+        assert_eq!(back.metadata.title, doc.metadata.title);
+    }
+
+    /// Backward-compat: `Metadata::source_copy_ref` (`#[serde(default)]`,
+    /// added by ADR-006 after `Metadata` already shipped without it) must
+    /// still deserialize from a JSON object that predates the field
+    /// entirely — not merely one that sets it to `null`.
+    #[test]
+    fn metadata_missing_source_copy_ref_key_entirely_defaults_to_none() {
+        let json = serde_json::json!({
+            "title": "old metadata shape",
+            "author": null,
+            "source_type": "txt",
+            "source_ref": null,
+            "import_date": null,
+            "language": null,
+            "word_count": 0,
+        });
+        let meta: Metadata = serde_json::from_value(json).unwrap();
+        assert_eq!(meta.source_copy_ref, None);
+    }
+}

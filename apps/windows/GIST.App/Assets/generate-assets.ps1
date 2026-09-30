@@ -1,6 +1,13 @@
 # Regenerates the app icon asset set (docs/iconspecification.md, Windows 11 section: flat 2D, tokens
 # #1C1C1E / #4361EE / #F4F4F0). PLACEHOLDER ARTWORK: a simplified open book + magnifier drawn
-# programmatically; replace with the designed vector master when it exists, then re-run.
+# programmatically.
+#
+# SUPERSEDED 2026-09-30: GIST.ico/StoreLogo.png/Square44x44Logo.png/Square150x150Logo.png/
+# Wide310x150Logo.png in this directory were regenerated from the real designed master
+# (assets/a-windows-11-icon.png at the repo root) instead of this script's placeholder output —
+# see PENDING_WINDOWS_CHANGES.md for what still needs Windows-side verification. This script is
+# kept for reference/rollback only; running it again would overwrite the real artwork with the
+# placeholder again, so don't re-run it unless that's actually the intent.
 # Usage (from anywhere): pwsh -File generate-assets.ps1
 Add-Type -AssemblyName System.Drawing
 $out = $PSScriptRoot

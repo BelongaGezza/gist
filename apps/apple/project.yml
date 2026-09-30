@@ -33,14 +33,24 @@ targets:
     sources:
       - path: Shared
         type: group
+        excludes:
+          - "Resources/**"
       - path: macOS
         type: group
       - path: Generated
         type: group
+      # R6: bundled Third-Party Notices text (see LicensesView.swift). Excluded
+      # from the `Shared` group above and declared separately with an explicit
+      # `resources` build phase, the same pattern `GISTTests`' Fixtures folder
+      # below uses -- a plain-text file under a `type: group` source isn't
+      # reliably categorised into Copy Bundle Resources otherwise.
+      - path: Shared/Resources
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gist.macos
         PRODUCT_NAME: GIST
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MACOSX_DEPLOYMENT_TARGET: "26.5"
         INFOPLIST_FILE: macOS/Info.plist
         # App Sandbox entitlements (A3) — see GISTmacOS.entitlements for what

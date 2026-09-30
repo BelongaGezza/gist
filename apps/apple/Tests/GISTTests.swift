@@ -119,6 +119,61 @@ final class GISTTests: XCTestCase {
         XCTAssertTrue(client.items.isEmpty)
     }
 
+    // MARK: - Pagination (M4 role R2, docs/m4-agent-roles.md §2)
+    //
+    // `gist-store::list_items` already supported real SQL `LIMIT`/`OFFSET`
+    // pagination at the store layer, but `CoreClient` used to fetch a
+    // single, effectively-unbounded `limit: 500` page via `reloadItems` and
+    // never loaded further -- any library past 500 items silently lost its
+    // tail, a real gap against product-spec §9.1(b) ("library with 1,000+
+    // items must remain responsive ... paged library API"). Fixed by
+    // loading real pages (`pageSize` items at a time, see CoreClient's doc
+    // comment) and exposing `hasMoreItems`/`loadMoreItemsIfNeeded` for
+    // `LibraryView` to page through the rest as rows scroll into view.
+
+    func testLibraryUnderOnePageReportsNoMoreItems() async throws {
+        let fixture = try importableFixtureURL()
+        for _ in 0..<3 {
+            await client.importFile(url: fixture)
+        }
+
+        await client.refresh()
+
+        XCTAssertEqual(client.items.count, 3)
+        XCTAssertFalse(client.hasMoreItems, "a 3-item library is well under one page")
+    }
+
+    /// Regression test for the actual bug this role fixed: a library larger
+    /// than one page used to be silently truncated to a single
+    /// unbounded-in-practice fetch. Imports more than one page's worth of
+    /// items (reusing the same fixture file's bytes -- each import still
+    /// gets its own UUIDv7 row, so this legitimately produces that many
+    /// distinct library items), confirms `refresh()` only loads the first
+    /// page with `hasMoreItems == true`, then drives `loadMoreItemsIfNeeded`
+    /// (exactly as `LibraryView`'s row `.onAppear` does) off the last loaded
+    /// item until the whole library is present.
+    func testLibraryOverOnePageLoadsFurtherPagesViaLoadMoreItemsIfNeeded() async throws {
+        let fixture = try importableFixtureURL()
+        let totalItems = 205
+        for _ in 0..<totalItems {
+            await client.importFile(url: fixture)
+        }
+
+        await client.refresh()
+
+        XCTAssertEqual(client.items.count, 200, "first page should be exactly one page, not the whole library")
+        XCTAssertTrue(client.hasMoreItems)
+
+        guard let lastLoaded = client.items.last else {
+            XCTFail("expected a non-empty first page")
+            return
+        }
+        await client.loadMoreItemsIfNeeded(currentItem: lastLoaded)
+
+        XCTAssertEqual(client.items.count, totalItems, "loading the next page should reach the full library")
+        XCTAssertFalse(client.hasMoreItems, "the library is now fully loaded")
+    }
+
     // MARK: - Search
 
     func testSearchFindsImportedItemByContent() async throws {
@@ -366,6 +421,69 @@ final class GISTTests: XCTestCase {
 
         let afterBytes = try Data(contentsOf: copyPath)
         XCTAssertEqual(beforeBytes, afterBytes, "encryptItems must never touch the ADR-006 sandboxed copy")
+    }
+
+    // MARK: - Integrity verification (ADR-013 / [A4], M4 role R4)
+
+    /// Corrupts the stored `<itemId>.json` document blob's bytes in place,
+    /// deliberately *keeping* its `.blake3` checksum sidecar (unlike
+    /// `rewriteFirstParagraphRun`, which drops the sidecar to simulate a
+    /// legitimate edit) -- this is what makes it a genuine checksum
+    /// mismatch (`IntegrityStatusVM.failed`) rather than "unverified."
+    private func corruptDocumentBlob(itemId: String) throws {
+        let docPath = URL(fileURLWithPath: storageDir).appendingPathComponent("\(itemId).json")
+        var data = try Data(contentsOf: docPath)
+        data.append(contentsOf: [0x00, 0xFF, 0x00, 0xFF])
+        try data.write(to: docPath)
+    }
+
+    func testVerifyLibraryIntegrityReportsAllPassForACleanLibrary() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        let outcomes = await client.verifyLibraryIntegrity()
+        XCTAssertNil(client.error)
+        XCTAssertEqual(outcomes.count, 1)
+        XCTAssertEqual(outcomes.first?.id, item.id)
+        XCTAssertEqual(outcomes.first?.status, .pass)
+
+        let summary = LibraryIntegritySummary(outcomes: outcomes)
+        XCTAssertEqual(summary.totalCount, 1)
+        XCTAssertEqual(summary.passCount, 1)
+        XCTAssertEqual(summary.unverifiedCount, 0)
+        XCTAssertEqual(summary.failedCount, 0)
+        XCTAssertFalse(summary.hasFailures)
+        XCTAssertNil(summary.detailMessage, "a clean, fully-verified library has nothing extra to say")
+    }
+
+    func testVerifyLibraryIntegrityReportsFailedForACorruptedBlobNotAsAGenericError() async throws {
+        let fixture = try importableFixtureURL()
+        await client.importFile(url: fixture)
+        guard let item = client.items.first else {
+            XCTFail("expected an imported item")
+            return
+        }
+
+        try corruptDocumentBlob(itemId: item.id)
+
+        let outcomes = await client.verifyLibraryIntegrity()
+        XCTAssertNil(client.error, "a checksum mismatch is a reported outcome, not a thrown/opaque error")
+        XCTAssertEqual(outcomes.count, 1)
+        XCTAssertEqual(outcomes.first?.id, item.id)
+        XCTAssertEqual(outcomes.first?.status, .failed)
+
+        let summary = LibraryIntegritySummary(outcomes: outcomes)
+        XCTAssertEqual(summary.failedCount, 1)
+        XCTAssertTrue(summary.hasFailures)
+        XCTAssertNotNil(summary.detailMessage)
+        XCTAssertTrue(
+            summary.detailMessage?.localizedCaseInsensitiveContains("corrupted") ?? false,
+            "a Failed status must read as 'this file was corrupted,' not a generic error"
+        )
     }
 
     // MARK: - Collections
@@ -763,11 +881,24 @@ final class GISTTests: XCTestCase {
     /// (`{"Paragraph": {"runs": [...]}}`) is exactly what serde's default
     /// derive produces and doesn't need a dedicated Codable type just for
     /// this one test helper to reach into it.
+    ///
+    /// Since ADR-019, `insert_item` writes the `Document` wrapped in an
+    /// `{"ir_version": N, "payload": {...}}` envelope (`gist-store`'s
+    /// `serialize_ir_blob`) rather than as a bare top-level object -- this
+    /// helper unwraps `payload` before editing and re-wraps it under the
+    /// same `ir_version` before writing back, so the rewritten blob is still
+    /// a valid envelope on the next real read.
     private func rewriteFirstParagraphRun(itemId: String, transform: (String) -> String) throws {
         let docPath = URL(fileURLWithPath: storageDir).appendingPathComponent("\(itemId).json")
         let data = try Data(contentsOf: docPath)
-        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            var sections = json["sections"] as? [[String: Any]],
+        guard let outer = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            XCTFail("unexpected stored document JSON shape -- not a JSON object")
+            return
+        }
+        let irVersion = outer["ir_version"]
+        var json = (irVersion != nil ? outer["payload"] as? [String: Any] : outer) ?? [:]
+
+        guard var sections = json["sections"] as? [[String: Any]],
             var firstSection = sections.first,
             var blocks = firstSection["blocks"] as? [[String: Any]],
             var firstBlock = blocks.first,
@@ -789,7 +920,13 @@ final class GISTTests: XCTestCase {
         sections[0] = firstSection
         json["sections"] = sections
 
-        let editedData = try JSONSerialization.data(withJSONObject: json)
+        let rewritten: [String: Any]
+        if let irVersion {
+            rewritten = ["ir_version": irVersion, "payload": json]
+        } else {
+            rewritten = json
+        }
+        let editedData = try JSONSerialization.data(withJSONObject: rewritten)
         try editedData.write(to: docPath)
         try? FileManager.default.removeItem(at: docPath.appendingPathExtension("blake3"))
     }

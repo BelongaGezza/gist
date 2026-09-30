@@ -135,27 +135,86 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    /// Page size for `listItems` calls. `gist-store::list_items` already
+    /// supports real SQL `LIMIT`/`OFFSET` pagination (see its doc comment),
+    /// but until M4 role R2 (`docs/m4-agent-roles.md` §2) this Swift layer
+    /// never actually used it as pagination -- `reloadItems` made one
+    /// unbounded-in-practice call with `limit: 500`, so any library past 500
+    /// items silently lost its tail with no way to ever see it, which is a
+    /// real gap against product-spec §9.1(b) ("library with 1,000+ items
+    /// must remain responsive (virtualised lists, paged library API)").
+    /// Fixed by loading a bounded first page here and paging in further
+    /// pages via `loadMoreItemsIfNeeded` as the list is scrolled, mirroring
+    /// the usual SwiftUI `List` infinite-scroll idiom.
+    private let pageSize: UInt64 = 200
+
+    /// `true` once a `listItems` page has come back short of `pageSize`,
+    /// i.e. the end of the library has been reached and there is no more to
+    /// load. Read by `LibraryView` to decide whether to keep triggering
+    /// `loadMoreItemsIfNeeded` as rows scroll into view.
+    @Published private(set) var hasMoreItems = false
+    private var isLoadingMore = false
+
     func refresh() async {
-        await reloadItems(clearErrorOnSuccess: true)
+        await reloadFirstPage(clearErrorOnSuccess: true)
     }
 
-    /// Reloads `items`. `clearErrorOnSuccess` is false when this reload is the
-    /// tail end of another operation (import, remove, encrypt) that has
-    /// already published its own outcome -- a successful reload must not wipe
-    /// a failure the user hasn't seen yet, or the DRM alert (and any other
-    /// error) would never appear. Mirrors the Windows `CoreClient` split
-    /// (`RefreshAsync`/`ReloadItemsAsync`) -- see PENDING_APPLE_CHANGES.md's
-    /// 2026-09-21 entry for the bug this fixes.
-    private func reloadItems(clearErrorOnSuccess: Bool) async {
+    /// Reloads `items` from the first page. `clearErrorOnSuccess` is false
+    /// when this reload is the tail end of another operation (import,
+    /// remove, encrypt) that has already published its own outcome -- a
+    /// successful reload must not wipe a failure the user hasn't seen yet,
+    /// or the DRM alert (and any other error) would never appear. Mirrors
+    /// the Windows `CoreClient` split (`RefreshAsync`/`ReloadItemsAsync`) --
+    /// see PENDING_APPLE_CHANGES.md's 2026-09-21 entry for the bug this
+    /// fixes.
+    private func reloadFirstPage(clearErrorOnSuccess: Bool) async {
         guard let core else { return }
         isLoading = true
         defer { isLoading = false }
         do {
-            let ffiItems = try core.listItems(offset: 0, limit: 500)
+            let ffiItems = try core.listItems(offset: 0, limit: pageSize)
             items = mapItems(ffiItems)
+            hasMoreItems = UInt64(ffiItems.count) == pageSize
             if clearErrorOnSuccess {
                 error = nil
             }
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+
+    /// Backward-compatible alias -- every existing internal call site below
+    /// (`removeItems`, `importUrl`, `importFile`, `encryptItems`, …) reloads
+    /// the library after an operation that changed it; they all want "reset
+    /// to a fresh first page", not "append the next page", so this just
+    /// forwards to `reloadFirstPage`.
+    private func reloadItems(clearErrorOnSuccess: Bool) async {
+        await reloadFirstPage(clearErrorOnSuccess: clearErrorOnSuccess)
+    }
+
+    /// Loads the next page and appends it to `items`, if `currentItem` is
+    /// near the end of what's currently loaded and more remain. Call this
+    /// from a row's `.onAppear` while iterating the un-searched, un-filtered
+    /// full library list (`LibraryView.itemList`) -- the standard SwiftUI
+    /// `List` infinite-scroll idiom. A no-op while search/tag-filter results
+    /// (which use their own, separately-bounded FFI calls) are what's
+    /// actually displayed, since `items` isn't what's on screen then.
+    func loadMoreItemsIfNeeded(currentItem: LibraryItemVM) async {
+        guard let core else { return }
+        guard hasMoreItems, !isLoadingMore else { return }
+        guard let index = items.firstIndex(where: { $0.id == currentItem.id }) else { return }
+        // Trigger once the row within 10 of the end of what's loaded scrolls
+        // into view, so the next page is ready before the user reaches the
+        // true end of the currently-loaded list.
+        let prefetchThreshold = 10
+        guard index >= items.count - prefetchThreshold else { return }
+
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+        do {
+            let ffiItems = try core.listItems(offset: UInt64(items.count), limit: pageSize)
+            items.append(contentsOf: mapItems(ffiItems))
+            hasMoreItems = UInt64(ffiItems.count) == pageSize
         } catch {
             self.error = "\(error)"
         }
@@ -266,7 +325,7 @@ final class CoreClient: ObservableObject {
             switch gistError {
             case .DrmProtected:
                 drmProtectedFile = URL(string: urlString)
-            case .Core, .InternalPanic:
+            case .Core, .ChecksumMismatch, .InternalPanic:
                 error = "\(gistError)"
             }
         } catch {
@@ -411,7 +470,7 @@ final class CoreClient: ObservableObject {
             switch gistError {
             case .DrmProtected:
                 drmProtectedFile = url
-            case .Core, .InternalPanic:
+            case .Core, .ChecksumMismatch, .InternalPanic:
                 error = "\(gistError)"
             }
         } catch {
@@ -584,6 +643,29 @@ final class CoreClient: ObservableObject {
             let ffiResults = try core.reanchorAnnotations(itemId: itemId)
             error = nil
             return ffiResults.map(AnnotationAnchorResult.init(ffi:))
+        } catch {
+            self.error = "\(error)"
+            return []
+        }
+    }
+
+    // MARK: - Integrity verification (ADR-013 / [A4], M4 role R4)
+
+    /// Runs `GistCore.verifyLibraryIntegrity()` (R3) across every item in
+    /// the library, returning one `IntegrityOutcomeVM` per item -- each
+    /// item's document/tokens blobs and, if it has one, its ADR-006
+    /// sandboxed original copy, checked against its ADR-013 BLAKE3 checksum
+    /// sidecar. Backs the Storage settings tab's "Verify Library Integrity"
+    /// action (`SettingsView.swift`). Returns `[]` (with `error` set) on
+    /// failure, same convention as `listAnnotations`; doesn't publish into a
+    /// shared `@Published` property since only that one action ever
+    /// triggers a run, and it holds the result as local state.
+    func verifyLibraryIntegrity() async -> [IntegrityOutcomeVM] {
+        guard let core else { return [] }
+        do {
+            let outcomes = try core.verifyLibraryIntegrity()
+            error = nil
+            return outcomes.map(IntegrityOutcomeVM.init(ffi:))
         } catch {
             self.error = "\(error)"
             return []
@@ -786,6 +868,99 @@ struct RemoveItemsSummary {
         String(
             localized: "\(filesFailedCount) file\(filesFailedCount == 1 ? "" : "s") for the removed item\(removedCount == 1 ? "" : "s") could not be deleted (something else may have it open). It has been reclaimed from your library — GIST will retry deleting the leftover file\(filesFailedCount == 1 ? "" : "s") automatically."
         )
+    }
+}
+
+/// Client-side mirror of `FfiIntegrityStatus` (ADR-013 / `[A4]` -- see
+/// `crates/gist-ffi/src/lib.rs`), the three-state verdict
+/// `CoreClient.verifyLibraryIntegrity` reports per item.
+///
+/// `.unverified` (no checksum sidecar to check against -- e.g. the item
+/// predates ADR-013) is deliberately distinct from `.failed` (a real
+/// checksum mismatch, i.e. genuine on-disk corruption): the former is
+/// presented calmly, the latter as an actionable warning. See
+/// `LibraryIntegritySummary` below for how the Storage settings tab turns
+/// this into copy.
+enum IntegrityStatusVM: Equatable {
+    case pass
+    case unverified
+    case failed
+
+    init(ffi: FfiIntegrityStatus) {
+        switch ffi {
+        case .pass: self = .pass
+        case .unverified: self = .unverified
+        case .failed: self = .failed
+        }
+    }
+}
+
+/// One item's result from `CoreClient.verifyLibraryIntegrity`. `id` is the
+/// library item id (not, e.g., a per-file id) -- matches
+/// `FfiItemIntegrityOutcome.id`.
+struct IntegrityOutcomeVM: Identifiable {
+    let id: String
+    let status: IntegrityStatusVM
+
+    init(ffi: FfiItemIntegrityOutcome) {
+        self.id = ffi.id
+        self.status = IntegrityStatusVM(ffi: ffi.status)
+    }
+}
+
+/// Tallied summary of a `CoreClient.verifyLibraryIntegrity` run, for the
+/// Storage settings tab's "Verify Library Integrity" result presentation
+/// (M4 role R4). Deliberately keeps "unverified" and "failed" visually and
+/// textually distinct -- see `detailMessage`.
+struct LibraryIntegritySummary {
+    let outcomes: [IntegrityOutcomeVM]
+
+    var totalCount: Int { outcomes.count }
+    var passCount: Int { outcomes.filter { $0.status == .pass }.count }
+    var unverifiedCount: Int { outcomes.filter { $0.status == .unverified }.count }
+    var failedCount: Int { outcomes.filter { $0.status == .failed }.count }
+
+    /// Whether anything genuinely corrupt was found -- drives the
+    /// alarming-vs-calm presentation in the settings tab.
+    var hasFailures: Bool { failedCount > 0 }
+
+    // (R5b localisation) Built via string interpolation/concatenation, not
+    // `Text("literal")` -- see `EncryptItemsSummary.message`'s note above,
+    // same reasoning applies here.
+    var message: String {
+        guard !outcomes.isEmpty else {
+            return String(localized: "Your library is empty — nothing to verify.")
+        }
+        var parts: [String] = [
+            String(localized: "\(passCount) of \(totalCount) item\(totalCount == 1 ? "" : "s") passed")
+        ]
+        if unverifiedCount > 0 {
+            parts.append(String(localized: "\(unverifiedCount) unverified"))
+        }
+        if failedCount > 0 {
+            parts.append(String(localized: "\(failedCount) failed"))
+        }
+        return parts.joined(separator: ", ") + "."
+    }
+
+    /// A real `.failed` result reads as "this file was corrupted, consider
+    /// re-importing it" -- never a generic error. A library with only
+    /// `.unverified` items (no checksum recorded, e.g. pre-ADR-013 imports)
+    /// gets an explicitly reassuring note instead, per this role's spec:
+    /// "unverified" must never read as alarming. `nil` when there's nothing
+    /// worth adding beyond `message` (a clean, fully-verified library).
+    var detailMessage: String? {
+        if hasFailures {
+            return String(
+                localized: "One or more files no longer match their recorded checksum, which means they were corrupted on disk. Consider re-importing the affected item(s)."
+            )
+        }
+        if unverifiedCount > 0 {
+            return String(
+                localized: "Some items have no recorded checksum yet (they were imported before integrity tracking was added) — this doesn't mean anything is wrong."
+            )
+        }
+        return nil
     }
 }
 
