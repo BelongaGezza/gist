@@ -50,6 +50,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.gist.macos
         PRODUCT_NAME: GIST
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MACOSX_DEPLOYMENT_TARGET: "26.5"
         INFOPLIST_FILE: macOS/Info.plist
         # App Sandbox entitlements (A3) — see GISTmacOS.entitlements for what
