@@ -51,6 +51,16 @@ pub enum StoreError {
     /// those three via `annotation_kind_to_sql`.
     #[error("invalid annotation kind stored in database: {0}")]
     InvalidAnnotationKind(String),
+    /// An IR blob's (`<id>.json`/`<id>.tokens.json`, ADR-007) `ir_version`
+    /// envelope field (ADR-019) is newer than this binary's
+    /// `CURRENT_IR_VERSION` — the blob was written by a newer version of
+    /// GIST whose IR shape this binary does not know how to interpret.
+    /// Mirrors [`StoreError::SchemaTooNew`]'s shape for the SQLite schema,
+    /// applied to the per-document JSON envelope instead: refuse to guess
+    /// at unknown-shape fields rather than attempting a best-effort parse
+    /// that could silently misinterpret or drop data.
+    #[error("IR blob version {found} is newer than this app's known version {expected}; upgrade the app")]
+    IrVersionTooNew { found: u32, expected: u32 },
 }
 
 // ── Encryption at rest (ADR-011) ─────────────────────────────────────────────
@@ -190,6 +200,70 @@ fn write_checksum_sidecar(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Tri/four-state classification of one on-disk file's BLAKE3 checksum
+/// sidecar (ADR-013 / security register `A4`) against its current bytes —
+/// the information [`verify_checksum`]'s plain `Result<(), StoreError>`
+/// deliberately collapses (a missing sidecar and a matching one are both
+/// "fine to proceed" for the read path) but which an explicit integrity
+/// report (`R3`, [`Store::verify_item_integrity`]) needs kept apart, so a
+/// user can be told "this predates checksums" separately from "this is
+/// confirmed intact" separately from "this is genuinely corrupted."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChecksumStatus {
+    /// A sidecar exists and its digest matches the file's current bytes.
+    Verified,
+    /// The file exists but has no checksum sidecar — written before
+    /// ADR-013 landed, or (for an `originals/` copy) deduplicated against a
+    /// pre-existing file that predates it. Not an error; there is nothing
+    /// to compare against. See [`verify_checksum`]'s backfill policy.
+    Unverified,
+    /// A sidecar exists but its digest disagrees with the file's current
+    /// bytes — the file has been corrupted (bit rot, disk fault, manual
+    /// tampering) since it was written.
+    Mismatch,
+    /// The file itself does not exist on disk at all. Deliberately its own
+    /// state, not folded into `Unverified`: a missing *sidecar* is routine
+    /// (pre-`A4` data) but a missing *content file* means the row's own
+    /// data is gone, which is a stronger signal — see
+    /// [`Store::verify_item_integrity`]'s aggregation for how a caller is
+    /// expected to weigh it.
+    Missing,
+}
+
+/// Classify `bytes` (already read from `path`) against `path`'s checksum
+/// sidecar, if one exists. Never returns [`ChecksumStatus::Missing`] — the
+/// caller already has `bytes` in hand, so `path` plainly exists; that state
+/// is only produced by [`checksum_status_of_file`], which does the read.
+fn checksum_status(path: &str, bytes: &[u8]) -> Result<ChecksumStatus, StoreError> {
+    let sidecar = checksum_sidecar_path(Path::new(path));
+    let expected = match std::fs::read_to_string(&sidecar) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ChecksumStatus::Unverified)
+        }
+        Err(e) => return Err(StoreError::Io(e)),
+    };
+    if expected.trim() != checksum_hex(bytes) {
+        Ok(ChecksumStatus::Mismatch)
+    } else {
+        Ok(ChecksumStatus::Verified)
+    }
+}
+
+/// Read `path` fresh from disk and classify it against its checksum
+/// sidecar. Unlike [`checksum_status`], this can report
+/// [`ChecksumStatus::Missing`] when `path` itself doesn't exist. Used by
+/// [`Store::verify_item_integrity`]/[`Store::verify_library_integrity`]
+/// (`R3`) — an explicit integrity check, not the ordinary read path, so a
+/// missing file is reported rather than treated as "nothing to verify."
+fn checksum_status_of_file(path: &str) -> Result<ChecksumStatus, StoreError> {
+    match std::fs::read(path) {
+        Ok(bytes) => checksum_status(path, &bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ChecksumStatus::Missing),
+        Err(e) => Err(StoreError::Io(e)),
+    }
+}
+
 /// Verify `bytes` (freshly read from `path`) against `path`'s checksum
 /// sidecar, if one exists.
 ///
@@ -202,18 +276,114 @@ fn write_checksum_sidecar(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 /// spuriously flagged as corrupt, but also never silently credited with an
 /// integrity guarantee it doesn't have.
 fn verify_checksum(path: &str, bytes: &[u8]) -> Result<(), StoreError> {
-    let sidecar = checksum_sidecar_path(Path::new(path));
-    let expected = match std::fs::read_to_string(&sidecar) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(StoreError::Io(e)),
-    };
-    if expected.trim() != checksum_hex(bytes) {
-        return Err(StoreError::ChecksumMismatch {
+    match checksum_status(path, bytes)? {
+        ChecksumStatus::Mismatch => Err(StoreError::ChecksumMismatch {
             path: path.to_string(),
-        });
+        }),
+        // `Missing` is unreachable here (bytes were already read
+        // successfully) but matched for exhaustiveness rather than `_`, so
+        // a future new variant can't silently fall through unconsidered.
+        ChecksumStatus::Verified | ChecksumStatus::Unverified | ChecksumStatus::Missing => Ok(()),
     }
-    Ok(())
+}
+
+// ── IR envelope versioning (ADR-019, CLAUDE.md open question Q10) ─────────
+
+/// Current on-disk IR envelope format version. Bump this only when the
+/// `Document`/`Token` JSON shape changes in a way an older binary cannot
+/// safely interpret un-migrated (see ADR-019's migration story) — a plain
+/// additive field on `Document`/`Section`/`Block`/`Token`/`Metadata` does
+/// **not** require a bump, since `#[serde(default)]` (and the deliberate
+/// absence of `#[serde(deny_unknown_fields)]` anywhere in `gist-model`)
+/// already makes those forward/backward compatible without any version
+/// check at all.
+const CURRENT_IR_VERSION: u32 = 1;
+
+/// The on-disk envelope wrapping every IR blob `gist-store` writes
+/// (`<id>.json`/`<id>.tokens.json`, ADR-007) as of ADR-019. Lives here, not
+/// in `gist-model`, deliberately: this is an I/O-boundary/storage-format
+/// concern, not part of the pure IR model that must stay
+/// `wasm32-unknown-unknown`-compilable — `gist_model::Document`/`Token`
+/// themselves carry no version field and know nothing about this wrapper.
+///
+/// `payload` is kept as a borrowed reference on write ([`serialize_ir_blob`])
+/// and an owned value on read ([`deserialize_ir_blob`]) — two separate
+/// monomorphisations of the same shape rather than one generic struct
+/// shared byref/by-value, which would need a lifetime parameter threaded
+/// through call sites that don't otherwise need one.
+#[derive(Serialize)]
+struct IrEnvelopeRef<'a, T> {
+    ir_version: u32,
+    payload: &'a T,
+}
+
+/// Serialize `payload` wrapped in the current [`IrEnvelopeRef`] — what every
+/// new write of an IR blob produces from this version of GIST onward
+/// (ADR-019). The resulting JSON is still a single flat, human-readable
+/// object (`{"ir_version":1,"payload":{...}}`), preserving ADR-007's
+/// "inspectable with any editor" property.
+fn serialize_ir_blob<T: Serialize>(payload: &T) -> Result<String, StoreError> {
+    Ok(serde_json::to_string(&IrEnvelopeRef {
+        ir_version: CURRENT_IR_VERSION,
+        payload,
+    })?)
+}
+
+/// Deserialize an IR blob written by either this version of GIST (wrapped
+/// in an `{"ir_version": N, "payload": ...}` envelope, ADR-019) or by any
+/// version before ADR-019 landed (the bare `Document`/`Vec<Token>` JSON,
+/// with no envelope at all — ADR-007's original, still-unversioned format).
+///
+/// **Forward compatibility:** the version check happens *before* any
+/// attempt to deserialize `payload` into `T` — a blob whose `ir_version` is
+/// newer than [`CURRENT_IR_VERSION`] is rejected with
+/// [`StoreError::IrVersionTooNew`] immediately, never handed to `T`'s
+/// `Deserialize` impl at all. This matters: a future format's `payload`
+/// might not even be structurally parseable as today's `T`, and attempting
+/// it anyway could produce a misleading generic JSON error (or, worse, an
+/// incomplete-but-technically-valid `T` that silently drops fields this
+/// binary doesn't know about) instead of a clear "upgrade the app" signal.
+///
+/// **Backward compatibility / legacy blobs:** distinguishing the two shapes
+/// needs no separate on-disk marker. A pre-ADR-019 blob is either a JSON
+/// object with no `"ir_version"` key (a bare `Document`) or a JSON array (a
+/// bare `Vec<Token>`) — `serde_json::Value::get("ir_version")` returns
+/// `None` for both (arrays never match a string key; a bare `Document`
+/// object simply doesn't have that key), so the absence of the key is
+/// itself the signal that this is a legacy, implicitly-version-1 blob. It's
+/// deserialized directly as `T`, exactly as every binary before this change
+/// already did — this is the "existing users' libraries must not break"
+/// guarantee ADR-019 requires, and is covered by a dedicated test reading a
+/// blob in exactly this pre-existing shape.
+fn deserialize_ir_blob<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    match value.get("ir_version") {
+        Some(v) => {
+            // A malformed/non-numeric ir_version is treated as "at least as
+            // new as we can prove it isn't" — fail closed via
+            // IrVersionTooNew rather than falling through to a payload
+            // parse attempt whose error would be far less clear about what
+            // actually went wrong.
+            let found = v.as_u64().map(|n| n as u32).unwrap_or(u32::MAX);
+            if found > CURRENT_IR_VERSION {
+                return Err(StoreError::IrVersionTooNew {
+                    found,
+                    expected: CURRENT_IR_VERSION,
+                });
+            }
+            let payload = value
+                .get("payload")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            Ok(serde_json::from_value(payload)?)
+        }
+        // No `ir_version` key at all: a legacy, pre-ADR-019 blob (or a
+        // hypothetical future blob using a different envelope shape
+        // entirely — both are handled identically here by falling back to
+        // a direct parse, which is correct for the former and merely
+        // best-effort, not a security-relevant guarantee, for the latter).
+        None => Ok(serde_json::from_value(value)?),
+    }
 }
 
 // ── Long database paths on Windows (review Q10) ────────────────────────────
@@ -375,6 +545,30 @@ pub struct ReferencedFiles {
     /// *same* path can appear for more than one row — which is exactly why
     /// the sweep keeps a file while **any** row still references it.
     pub source_copy_path: Option<String>,
+}
+
+// ── Item integrity report (ADR-013 / security register `A4`, `R3`) ─────────
+
+/// Per-file [`ChecksumStatus`] breakdown for one `library_items` row, as
+/// returned by [`Store::verify_item_integrity`]/
+/// [`Store::verify_library_integrity`]. `gist_core::Core` aggregates this
+/// into a single pass/fail/unverified verdict; kept here as the full
+/// breakdown so a caller that wants more than the three-state summary
+/// (e.g. "your original copy is missing but your reading copy is fine")
+/// doesn't need a second call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemIntegrityReport {
+    pub id: String,
+    /// Status of the `<id>.json` document blob (ADR-007).
+    pub doc_status: ChecksumStatus,
+    /// Status of the `<id>.tokens.json` blob. `Unverified` (not `Missing`)
+    /// when this item predates ADR-007's separate tokens file and has none
+    /// — see [`Store::verify_item_integrity`]'s implementation note.
+    pub tokens_status: ChecksumStatus,
+    /// Status of the ADR-006 sandboxed `originals/` copy, or `None` if
+    /// this item has no such copy (a URL import, or one that predates
+    /// ADR-006).
+    pub original_copy_status: Option<ChecksumStatus>,
 }
 
 // ── Collection ──────────────────────────────────────────────────────────────
@@ -745,9 +939,10 @@ impl Store {
     pub fn insert_item(&self, doc: &gist_model::Document) -> Result<(), StoreError> {
         let key = self.encryption_key();
 
-        // Write the full document blob.
+        // Write the full document blob, wrapped in the ADR-019 IR envelope
+        // so a future binary can tell what version of the IR shape this is.
         let doc_path = self.storage_dir.join(format!("{}.json", doc.id));
-        let doc_json = serde_json::to_string(doc)?;
+        let doc_json = serialize_ir_blob(doc)?;
         let doc_bytes = match &key {
             Some(k) => encrypt_at_rest(k, doc_json.as_bytes()),
             None => doc_json.into_bytes(),
@@ -755,9 +950,10 @@ impl Store {
         std::fs::write(&doc_path, &doc_bytes)?;
         write_checksum_sidecar(&doc_path, &doc_bytes)?;
 
-        // Write the token stream as a separate file for RSVP / FTS fast path.
+        // Write the token stream as a separate file for RSVP / FTS fast path
+        // (also ADR-019-enveloped).
         let token_path = self.storage_dir.join(format!("{}.tokens.json", doc.id));
-        let tokens_json = serde_json::to_string(&doc.token_stream)?;
+        let tokens_json = serialize_ir_blob(&doc.token_stream)?;
         let tokens_bytes = match &key {
             Some(k) => encrypt_at_rest(k, tokens_json.as_bytes()),
             None => tokens_json.into_bytes(),
@@ -916,6 +1112,118 @@ impl Store {
     pub fn verify_original_copy(&self, path: &str) -> Result<(), StoreError> {
         let bytes = std::fs::read(path)?;
         verify_checksum(path, &bytes)
+    }
+
+    /// Per-item integrity report built from [`ChecksumStatus`], the
+    /// primitive [`Store::verify_item_integrity`]/
+    /// [`Store::verify_library_integrity`] (`R3`, `A4`) share for a single
+    /// `library_items` row's on-disk files: the `<id>.json` document blob,
+    /// its `<id>.tokens.json` sibling, and — when one exists — the ADR-006
+    /// `originals/` copy. Shared with [`Store::verify_original_copy`]'s
+    /// underlying checksum logic, just kept at the finer four-state
+    /// granularity ([`ChecksumStatus`]) that an explicit report needs and a
+    /// plain `Result<(), StoreError>` read-path gate does not.
+    fn integrity_report_for(
+        id: &str,
+        doc_path: &str,
+        source_copy_path: Option<&str>,
+    ) -> Result<ItemIntegrityReport, StoreError> {
+        let doc_status = checksum_status_of_file(doc_path)?;
+
+        // Mirrors `Store::get_tokens`'s own path derivation exactly, and
+        // its fallback: a legacy item with no separate tokens file is not
+        // an error (it reads the full document instead at RSVP-time), so a
+        // missing tokens file here is `Unverified` (nothing to check), not
+        // `Missing` (which would read as "this item's data is gone" — it
+        // isn't, it's just stored differently).
+        let tokens_path = doc_path
+            .strip_suffix(".json")
+            .map(|s| format!("{s}.tokens.json"))
+            .unwrap_or_else(|| format!("{doc_path}.tokens.json"));
+        let tokens_status = if Path::new(&tokens_path).exists() {
+            checksum_status_of_file(&tokens_path)?
+        } else {
+            ChecksumStatus::Unverified
+        };
+
+        let original_copy_status = match source_copy_path {
+            Some(p) => Some(checksum_status_of_file(p)?),
+            None => None,
+        };
+
+        Ok(ItemIntegrityReport {
+            id: id.to_string(),
+            doc_status,
+            tokens_status,
+            original_copy_status,
+        })
+    }
+
+    /// Check one library item's on-disk integrity (`R3`, `A4`): its
+    /// document/tokens blobs and, if it has one, its ADR-006 sandboxed
+    /// original copy — each classified via [`ChecksumStatus`], never
+    /// decrypting anything, since checksums cover on-disk bytes
+    /// (ciphertext when this `Store` is encrypted, ADR-011) rather than
+    /// plaintext (see [`Store::read_maybe_encrypted`]'s doc comment). This
+    /// is why, unlike [`Store::get_item`]/[`Store::get_tokens`], this
+    /// method needs no `KeyProvider` and cannot fail with
+    /// [`StoreError::MissingKeyProvider`].
+    ///
+    /// Returns `Ok(None)` if `id` matches no row, mirroring
+    /// [`Store::get_item_by_id`]. Aggregating the per-file report into a
+    /// single pass/fail/unverified verdict is `gist_core::Core`'s job (`R3`
+    /// keeps that policy decision at the facade layer, not here).
+    pub fn verify_item_integrity(
+        &self,
+        id: &str,
+    ) -> Result<Option<ItemIntegrityReport>, StoreError> {
+        let row: Option<(String, Option<String>)> = {
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            conn.query_row(
+                "SELECT doc_path, source_copy_path FROM library_items WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+        };
+
+        match row {
+            None => Ok(None),
+            Some((doc_path, source_copy_path)) => {
+                Self::integrity_report_for(id, &doc_path, source_copy_path.as_deref()).map(Some)
+            }
+        }
+    }
+
+    /// [`Store::verify_item_integrity`], for every item in the library.
+    ///
+    /// Fails the whole call only on a genuinely unexpected I/O error (e.g.
+    /// permission denied reading a file that does exist) — a *missing*
+    /// file is not such an error, it's reported as
+    /// [`ChecksumStatus::Missing`] within that item's report, so one item's
+    /// absent file can never abort the rest of the library's report. This
+    /// mirrors this crate's general policy (see [`Store::remove_items`]'s
+    /// unknown-id handling) of degrading gracefully per-row rather than
+    /// letting one bad row take down a bulk operation, applied here at the
+    /// file layer instead of the DB layer.
+    pub fn verify_library_integrity(&self) -> Result<Vec<ItemIntegrityReport>, StoreError> {
+        let rows: Vec<(String, String, Option<String>)> = {
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            let mut stmt =
+                conn.prepare("SELECT id, doc_path, source_copy_path FROM library_items")?;
+            let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            let mut out = Vec::new();
+            for r in mapped {
+                out.push(r?);
+            }
+            out
+        };
+
+        rows.iter()
+            .map(|(id, doc_path, source_copy_path)| {
+                Self::integrity_report_for(id, doc_path, source_copy_path.as_deref())
+            })
+            .collect()
     }
 
     /// Remove a single item. Thin wrapper around [`Store::remove_items`] so
@@ -1179,7 +1487,7 @@ impl Store {
             None => Ok(None),
             Some((path, content_encrypted)) => {
                 let bytes = self.read_maybe_encrypted(&path, content_encrypted)?;
-                let doc: gist_model::Document = serde_json::from_slice(&bytes)?;
+                let doc: gist_model::Document = deserialize_ir_blob(&bytes)?;
                 Ok(Some(doc))
             }
         }
@@ -1208,12 +1516,12 @@ impl Store {
 
                 if std::path::Path::new(&token_path).exists() {
                     let bytes = self.read_maybe_encrypted(&token_path, content_encrypted)?;
-                    let tokens: Vec<gist_model::Token> = serde_json::from_slice(&bytes)?;
+                    let tokens: Vec<gist_model::Token> = deserialize_ir_blob(&bytes)?;
                     Ok(Some(tokens))
                 } else {
                     // Fallback: load full document and extract token stream.
                     let bytes = self.read_maybe_encrypted(&path, content_encrypted)?;
-                    let doc: gist_model::Document = serde_json::from_slice(&bytes)?;
+                    let doc: gist_model::Document = deserialize_ir_blob(&bytes)?;
                     Ok(Some(doc.token_stream))
                 }
             }
@@ -3072,8 +3380,9 @@ mod tests {
         let legacy_doc_path = storage.join(format!("{}.json", legacy_id));
         let legacy_bytes = std::fs::read(&legacy_doc_path).unwrap();
         assert!(
-            serde_json::from_slice::<gist_model::Document>(&legacy_bytes).is_ok(),
-            "legacy item's on-disk blob must still be plain, un-re-encrypted JSON"
+            deserialize_ir_blob::<gist_model::Document>(&legacy_bytes).is_ok(),
+            "legacy item's on-disk blob must still be plain, un-re-encrypted JSON \
+             (ADR-019-enveloped, not encrypted)"
         );
 
         // A newly inserted item, after switching to open_encrypted, must be
@@ -3344,6 +3653,122 @@ mod tests {
         );
     }
 
+    // ── Item integrity reports (`R3`, ADR-013 / `A4`) ────────────────────
+
+    #[test]
+    fn verify_item_integrity_reports_verified_for_a_clean_item() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("xi");
+        store.insert_item(&doc).unwrap();
+
+        let report = store
+            .verify_item_integrity(&doc.id)
+            .unwrap()
+            .expect("just-inserted item must be found");
+        assert_eq!(report.id, doc.id);
+        assert_eq!(report.doc_status, ChecksumStatus::Verified);
+        assert_eq!(report.tokens_status, ChecksumStatus::Verified);
+        assert_eq!(
+            report.original_copy_status, None,
+            "doc_with_title stamps no source_copy_ref"
+        );
+    }
+
+    #[test]
+    fn verify_item_integrity_returns_none_for_an_unknown_id() {
+        let (_dir, store) = open_test_store();
+        assert!(store
+            .verify_item_integrity("not-a-real-id")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn verify_item_integrity_reports_mismatch_for_a_corrupted_doc_blob() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("omicron");
+        store.insert_item(&doc).unwrap();
+
+        let doc_path = dir.path().join("storage").join(format!("{}.json", doc.id));
+        corrupt_file(&doc_path);
+
+        let report = store.verify_item_integrity(&doc.id).unwrap().unwrap();
+        assert_eq!(report.doc_status, ChecksumStatus::Mismatch);
+        assert_eq!(
+            report.tokens_status,
+            ChecksumStatus::Verified,
+            "corrupting the doc blob must not affect the (untouched) tokens blob's status"
+        );
+    }
+
+    #[test]
+    fn verify_item_integrity_reports_unverified_for_a_pre_a4_item_with_no_sidecar() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("pi");
+        store.insert_item(&doc).unwrap();
+
+        let storage = dir.path().join("storage");
+        let doc_path = storage.join(format!("{}.json", doc.id));
+        let tokens_path = storage.join(format!("{}.tokens.json", doc.id));
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&tokens_path)).unwrap();
+
+        let report = store.verify_item_integrity(&doc.id).unwrap().unwrap();
+        assert_eq!(
+            report.doc_status,
+            ChecksumStatus::Unverified,
+            "a missing sidecar must be reported as unverified, never as corrupt"
+        );
+        assert_eq!(report.tokens_status, ChecksumStatus::Unverified);
+    }
+
+    #[test]
+    fn verify_item_integrity_covers_the_original_copy_when_one_exists() {
+        let (_dir, store) = open_test_store();
+        let copy = store.store_original_copy(b"rho content", "txt").unwrap();
+        let mut doc = doc_with_title("rho");
+        doc.metadata.source_copy_ref = Some(copy.clone());
+        store.insert_item(&doc).unwrap();
+
+        let report = store.verify_item_integrity(&doc.id).unwrap().unwrap();
+        assert_eq!(report.original_copy_status, Some(ChecksumStatus::Verified));
+
+        corrupt_file(std::path::Path::new(&copy));
+        let report = store.verify_item_integrity(&doc.id).unwrap().unwrap();
+        assert_eq!(report.original_copy_status, Some(ChecksumStatus::Mismatch));
+    }
+
+    #[test]
+    fn verify_library_integrity_reports_one_entry_per_item_including_the_corrupted_one() {
+        let (dir, store) = open_test_store();
+        let clean = doc_with_title("sigma");
+        let corrupted = doc_with_title("tau");
+        store.insert_item(&clean).unwrap();
+        store.insert_item(&corrupted).unwrap();
+
+        let corrupted_path = dir
+            .path()
+            .join("storage")
+            .join(format!("{}.json", corrupted.id));
+        corrupt_file(&corrupted_path);
+
+        let mut reports = store.verify_library_integrity().unwrap();
+        reports.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(reports.len(), 2);
+
+        let clean_report = reports.iter().find(|r| r.id == clean.id).unwrap();
+        assert_eq!(clean_report.doc_status, ChecksumStatus::Verified);
+
+        let corrupted_report = reports.iter().find(|r| r.id == corrupted.id).unwrap();
+        assert_eq!(corrupted_report.doc_status, ChecksumStatus::Mismatch);
+    }
+
+    #[test]
+    fn verify_library_integrity_on_an_empty_library_returns_an_empty_vec() {
+        let (_dir, store) = open_test_store();
+        assert_eq!(store.verify_library_integrity().unwrap(), Vec::new());
+    }
+
     // ── Per-item encryption (ADR-014) ────────────────────────────────────
 
     /// The core round trip: a plain `Store::open` instance encrypts an item
@@ -3428,8 +3853,9 @@ mod tests {
         store.insert_item(&plain_doc).unwrap();
         let plain_on_disk = std::fs::read(storage.join(format!("{plain_id}.json"))).unwrap();
         assert!(
-            serde_json::from_slice::<gist_model::Document>(&plain_on_disk).is_ok(),
-            "a Store opened via open_with_read_key must still write NEW imports as plaintext"
+            deserialize_ir_blob::<gist_model::Document>(&plain_on_disk).is_ok(),
+            "a Store opened via open_with_read_key must still write NEW imports as plaintext \
+             (ADR-019-enveloped, not encrypted)"
         );
 
         // Encrypt a separate item on demand, then read it back through the
@@ -3652,5 +4078,228 @@ mod tests {
 
         let after = store.list_items(0, 10).unwrap();
         assert!(after.iter().find(|i| i.id == id).unwrap().content_encrypted);
+    }
+
+    // ── IR envelope versioning (ADR-019, Q10) ────────────────────────────
+
+    /// A document inserted (and therefore written through the current
+    /// `IrEnvelopeRef`/`CURRENT_IR_VERSION` envelope) round-trips through
+    /// `get_item`/`get_tokens` exactly as before — the envelope is
+    /// transparent to every existing caller.
+    #[test]
+    fn ir_envelope_current_version_blob_round_trips() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("ir-versioning-round-trip");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let loaded = store
+            .get_item(&id)
+            .unwrap()
+            .expect("current-version item must round-trip");
+        assert_eq!(loaded.metadata.title, "ir-versioning-round-trip");
+        assert_eq!(loaded.sections.len(), doc.sections.len());
+
+        let tokens = store
+            .get_tokens(&id)
+            .unwrap()
+            .expect("current-version tokens must round-trip");
+        assert_eq!(tokens.len(), doc.token_stream.len());
+
+        // And the on-disk shape really is the new envelope, not the bare
+        // pre-ADR-019 shape — confirms the test is exercising what it
+        // claims to.
+        let doc_path = store.storage_dir().join(format!("{id}.json"));
+        let raw = std::fs::read(&doc_path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(value["ir_version"], serde_json::json!(CURRENT_IR_VERSION));
+        assert!(value["payload"]["id"].is_string());
+    }
+
+    /// A blob whose `ir_version` is newer than this binary's
+    /// `CURRENT_IR_VERSION` is rejected with a typed
+    /// `StoreError::IrVersionTooNew` — never a panic, never a generic
+    /// `serde_json`/deserialize error, and critically, the payload (which
+    /// this binary has no business trying to interpret) is never even
+    /// attempted.
+    #[test]
+    fn ir_envelope_future_version_is_rejected_with_typed_error_not_a_panic() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("ir-versioning-future");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        // Overwrite with a fabricated future-version envelope. The payload
+        // is deliberately garbage (not a valid Document at all) to prove
+        // the version check runs *before* any attempt to interpret it.
+        let doc_path = store.storage_dir().join(format!("{id}.json"));
+        let future_blob = serde_json::json!({
+            "ir_version": 9999,
+            "payload": { "this_is_not": "a valid Document shape" },
+        });
+        std::fs::write(&doc_path, serde_json::to_vec(&future_blob).unwrap()).unwrap();
+        // Checksum sidecar now covers stale bytes; remove it so this test
+        // exercises IR-version rejection specifically, not a checksum
+        // mismatch (ADR-013 is a separate, already-tested concern).
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+
+        let result = store.get_item(&id);
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::IrVersionTooNew {
+                    found: 9999,
+                    expected: CURRENT_IR_VERSION
+                })
+            ),
+            "expected a typed IrVersionTooNew error, got {result:?}"
+        );
+    }
+
+    /// A blob at the current (understood) version whose `payload` carries
+    /// an extra, unrecognised JSON field — simulating a hypothetical future
+    /// version that's still additively decodable — still deserializes
+    /// successfully. Confirms the "unknown fields are tolerated, never a
+    /// hard error" policy ADR-019 documents (no type in the IR graph sets
+    /// `#[serde(deny_unknown_fields)]`).
+    #[test]
+    fn ir_envelope_extra_unknown_payload_field_still_deserializes() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("ir-versioning-extra-field");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let doc_path = store.storage_dir().join(format!("{id}.json"));
+        let raw = std::fs::read(&doc_path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        value["payload"]["a_field_this_binary_has_never_heard_of"] =
+            serde_json::json!("from a hypothetically newer, still-decodable version");
+        std::fs::write(&doc_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+
+        let loaded = store
+            .get_item(&id)
+            .unwrap()
+            .expect("an extra unknown field in payload must not break deserialization");
+        assert_eq!(loaded.metadata.title, "ir-versioning-extra-field");
+    }
+
+    /// **The most important test in this role.** A blob written in the
+    /// exact pre-ADR-019 on-disk shape — a bare `Document`/`Vec<Token>`
+    /// JSON object/array, no `{"ir_version": ..., "payload": ...}` envelope
+    /// at all, exactly what `insert_item` produced for this entire
+    /// project's history up to and including the immediately-preceding
+    /// commit — must still read correctly through `get_item`/`get_tokens`.
+    /// Existing users' on-disk libraries must not break when they upgrade
+    /// to a binary built from this change.
+    #[test]
+    fn pre_adr019_unenveloped_blob_is_still_readable() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("legacy-unenveloped-blob");
+        let id = doc.id.clone();
+
+        // Insert normally (to get a valid library_items row + tokens
+        // indexed for FTS), then overwrite both on-disk blobs with the bare,
+        // unenveloped JSON shape every binary before this change wrote —
+        // simulating a library that predates ADR-019.
+        store.insert_item(&doc).unwrap();
+
+        let storage = dir.path().join("storage");
+        let doc_path = storage.join(format!("{id}.json"));
+        let tokens_path = storage.join(format!("{id}.tokens.json"));
+
+        let bare_doc_json = serde_json::to_vec(&doc).unwrap();
+        std::fs::write(&doc_path, &bare_doc_json).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+
+        let bare_tokens_json = serde_json::to_vec(&doc.token_stream).unwrap();
+        std::fs::write(&tokens_path, &bare_tokens_json).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&tokens_path)).unwrap();
+
+        let loaded = store
+            .get_item(&id)
+            .unwrap()
+            .expect("a pre-ADR-019 unenveloped document blob must still be readable");
+        assert_eq!(loaded.metadata.title, "legacy-unenveloped-blob");
+        assert_eq!(loaded.sections.len(), doc.sections.len());
+
+        let tokens = store
+            .get_tokens(&id)
+            .unwrap()
+            .expect("a pre-ADR-019 unenveloped tokens blob must still be readable");
+        assert_eq!(tokens.len(), doc.token_stream.len());
+    }
+
+    /// Same as above, but for the `get_tokens` fallback path (no
+    /// `<id>.tokens.json` present at all, so it falls back to loading the
+    /// full document and extracting `token_stream`) — confirms that
+    /// fallback also tolerates a pre-ADR-019 unenveloped `<id>.json`.
+    #[test]
+    fn pre_adr019_unenveloped_doc_blob_readable_via_get_tokens_fallback() {
+        let (dir, store) = open_test_store();
+        let doc = doc_with_title("legacy-unenveloped-fallback");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let storage = dir.path().join("storage");
+        let doc_path = storage.join(format!("{id}.json"));
+        let tokens_path = storage.join(format!("{id}.tokens.json"));
+
+        std::fs::write(&doc_path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&doc_path)).unwrap();
+        // No tokens file at all, forcing get_tokens's document-fallback path.
+        std::fs::remove_file(&tokens_path).unwrap();
+        std::fs::remove_file(checksum_sidecar_path(&tokens_path)).unwrap();
+
+        let tokens = store
+            .get_tokens(&id)
+            .unwrap()
+            .expect("fallback must still work against a pre-ADR-019 unenveloped doc blob");
+        assert_eq!(tokens.len(), doc.token_stream.len());
+    }
+
+    /// `deserialize_ir_blob` directly, at the unit level, for the two
+    /// legacy shapes IR blobs actually take on disk: a bare JSON object
+    /// (`Document`) and a bare JSON array (`Vec<Token>`) — neither has an
+    /// `"ir_version"` key, and `serde_json::Value::get("ir_version")` must
+    /// return `None` for both (not panic, not misparse) so the fallback
+    /// branch in `deserialize_ir_blob` is reached correctly regardless of
+    /// whether the legacy payload was an object or an array.
+    #[test]
+    fn deserialize_ir_blob_falls_back_correctly_for_both_object_and_array_legacy_shapes() {
+        let doc = doc_with_title("unit-level-legacy-object");
+        let doc_bytes = serde_json::to_vec(&doc).unwrap();
+        let decoded: gist_model::Document = deserialize_ir_blob(&doc_bytes).unwrap();
+        assert_eq!(decoded.metadata.title, "unit-level-legacy-object");
+
+        let tokens_bytes = serde_json::to_vec(&doc.token_stream).unwrap();
+        let decoded_tokens: Vec<gist_model::Token> = deserialize_ir_blob(&tokens_bytes).unwrap();
+        assert_eq!(decoded_tokens.len(), doc.token_stream.len());
+    }
+
+    /// Backward-compatibility policy for additive fields (ADR-019): a JSON
+    /// blob that predates a field's addition — lacking the key entirely —
+    /// must still deserialize cleanly via that field's `#[serde(default)]`.
+    /// `Metadata::source_copy_ref` (ADR-006, added after `Metadata` already
+    /// existed) is a real, already-shipped example of exactly this
+    /// scenario, not a hypothetical one: this locks in that a `Metadata`
+    /// JSON object with no `source_copy_ref` key at all (the literal shape
+    /// every `Metadata` blob had before ADR-006 landed) still deserializes,
+    /// defaulting to `None`.
+    #[test]
+    fn metadata_json_missing_a_field_added_after_the_fact_deserializes_via_serde_default() {
+        let json = serde_json::json!({
+            "title": "pre-ADR-006 metadata",
+            "author": null,
+            "source_type": "txt",
+            "source_ref": "/tmp/old.txt",
+            // Deliberately no "source_copy_ref" key at all.
+            "import_date": null,
+            "language": null,
+            "word_count": 42,
+        });
+        let meta: gist_model::Metadata = serde_json::from_value(json).unwrap();
+        assert_eq!(meta.title, "pre-ADR-006 metadata");
+        assert_eq!(meta.source_copy_ref, None);
     }
 }

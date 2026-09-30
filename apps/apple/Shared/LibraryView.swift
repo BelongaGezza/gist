@@ -512,6 +512,25 @@ struct LibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Whether `itemList` is currently showing the full, unfiltered library
+    /// (`core.items`) rather than search results or a tag filter -- only in
+    /// that case does paging further pages via `loadMoreItemsIfNeeded` make
+    /// sense, since `searchResults`/`tagFilteredItems` come back from their
+    /// own separately-bounded FFI calls, not `core.items`' paged sequence.
+    ///
+    /// Note: `loadMoreItemsIfNeeded`'s "near the end of what's loaded" check
+    /// looks at a row's position in `core.items` (the FFI's newest-first
+    /// order), not its position in `displayedItems` (which may be
+    /// re-sorted). Under a non-default sort order this can trigger a
+    /// prefetch somewhat earlier/later than the row's true on-screen
+    /// position would suggest -- a minor efficiency wrinkle, not a
+    /// correctness issue: pages keep loading until `hasMoreItems` is false,
+    /// after which `displayedItems` always reflects the complete, correctly
+    /// sorted library either way.
+    private var isShowingFullLibrary: Bool {
+        tagFilter == nil && !isSearchActive
+    }
+
     /// Row content is deliberately NOT a `NavigationLink` here. Wrapping the
     /// whole row in one, inside a `List(selection:)`, is a known macOS
     /// SwiftUI trap: the link swallows the single click as a navigation
@@ -530,10 +549,17 @@ struct LibraryView: View {
     /// entirely off the `selection` binding instead -- either the toolbar
     /// "Open" button (enabled when exactly one item is selected) or the
     /// context menu's "Open in Reader" (right-click uses a separate gesture
-    /// recognizer, so it never conflicted with selection).
+    /// recognizer, so it never conflicted with selection). `.onAppear` below
+    /// is safe alongside this -- it's a lifecycle callback, not a gesture
+    /// recognizer, so it doesn't compete with `List`'s native selection
+    /// handling the way `.onTapGesture` did.
     private var itemList: some View {
         List(displayedItems, selection: $selection) { item in
             LibraryRowContent(item: item)
+                .onAppear {
+                    guard isShowingFullLibrary else { return }
+                    Task { await core.loadMoreItemsIfNeeded(currentItem: item) }
+                }
                 .contextMenu {
                     Button("Open in Reader") {
                         navigationPath.append(.rsvp(itemId: item.id))

@@ -6,7 +6,37 @@ Import a document — plain text, ePub, or DOCX today, with PDF and OCR planned 
 
 ## Status
 
-GIST is pre-1.0 and under active development. The Rust core and macOS app are furthest along; Windows is a placeholder. See [`CLAUDE.md`](./CLAUDE.md) for a detailed, continuously-updated log of what's implemented, what's tested, and what's open, and [`docs/development-plan-v2.md`](./docs/development-plan-v2.md) for the milestone plan.
+GIST is pre-1.0 and under active development — there is no tagged release and no public download
+yet. The Rust core and macOS app are furthest along: import, RSVP and flow reading, search,
+collections/tags, theming, annotations, an accessibility pass, and opt-in encryption-at-rest are
+all implemented and covered by automated tests, though the release pipeline is still blocked on
+real Apple signing credentials and a full manual click-through of the UI is still outstanding.
+Windows is no longer a placeholder — a WinUI 3 app with library, collections, tags, and theming
+is engineering-complete, with the RSVP reader, flow reader, and an accessibility/packaging pass
+still in progress (see [`docs/windows-development-plan.md`](./docs/windows-development-plan.md)).
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for a running, feature-level log of what's shipped so far and
+its known limitations, [`CLAUDE.md`](./CLAUDE.md) for a detailed, continuously-updated log of what's
+implemented, what's tested, and what's open, and [`docs/development-plan-v2.md`](./docs/development-plan-v2.md)
+for the milestone plan.
+
+## Features
+
+- **Import**: plain text, ePub (with DRM detection), and DOCX today; URL-paste import and
+  on-device OCR from images also work. PDF import is not implemented yet.
+- **Reading**: a paced, one-word-at-a-time RSVP view, and a continuous "flow" document view with
+  typography controls, a table of contents, and in-document search.
+- **Library**: full-text search, collections, tags, sort/filter, and removal that never touches a
+  user's original imported file (copy-on-import).
+- **Annotations**: highlights, notes, and bookmarks that survive a document being re-imported.
+- **Theming**: system-follow, light, dark, sepia, and true-black OLED.
+- **Privacy and security**: everything is local-first (see [`docs/PRIVACY.md`](./docs/PRIVACY.md)); optional
+  per-item encryption at rest and at-rest integrity checksums are implemented, with an open
+  security register tracked in `CLAUDE.md`.
+- **Accessibility** (macOS): VoiceOver support, Dynamic Type, and on-device read-aloud.
+
+Feature availability differs by platform — see the Status section above and `CHANGELOG.md` for
+which of these are macOS-only today vs. also on Windows.
 
 ## Repository layout
 
@@ -27,7 +57,8 @@ gist/
 │   └── gist-ffi/               # uniffi FFI bindings → .xcframework
 ├── apps/
 │   ├── apple/                  # SwiftUI macOS + iOS app (Xcode project is generated, not committed)
-│   └── windows/                # Placeholder
+│   └── windows/                # WinUI 3 app — library/collections/tags/theming done; RSVP/flow
+│                                #   reader and accessibility/packaging still in progress
 ├── fixtures/                   # Synthetic public-domain test fixtures
 ├── fuzz/                       # cargo-fuzz targets (separate Cargo workspace)
 ├── tools/                      # Build/bindings/notarization scripts
@@ -51,7 +82,7 @@ cd apps/apple && xcodegen generate      # generate the Xcode project (never comm
 xcodebuild -scheme GISTmacOS build test
 ```
 
-Full build/toolchain notes, including known environment caveats, are in [`CLAUDE.md`](./CLAUDE.md#build--toolchain).
+Full build/toolchain notes, including known environment caveats, are in [`CLAUDE.md`](./CLAUDE.md#build--toolchain). For building the Windows app (.NET SDK, WinUI 3, the C# FFI bindings), see [`docs/windows-development-plan.md`](./docs/windows-development-plan.md) §1–2 — it is not yet mirrored into this README.
 
 ## Architecture
 
@@ -59,7 +90,7 @@ Key design decisions are recorded as ADRs in [`docs/adr/`](./docs/adr/). Start w
 
 ## Security
 
-GIST handles a user's personal reading material and imports from both local files and arbitrary URLs, so security review is an ongoing part of the project — see [`docs/security-review-v2.md`](./docs/security-review-v2.md) and the security register in `CLAUDE.md`. To report a vulnerability, see [`SECURITY.md`](./SECURITY.md).
+GIST handles a user's personal reading material and imports from both local files and arbitrary URLs, so security review is an ongoing part of the project — see [`docs/security-review-v2.md`](./docs/security-review-v2.md) and the security register in `CLAUDE.md`. To report a vulnerability, see [`SECURITY.md`](./SECURITY.md). For what GIST stores, what (if anything) leaves the device, and the current state of encryption at rest, see [`docs/PRIVACY.md`](./docs/PRIVACY.md).
 
 ## Contributing
 

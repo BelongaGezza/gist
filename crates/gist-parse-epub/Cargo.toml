@@ -14,3 +14,10 @@ url         = "2"
 percent-encoding = "2"
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "parse_bench"
+harness = false
