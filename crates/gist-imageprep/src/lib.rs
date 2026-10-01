@@ -49,7 +49,13 @@ pub fn prepare_image(
     let (decl_width, decl_height) = reader
         .into_dimensions()
         .map_err(|e| ParseError::InvalidInput(e.to_string()))?;
-    let declared_pixel_count = (decl_width as usize) * (decl_height as usize);
+    // `saturating_mul` (not `*`) — width/height come from an untrusted file's
+    // header, and on a hypothetical 32-bit target usize is only 32 bits wide,
+    // where two u32-derived factors this large could overflow a plain `*`
+    // and panic in a debug build (R1, M4 crash/error-path sweep). Saturating
+    // just means an absurd declared size reads as "obviously over the cap"
+    // instead of panicking or wrapping — same rejection either way.
+    let declared_pixel_count = (decl_width as usize).saturating_mul(decl_height as usize);
     if declared_pixel_count > max_pixels {
         return Err(ParseError::ResourceLimitExceeded);
     }
@@ -63,7 +69,7 @@ pub fn prepare_image(
     // Defence in depth: a format whose header dimensions could somehow
     // disagree with the decoded buffer would still be caught here, though
     // with the decode having already happened for that adversarial case.
-    let pixel_count = (img.width() as usize) * (img.height() as usize);
+    let pixel_count = (img.width() as usize).saturating_mul(img.height() as usize);
     if pixel_count > max_pixels {
         return Err(ParseError::ResourceLimitExceeded);
     }

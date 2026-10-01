@@ -331,8 +331,18 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
                     "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                         // Flush any pending block
                         flush_block(&mut blocks, &mut current_runs, &mut in_block);
-                        current_heading_level =
-                            Some(name.chars().last().unwrap().to_digit(10).unwrap_or(1) as u8);
+                        // `name` is one of the literal "h1".."h6" match arms
+                        // above, so this can never actually miss — but avoid
+                        // a bare `.unwrap()` on data derived from untrusted
+                        // XML per the crate convention regardless (R1, M4
+                        // crash/error-path sweep): a non-digit/empty result
+                        // degrades to heading level 1 instead of panicking.
+                        current_heading_level = Some(
+                            name.chars()
+                                .last()
+                                .and_then(|c| c.to_digit(10))
+                                .unwrap_or(1) as u8,
+                        );
                         current_heading_text.clear();
                         in_block = true;
                     }
