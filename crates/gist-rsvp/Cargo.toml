@@ -7,4 +7,5 @@ license = "MIT"
 
 [dependencies]
 gist-model = { path = "../gist-model" }
+unicode-segmentation = "1"
 serde = { workspace = true }
