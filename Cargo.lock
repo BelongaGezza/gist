@@ -887,6 +887,7 @@ version = "0.1.0"
 dependencies = [
  "gist-model",
  "serde",
+ "unicode-segmentation",
 ]
 
 [[package]]
