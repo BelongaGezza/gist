@@ -5,6 +5,7 @@
 
 use gist_model::{Token, TokenKind};
 use serde::{Deserialize, Serialize};
+use unicode_segmentation::UnicodeSegmentation;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -211,29 +212,27 @@ pub struct SessionStats {
 
 // ── ORP (Optimal Recognition Point) ──────────────────────────────────────────
 
-/// Return the byte index of the ORP character within `word`.
+/// Return the byte index of the ORP grapheme cluster within `word`.
 ///
 /// Rule: target position ≈ 30% into the word; prefer a vowel at or after that
-/// position, otherwise use the character at that index.
+/// position, otherwise use the cluster at that index. Counting is over extended
+/// grapheme clusters (matching Swift `Character`), so the result is always a
+/// cluster boundary and never splits an emoji, flag or accented letter.
 pub fn orp_index(word: &str) -> usize {
     if word.is_empty() {
         return 0;
     }
-    let chars: Vec<char> = word.chars().collect();
-    let target = ((chars.len() as f32) * 0.30).round() as usize;
-    let target = target.min(chars.len() - 1);
+    let clusters: Vec<(usize, &str)> = word.grapheme_indices(true).collect();
+    let target = ((clusters.len() as f32) * 0.30).round() as usize;
+    let target = target.min(clusters.len() - 1);
 
     // Try to land on a vowel at or after the target (within the word).
-    const VOWELS: &[char] = &['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U'];
-    let orp_char_idx = (target..chars.len())
-        .find(|&i| VOWELS.contains(&chars[i]))
+    const VOWELS: &[&str] = &["a", "e", "i", "o", "u", "A", "E", "I", "O", "U"];
+    let idx = (target..clusters.len())
+        .find(|&i| VOWELS.contains(&clusters[i].1))
         .unwrap_or(target);
 
-    // Convert char index to byte index.
-    word.char_indices()
-        .nth(orp_char_idx)
-        .map(|(b, _)| b)
-        .unwrap_or(0)
+    clusters[idx].0
 }
 
 // ── Pause helpers ─────────────────────────────────────────────────────────────
@@ -323,6 +322,38 @@ mod tests {
         // Single char
         assert_eq!(orp_index("A"), 0);
         assert_eq!(orp_index(""), 0);
+    }
+
+    #[test]
+    fn orp_index_lands_on_whole_grapheme_clusters() {
+        // Thumbs-up + skin tone: one cluster, so focus is the start.
+        assert_eq!(orp_index("👍🏽"), 0);
+        // Flag = two regional indicators, one cluster.
+        assert_eq!(orp_index("🇬🇧"), 0);
+        // ZWJ family (one cluster) + 'x': 2 clusters, target 1 -> 'x'.
+        let family_x = "👨\u{200D}👩x";
+        assert_eq!(orp_index(family_x), family_x.len() - 1);
+        // Decomposed ñ: single cluster.
+        assert_eq!(orp_index("n\u{0303}"), 0);
+    }
+
+    #[test]
+    fn orp_index_is_always_a_cluster_boundary() {
+        for w in [
+            "Hello",
+            "naïve",
+            "re\u{0301}sume\u{0301}",
+            "🇬🇧🇫🇷 flags",
+            "👨\u{200D}👩\u{200D}👧 family",
+            "a👍🏽b",
+            "日本語のテキスト",
+        ] {
+            let i = orp_index(w);
+            assert!(
+                w.grapheme_indices(true).any(|(b, _)| b == i),
+                "{w:?} -> {i} is not a cluster boundary"
+            );
+        }
     }
 
     #[test]
