@@ -650,6 +650,10 @@ Beta feedback triaged; release notes; landing/README; GitHub issue templates; v1
 
 **Update 2026-09-29:** the agent-executable slice of this milestone was refined into `docs/m5-agent-roles.md` and executed in full — release notes (`CHANGELOG.md`), landing/README refresh, and GitHub issue templates (a `config.yml` chooser added to the two pre-existing templates) are done, alongside Q10 (see §7's closure note, a real gap this milestone's scoping pass found that M4's plan had missed). "Beta feedback triaged" and "v1.0 tagged and published" remain exactly as scoped — genuinely unstarted, not merely unfinished — since both need a human: real Apple signing/notarization credentials and real beta users, neither of which exist in an agent-only dev environment. `docs/v1.0-release-checklist.md` is the concrete handoff for that remaining work. See `CLAUDE.md`'s M5 milestone-register row for full verification detail.
 
+### M6 — PDF, tables, post-v1.0 gaps · **started 2026-10-03**
+
+Scoped in `docs/m6-agent-roles.md` (adopted 2026-10-03). Gaps found after M5: PDF import is in the spec's v1.0 phasing but `gist-parse-pdf` is an empty stub; `gist_model::Block` has no table variant (the Q2 line below is under review by R3 step 1 and will be corrected there if wrong); review debt `F27`/`F29`/`F30`. This run: Track A (PDF: R1 Rust, R2 Swift) and tables (R3), then R7 review. The iOS port (R5/R6, the "~8–10 weeks for iOS" below) and the paginated view (R4) are explicitly not part of this run. pdfium licence/distribution decision recorded in the plan's D4 (permissive, MIT-compatible; pinned prebuilt, embedded and signed with the app per `N8`).
+
 **Total: ~25 weeks / ~6 months** to public macOS v1.0.
 *(+2 weeks from v1 plan for security hardening sprint in M1)*
 
