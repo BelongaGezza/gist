@@ -251,6 +251,17 @@ def huge_count():
     return data.replace(b"/Count 1 ", b"/Count 999999999 ")
 
 
+def huge_string():
+    # One 3,000,000-character text string, Flate-compressed (a few KB on
+    # disk): the "huge object" case. Exceeds gist-parse-pdf's per-page glyph
+    # ceiling, which must trip before any per-character allocation.
+    content = b"BT /F1 12 Tf 72 700 Td (" + b"a" * 3_000_000 + b") Tj ET"
+    pdf, root, info = build([zlib.compress(content, 9)])
+    # Mark the content stream as Flate-encoded.
+    data = pdf.serialize(root)
+    return data.replace(b"<<  /Length", b"<< /Filter /FlateDecode /Length", 1)
+
+
 def main():
     os.makedirs(ADV, exist_ok=True)
     files = {
@@ -260,6 +271,7 @@ def main():
         os.path.join(ADV, "encrypted_password.pdf"): encrypted(),
         os.path.join(ADV, "page_count_bomb.pdf"): page_bomb(),
         os.path.join(ADV, "huge_declared_count.pdf"): huge_count(),
+        os.path.join(ADV, "huge_string_object.pdf"): huge_string(),
     }
     pt = files[os.path.join(OUT, "plain_text.pdf")]
     files[os.path.join(ADV, "truncated.pdf")] = pt[: len(pt) // 2]

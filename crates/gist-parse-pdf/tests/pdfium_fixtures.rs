@@ -165,6 +165,25 @@ fn expanded_text_budget_applies_to_real_extraction() {
 }
 
 #[test]
+fn huge_string_object_is_bounded_by_limits_or_pdfium() {
+    let Some(r) = run(
+        "adversarial/huge_string_object.pdf",
+        &ParseLimits::default(),
+    ) else {
+        return;
+    };
+    // A 3M-character string in a few KB of Flate data. Either our per-page
+    // glyph ceiling trips, or pdfium itself bounds what it surfaces; in the
+    // latter case the extracted text must still respect the budget. What must
+    // never happen is a panic or unbounded growth.
+    match r {
+        Err(PdfError::ResourceLimitExceeded { .. }) => {}
+        Ok(d) => assert!(text(&d).len() <= ParseLimits::default().max_expanded_bytes),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn max_bytes_checked_before_pdfium() {
     let lim = ParseLimits {
         max_bytes: 100,

@@ -20,6 +20,7 @@ libfuzzer-sys = "0.4"
 gist-parse-txt  = { path = "../crates/gist-parse-txt" }
 gist-parse-epub = { path = "../crates/gist-parse-epub" }
 gist-parse-docx = { path = "../crates/gist-parse-docx" }
+gist-parse-pdf  = { path = "../crates/gist-parse-pdf" }
 gist-web        = { path = "../crates/gist-web" }
 gist-core       = { path = "../crates/gist-core" }
 
@@ -38,6 +39,12 @@ doc = false
 [[bin]]
 name = "fuzz_parse_docx"
 path = "fuzz_targets/fuzz_parse_docx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_parse_pdf"
+path = "fuzz_targets/fuzz_parse_pdf.rs"
 test = false
 doc = false
 
