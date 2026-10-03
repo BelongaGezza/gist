@@ -25,6 +25,12 @@ pub struct ParseLimits {
     /// with a huge number of near-empty entries can stay well under
     /// `max_bytes` while still being expensive to enumerate.
     pub max_zip_entries: usize,
+    /// Maximum rows in one table block (default 2 000). Enforced by the
+    /// DOCX/ePub/web parsers *before* a row is appended, so a hostile
+    /// table can't make a parser allocate unbounded row vectors.
+    pub max_table_rows: usize,
+    /// Maximum columns (cells) in any one table row (default 64).
+    pub max_table_cols: usize,
 }
 
 impl Default for ParseLimits {
@@ -35,6 +41,8 @@ impl Default for ParseLimits {
             max_nesting_depth: 200,
             max_expanded_bytes: 512 * 1024 * 1024,
             max_zip_entries: 10_000,
+            max_table_rows: 2_000,
+            max_table_cols: 64,
         }
     }
 }
@@ -136,6 +144,38 @@ pub enum Block {
         ordered: bool,
         items: Vec<String>,
     },
+    /// A rectangular-ish grid of text cells (ADR-019 addendum, M6/R3).
+    ///
+    /// Cells are **plain text, not runs**: bold/italic inside a table cell
+    /// is dropped. Rationale: every consumer that matters (flow-view grid,
+    /// RSVP/TTS linearisation, FTS, annotation anchoring) is text-oriented,
+    /// a run model per cell would multiply the size of the persisted IR for
+    /// no reading benefit, and `List.items` already sets the precedent of
+    /// plain-`String` items. Parsers normalise each cell's whitespace to
+    /// single spaces (see [`normalize_cell_text`]) so a cell never contains
+    /// [`TABLE_CELL_SEPARATOR`] or [`TABLE_ROW_SEPARATOR`]. Rows may be
+    /// ragged (a row may have fewer cells than the widest); an empty cell
+    /// is an empty string, never omitted, so column positions are preserved.
+    Table {
+        rows: Vec<Vec<String>>,
+        /// `true` if the first row is a header row (`<th>`/`w:tblHeader`).
+        header_row: bool,
+    },
+}
+
+/// Separator between the cells of one table row in [`Block::plain_text`].
+/// Whitespace, so RSVP tokenisation (`split_whitespace`) is unaffected.
+/// The Swift mirror (`FlowBlockVM.plainText`) MUST use the same value —
+/// annotation anchoring slices the joined text by byte offset (ADR-003).
+pub const TABLE_CELL_SEPARATOR: char = '\t';
+/// Separator between the rows of a table in [`Block::plain_text`].
+pub const TABLE_ROW_SEPARATOR: char = '\n';
+
+/// Collapse all runs of whitespace (including tabs/newlines) in a table
+/// cell to single spaces and trim. Parsers must pass every cell through
+/// this so cells can't contain the table separators.
+pub fn normalize_cell_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl Block {
@@ -149,6 +189,11 @@ impl Block {
                 .join(""),
             Block::Image { alt, .. } => alt.clone().unwrap_or_default(),
             Block::List { items, .. } => items.join(" "),
+            Block::Table { rows, .. } => rows
+                .iter()
+                .map(|row| row.join(&TABLE_CELL_SEPARATOR.to_string()))
+                .collect::<Vec<_>>()
+                .join(&TABLE_ROW_SEPARATOR.to_string()),
         }
     }
 }
@@ -283,22 +328,55 @@ impl Document {
                     });
                 }
                 let plain = block.plain_text();
-                let mut search_from = 0usize;
-                for word in plain.split_whitespace() {
-                    let pos = plain[search_from..].find(word).unwrap_or(0);
-                    let char_offset = search_from + pos;
-                    tokens.push(Token {
-                        text: word.to_string(),
-                        kind: TokenKind::Word,
-                        section_idx: si,
-                        block_idx: bi,
-                        char_offset,
-                    });
-                    search_from = char_offset + word.len();
+                match block {
+                    // Tables linearise row by row: a ParagraphBreak token (a
+                    // reading pause) between non-empty rows, so RSVP/TTS
+                    // don't run the last cell of one row into the first of
+                    // the next. `char_offset` stays relative to `plain`.
+                    Block::Table { .. } => {
+                        let mut row_start = 0usize;
+                        let mut emitted_any = false;
+                        for row in plain.split(TABLE_ROW_SEPARATOR) {
+                            if row.split_whitespace().next().is_some() {
+                                if emitted_any {
+                                    tokens.push(Token {
+                                        text: String::new(),
+                                        kind: TokenKind::ParagraphBreak,
+                                        section_idx: si,
+                                        block_idx: bi,
+                                        char_offset: row_start,
+                                    });
+                                }
+                                push_words(&mut tokens, row, row_start, si, bi);
+                                emitted_any = true;
+                            }
+                            row_start += row.len() + TABLE_ROW_SEPARATOR.len_utf8();
+                        }
+                    }
+                    _ => push_words(&mut tokens, &plain, 0, si, bi),
                 }
             }
         }
         tokens
+    }
+}
+
+/// Push one `Word` token per whitespace-separated word of `text`, whose
+/// byte offset within the block's full plain text is `base + (offset in
+/// text)`.
+fn push_words(tokens: &mut Vec<Token>, text: &str, base: usize, si: usize, bi: usize) {
+    let mut search_from = 0usize;
+    for word in text.split_whitespace() {
+        let pos = text[search_from..].find(word).unwrap_or(0);
+        let rel = search_from + pos;
+        tokens.push(Token {
+            text: word.to_string(),
+            kind: TokenKind::Word,
+            section_idx: si,
+            block_idx: bi,
+            char_offset: base + rel,
+        });
+        search_from = rel + word.len();
     }
 }
 
@@ -376,5 +454,91 @@ mod tests {
         });
         let meta: Metadata = serde_json::from_value(json).unwrap();
         assert_eq!(meta.source_copy_ref, None);
+    }
+
+    // ── Block::Table (M6/R3, ADR-019 addendum) ───────────────────────────
+
+    fn sample_table() -> Block {
+        Block::Table {
+            rows: vec![
+                vec!["Fruit".into(), "Colour".into(), "Count".into()],
+                vec!["Apple".into(), "Red".into(), "3".into()],
+                vec!["Banana".into(), String::new(), "12".into()],
+            ],
+            header_row: true,
+        }
+    }
+
+    #[test]
+    fn table_plain_text_uses_tab_and_newline_separators() {
+        assert_eq!(
+            sample_table().plain_text(),
+            "Fruit\tColour\tCount\nApple\tRed\t3\nBanana\t\t12"
+        );
+    }
+
+    #[test]
+    fn normalize_cell_text_collapses_all_whitespace_including_separators() {
+        assert_eq!(normalize_cell_text("  a\tb\n c  "), "a b c");
+        assert_eq!(normalize_cell_text("\n\t "), "");
+    }
+
+    #[test]
+    fn table_tokens_are_row_by_row_with_a_pause_between_rows() {
+        let section = Section {
+            id: "s0".into(),
+            heading: None,
+            blocks: vec![
+                Block::Paragraph {
+                    runs: vec![TextRun::plain("Intro")],
+                },
+                sample_table(),
+            ],
+        };
+        let doc = Document::new(Metadata::minimal("T"), vec![section]);
+        let seq: Vec<String> = doc
+            .token_stream
+            .iter()
+            .map(|t| match t.kind {
+                TokenKind::Word => t.text.clone(),
+                TokenKind::ParagraphBreak => "PB".into(),
+                TokenKind::SectionBreak => "SB".into(),
+            })
+            .collect();
+        assert_eq!(
+            seq.join(" "),
+            "Intro PB Fruit Colour Count PB Apple Red 3 PB Banana 12"
+        );
+        // Word offsets are byte offsets into the table's plain_text().
+        let plain = doc.sections[0].blocks[1].plain_text();
+        for t in doc
+            .token_stream
+            .iter()
+            .filter(|t| t.block_idx == 1 && t.kind == TokenKind::Word)
+        {
+            assert_eq!(&plain[t.char_offset..t.char_offset + t.text.len()], t.text);
+        }
+        assert_eq!(doc.metadata.word_count, 9);
+    }
+
+    #[test]
+    fn table_with_only_empty_cells_emits_no_tokens() {
+        let section = Section {
+            id: "s0".into(),
+            heading: None,
+            blocks: vec![Block::Table {
+                rows: vec![vec![String::new(), String::new()], vec![String::new()]],
+                header_row: false,
+            }],
+        };
+        let doc = Document::new(Metadata::minimal("T"), vec![section]);
+        assert!(doc.token_stream.is_empty());
+    }
+
+    #[test]
+    fn table_round_trips_through_json() {
+        let json = serde_json::to_string(&sample_table()).unwrap();
+        let back: Block = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.plain_text(), sample_table().plain_text());
     }
 }

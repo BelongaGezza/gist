@@ -1,4 +1,4 @@
-use gist_model::{Block, Document, Metadata, Section, TextRun};
+use gist_model::{normalize_cell_text, Block, Document, Metadata, ParseLimits, Section, TextRun};
 
 /// Cap on decompressed bytes for the three container/metadata entries
 /// (`META-INF/container.xml`, the OPF manifest, `META-INF/encryption.xml`).
@@ -221,7 +221,7 @@ fn parse_spine(
         )?;
 
         let section_id = format!("s{si}");
-        let blocks = xhtml_to_blocks(&content, limits.max_nesting_depth)?;
+        let blocks = xhtml_to_blocks(&content, limits)?;
 
         sections.push(Section {
             id: section_id,
@@ -291,9 +291,11 @@ fn read_zip_entry_string(
 
 /// Map XHTML content to a Vec<Block>.
 /// Whitelist: h1..h6 → Heading, p/div → Paragraph, ul/ol → List,
-/// em/strong/i/b/code → TextRun marks.
-/// Enforces nesting depth limit.
-fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseError> {
+/// em/strong/i/b/code → TextRun marks, table → `Block::Table` (cells are
+/// plain text; a table nested inside a cell is flattened into that cell).
+/// Enforces nesting depth and table row/column limits.
+fn xhtml_to_blocks(xhtml: &str, limits: &ParseLimits) -> Result<Vec<Block>, ParseError> {
+    let max_depth = limits.max_nesting_depth;
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
@@ -313,6 +315,16 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
     let mut current_heading_text = String::new();
     let mut buf = Vec::new();
 
+    // Table state (M6/R3). Only the outermost <table> becomes a block.
+    let mut table_depth: usize = 0;
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut table_header = false;
+    let mut current_row: Vec<String> = Vec::new();
+    let mut row_has_th = false;
+    let mut in_row = false;
+    let mut in_cell = false;
+    let mut cell_buf = String::new();
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
@@ -326,6 +338,43 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
                 let name = e.name().as_ref().to_lowercase();
                 // Strip namespace prefix if present (e.g. "xhtml:p" → "p")
                 let name = name.rsplit(':').next().unwrap_or(&name).to_string();
+
+                if table_depth > 0 || name == "table" {
+                    match name.as_str() {
+                        "table" => {
+                            table_depth += 1;
+                            if table_depth == 1 {
+                                flush_block(&mut blocks, &mut current_runs, &mut in_block);
+                                table_rows.clear();
+                                table_header = false;
+                                in_row = false;
+                                in_cell = false;
+                            }
+                        }
+                        "tr" if table_depth == 1 => {
+                            // Row cap, checked before the row is built.
+                            if table_rows.len() >= limits.max_table_rows {
+                                return Err(ParseError::ResourceLimitExceeded {
+                                    limit: format!("max_table_rows={}", limits.max_table_rows),
+                                    attempted: table_rows.len() + 1,
+                                });
+                            }
+                            current_row.clear();
+                            row_has_th = false;
+                            in_row = true;
+                        }
+                        "td" | "th" if table_depth == 1 && in_row => {
+                            cell_buf.clear();
+                            in_cell = true;
+                            if name == "th" {
+                                row_has_th = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                    buf.clear();
+                    continue;
+                }
 
                 match name.as_str() {
                     "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
@@ -373,6 +422,49 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
                 depth = depth.saturating_sub(1);
                 let name = e.name().as_ref().to_lowercase();
                 let name = name.rsplit(':').next().unwrap_or(&name).to_string();
+
+                if table_depth > 0 {
+                    match name.as_str() {
+                        "td" | "th" if table_depth == 1 && in_cell => {
+                            in_cell = false;
+                            push_table_cell(
+                                &mut current_row,
+                                normalize_cell_text(&cell_buf),
+                                limits,
+                            )?;
+                            cell_buf.clear();
+                        }
+                        "tr" if table_depth == 1 && in_row => {
+                            in_row = false;
+                            in_cell = false;
+                            if !current_row.is_empty() {
+                                if table_rows.is_empty() && row_has_th {
+                                    table_header = true;
+                                }
+                                table_rows.push(std::mem::take(&mut current_row));
+                            }
+                        }
+                        "table" => {
+                            table_depth -= 1;
+                            if table_depth == 0 {
+                                in_row = false;
+                                in_cell = false;
+                                // Drop a table with no text at all.
+                                if table_rows.iter().flatten().any(|c| !c.is_empty()) {
+                                    blocks.push(Block::Table {
+                                        rows: std::mem::take(&mut table_rows),
+                                        header_row: table_header,
+                                    });
+                                }
+                                table_rows.clear();
+                                table_header = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                    buf.clear();
+                    continue;
+                }
 
                 match name.as_str() {
                     "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
@@ -425,6 +517,15 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
                     continue;
                 }
 
+                if in_cell {
+                    if !cell_buf.is_empty() {
+                        cell_buf.push(' ');
+                    }
+                    cell_buf.push_str(text);
+                    buf.clear();
+                    continue;
+                }
+
                 if current_heading_level.is_some() {
                     current_heading_text.push_str(text);
                 } else if in_list {
@@ -442,6 +543,15 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
                         italic: current_italic,
                         code: current_code,
                     });
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                // `<td/>` / `<th/>`: an empty cell must still occupy its
+                // column so the rest of the row stays aligned.
+                let name = e.name().as_ref().to_lowercase();
+                let name = name.rsplit(':').next().unwrap_or(&name).to_string();
+                if table_depth == 1 && in_row && !in_cell && (name == "td" || name == "th") {
+                    push_table_cell(&mut current_row, String::new(), limits)?;
                 }
             }
             Ok(Event::Eof) => break,
@@ -465,6 +575,8 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
             Block::Heading { text, .. } => !text.trim().is_empty(),
             Block::List { items, .. } => !items.is_empty(),
             Block::Image { .. } => true,
+            // Emptiness (no text at all) is already decided at `</table>`.
+            Block::Table { rows, .. } => !rows.is_empty(),
         })
         .collect();
 
@@ -475,6 +587,22 @@ fn xhtml_to_blocks(xhtml: &str, max_depth: usize) -> Result<Vec<Block>, ParseErr
     } else {
         blocks
     })
+}
+
+/// Append one cell to `row`, enforcing `max_table_cols` before the push.
+fn push_table_cell(
+    row: &mut Vec<String>,
+    cell: String,
+    limits: &ParseLimits,
+) -> Result<(), ParseError> {
+    if row.len() >= limits.max_table_cols {
+        return Err(ParseError::ResourceLimitExceeded {
+            limit: format!("max_table_cols={}", limits.max_table_cols),
+            attempted: row.len() + 1,
+        });
+    }
+    row.push(cell);
+    Ok(())
 }
 
 fn flush_block(blocks: &mut Vec<Block>, runs: &mut Vec<TextRun>, in_block: &mut bool) {
@@ -624,7 +752,7 @@ mod tests {
     #[test]
     fn test_xhtml_to_blocks_heading() {
         let xhtml = "<html><body><h1>Title</h1><p>Hello <em>world</em></p></body></html>";
-        let blocks = xhtml_to_blocks(xhtml, 200).unwrap();
+        let blocks = xhtml_to_blocks(xhtml, &ParseLimits::default()).unwrap();
         assert!(blocks
             .iter()
             .any(|b| matches!(b, Block::Heading { level: 1, text } if text == "Title")));
@@ -683,9 +811,98 @@ mod tests {
     #[test]
     fn test_xhtml_to_blocks_list() {
         let xhtml = "<html><body><ul><li>One</li><li>Two</li></ul></body></html>";
-        let blocks = xhtml_to_blocks(xhtml, 200).unwrap();
+        let blocks = xhtml_to_blocks(xhtml, &ParseLimits::default()).unwrap();
         assert!(blocks
             .iter()
             .any(|b| matches!(b, Block::List { ordered: false, items } if items.len() == 2)));
+    }
+
+    // ── Tables (M6/R3) ───────────────────────────────────────────────────
+
+    fn table_blocks(blocks: &[Block]) -> Vec<(&Vec<Vec<String>>, bool)> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Table { rows, header_row } => Some((rows, *header_row)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_table_fixture_yields_one_table_with_bare_and_paragraph_cells() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/epub/with_table.epub"
+        ))
+        .unwrap();
+        let doc = parse(&bytes, "t", &ParseLimits::default()).unwrap();
+        let blocks = &doc.sections[0].blocks;
+        // heading, paragraph, table, paragraph.
+        assert_eq!(blocks.len(), 4, "{blocks:?}");
+        let tables = table_blocks(blocks);
+        assert_eq!(tables.len(), 1);
+        let (rows, header) = tables[0];
+        assert!(header, "first row is all <th>");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0], vec!["Fruit", "Colour", "Count"]);
+        // Bare <td> text is kept (it used to be silently dropped).
+        assert_eq!(rows[1], vec!["Apple", "Red", "3"]);
+        // `<td></td>` keeps its column; <p>-wrapped cell paragraphs are joined.
+        assert_eq!(rows[2], vec!["Banana", "", "12"]);
+        assert_eq!(rows[3][1], "Dark red almost black");
+    }
+
+    #[test]
+    fn test_self_closing_cell_keeps_its_column_and_nested_table_flattens() {
+        let xhtml = "<body><table><tr><td>a</td><td/><td>c</td></tr>\
+            <tr><td><table><tr><td>x</td><td>y</td></tr></table></td><td>z</td></tr></table></body>";
+        let blocks = xhtml_to_blocks(xhtml, &ParseLimits::default()).unwrap();
+        let tables = table_blocks(&blocks);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].0, &vec![vec!["a", "", "c"], vec!["x y", "z"]]);
+        assert!(!tables[0].1, "no <th> -> no header row");
+    }
+
+    #[test]
+    fn test_table_row_and_column_caps_are_enforced() {
+        let rows: String = (0..5).map(|i| format!("<tr><td>{i}</td></tr>")).collect();
+        let xhtml = format!("<body><table>{rows}</table></body>");
+        let limits = ParseLimits {
+            max_table_rows: 4,
+            ..ParseLimits::default()
+        };
+        assert!(matches!(
+            xhtml_to_blocks(&xhtml, &limits),
+            Err(ParseError::ResourceLimitExceeded { .. })
+        ));
+
+        let cells: String = (0..5).map(|i| format!("<td>{i}</td>")).collect();
+        let xhtml = format!("<body><table><tr>{cells}</tr></table></body>");
+        let limits = ParseLimits {
+            max_table_cols: 4,
+            ..ParseLimits::default()
+        };
+        assert!(matches!(
+            xhtml_to_blocks(&xhtml, &limits),
+            Err(ParseError::ResourceLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn test_empty_layout_table_is_dropped_and_malformed_does_not_panic() {
+        let blocks = xhtml_to_blocks(
+            "<body><p>hi</p><table><tr><td></td></tr></table></body>",
+            &ParseLimits::default(),
+        )
+        .unwrap();
+        assert!(table_blocks(&blocks).is_empty());
+        for x in [
+            "<body><td>orphan</td></body>",
+            "<body></table></tr></td></body>",
+            "<body><table><tr><td>unclosed",
+        ] {
+            let _ = xhtml_to_blocks(x, &ParseLimits::default());
+        }
     }
 }
