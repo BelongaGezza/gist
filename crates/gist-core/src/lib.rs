@@ -4322,4 +4322,116 @@ mod tests {
         assert_eq!(clean_status, IntegrityStatus::Pass);
         assert_eq!(corrupted_status, IntegrityStatus::Failed);
     }
+
+    // ── Tables x annotation anchoring (M6/R3) ────────────────────────────
+
+    /// A section holding paragraph, table, paragraph -- the exact fixture
+    /// `FlowViewTests.testTableSectionTextMatchesRustGolden` mirrors on the
+    /// Swift side. If either side's separators change, both tests must be
+    /// updated together (ADR-003 addendum): they pin the SAME literal.
+    fn section_with_table() -> Section {
+        Section {
+            id: "s0".to_string(),
+            heading: None,
+            blocks: vec![
+                Block::Paragraph {
+                    runs: vec![TextRun::plain("Intro text.")],
+                },
+                Block::Table {
+                    rows: vec![
+                        vec!["Fruit".to_string(), "Colour".to_string()],
+                        vec!["Apple".to_string(), String::new()],
+                    ],
+                    header_row: true,
+                },
+                Block::Paragraph {
+                    runs: vec![TextRun::plain("Outro text after.")],
+                },
+            ],
+        }
+    }
+
+    /// Golden strings shared with Swift (`FlowViewTests`): blocks joined by
+    /// "\n\n", table cells by "\t", table rows by "\n".
+    const TABLE_SECTION_TEXT_GOLDEN: &str =
+        "Intro text.\n\nFruit\tColour\nApple\t\n\nOutro text after.";
+    const TABLE_BLOCK_JSON_GOLDEN: &str =
+        r#"{"Table":{"rows":[["Fruit","Colour"],["Apple",""]],"header_row":true}}"#;
+
+    #[test]
+    fn section_text_with_a_table_matches_the_cross_language_golden() {
+        let section = section_with_table();
+        assert_eq!(anchoring::section_text(&section), TABLE_SECTION_TEXT_GOLDEN);
+        // And the JSON Swift decodes (`FlowBlockVM`) is exactly this shape.
+        assert_eq!(
+            serde_json::to_string(&section.blocks[1]).unwrap(),
+            TABLE_BLOCK_JSON_GOLDEN
+        );
+    }
+
+    #[test]
+    fn annotations_inside_and_after_a_table_stay_valid_and_survive_a_shift() {
+        let section = section_with_table();
+        let doc = Document::new(Metadata::minimal("table anchors"), vec![section.clone()]);
+        let text = anchoring::section_text(&section);
+
+        // One anchor inside a cell ("Colour"), one in the paragraph after.
+        for quote in ["Colour", "Outro text"] {
+            let start = text.find(quote).unwrap();
+            let annotation = highlight_annotation("s0", start, quote.len(), &text);
+            let (status, _) = anchoring::reanchor(&doc, &annotation);
+            assert_eq!(status, AnchorStatus::Valid, "quote {quote:?}");
+        }
+
+        // Insert text BEFORE the table: both anchors must re-anchor to the
+        // moved positions, not orphan (the table's separators must not
+        // confuse the quote search).
+        let mut shifted = section.clone();
+        shifted.blocks.insert(
+            0,
+            Block::Paragraph {
+                runs: vec![TextRun::plain("A brand new opening paragraph.")],
+            },
+        );
+        let shifted_doc = Document::new(Metadata::minimal("shifted"), vec![shifted.clone()]);
+        let shifted_text = anchoring::section_text(&shifted);
+        for quote in ["Colour", "Outro text"] {
+            let start = text.find(quote).unwrap();
+            let annotation = highlight_annotation("s0", start, quote.len(), &text);
+            let (status, updated) = anchoring::reanchor(&shifted_doc, &annotation);
+            assert!(
+                matches!(status, AnchorStatus::Reanchored { .. }),
+                "quote {quote:?}: {status:?}"
+            );
+            assert_eq!(updated.start, shifted_text.find(quote).unwrap());
+        }
+    }
+
+    /// End to end: a DOCX containing a table imports with the table as one
+    /// structured `Block::Table` (not N loose paragraphs), the JSON handed to
+    /// the UI carries it, and FTS finds cell text.
+    #[test]
+    fn import_docx_with_table_persists_structure_and_cell_text_is_searchable() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&dir.path().join("t.db"), &storage).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/docx/with_table.docx");
+        let id = core.import_file(&fixture, &NullObserver).unwrap();
+
+        let doc: Document = serde_json::from_str(&core.get_document(&id).unwrap()).unwrap();
+        let tables: Vec<_> = doc.sections[0]
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Table { .. }))
+            .collect();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(
+            tables[0].plain_text(),
+            "Fruit\tColour\tCount\nApple\tRed\t3\nBanana\t\t12\nCherry\tDark red almost black\t40"
+        );
+        let hits = core.search_items("Banana", 10).unwrap();
+        assert!(hits.iter().any(|item| item.id == id), "{hits:?}");
+    }
 }

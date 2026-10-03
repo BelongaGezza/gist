@@ -297,7 +297,41 @@ fn verify_checksum(path: &str, bytes: &[u8]) -> Result<(), StoreError> {
 /// absence of `#[serde(deny_unknown_fields)]` anywhere in `gist-model`)
 /// already makes those forward/backward compatible without any version
 /// check at all.
-const CURRENT_IR_VERSION: u32 = 1;
+///
+/// **Enum variants are the exception** (ADR-019 addendum, M6/R3): serde's
+/// externally-tagged enums *error* on an unknown variant, so an older binary
+/// cannot read a blob containing, say, `Block::Table`. The policy is a
+/// *conditional* bump — a writer stamps each blob with the **lowest** version
+/// able to represent its payload ([`required_ir_version`]), so documents that
+/// don't use the new variant stay readable by older binaries, while those
+/// that do are rejected by them with the typed
+/// [`StoreError::IrVersionTooNew`] rather than an opaque JSON error.
+/// `CURRENT_IR_VERSION` is the highest version this binary can *read*.
+const CURRENT_IR_VERSION: u32 = IR_VERSION_TABLES;
+
+/// v1: `Block` is `Heading | Paragraph | Image | List`.
+const IR_VERSION_BASE: u32 = 1;
+/// v2: `Block::Table` may appear in a document blob (ADR-019 addendum).
+const IR_VERSION_TABLES: u32 = 2;
+
+/// The lowest IR envelope version that can represent `doc` — see
+/// [`CURRENT_IR_VERSION`]. A document with no table is written as v1,
+/// byte-compatible with every earlier binary; one containing a
+/// `Block::Table` is v2. Add a new arm/check here when a future variant
+/// ships; never raise the version of a payload that doesn't need it.
+fn required_ir_version(doc: &gist_model::Document) -> u32 {
+    let has_table = doc.sections.iter().any(|section| {
+        section
+            .blocks
+            .iter()
+            .any(|b| matches!(b, gist_model::Block::Table { .. }))
+    });
+    if has_table {
+        IR_VERSION_TABLES
+    } else {
+        IR_VERSION_BASE
+    }
+}
 
 /// The on-disk envelope wrapping every IR blob `gist-store` writes
 /// (`<id>.json`/`<id>.tokens.json`, ADR-007) as of ADR-019. Lives here, not
@@ -322,9 +356,9 @@ struct IrEnvelopeRef<'a, T> {
 /// (ADR-019). The resulting JSON is still a single flat, human-readable
 /// object (`{"ir_version":1,"payload":{...}}`), preserving ADR-007's
 /// "inspectable with any editor" property.
-fn serialize_ir_blob<T: Serialize>(payload: &T) -> Result<String, StoreError> {
+fn serialize_ir_blob<T: Serialize>(payload: &T, ir_version: u32) -> Result<String, StoreError> {
     Ok(serde_json::to_string(&IrEnvelopeRef {
-        ir_version: CURRENT_IR_VERSION,
+        ir_version,
         payload,
     })?)
 }
@@ -356,6 +390,18 @@ fn serialize_ir_blob<T: Serialize>(payload: &T) -> Result<String, StoreError> {
 /// guarantee ADR-019 requires, and is covered by a dedicated test reading a
 /// blob in exactly this pre-existing shape.
 fn deserialize_ir_blob<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
+    deserialize_ir_blob_with_max(bytes, CURRENT_IR_VERSION)
+}
+
+/// [`deserialize_ir_blob`] with an explicit highest-readable version.
+/// Production always passes [`CURRENT_IR_VERSION`]; the parameter exists so
+/// tests can play an *older* binary (`max_version = IR_VERSION_BASE`) against
+/// a blob written by this one — the forward-compat evidence ADR-019's
+/// addendum rests on.
+fn deserialize_ir_blob_with_max<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    max_version: u32,
+) -> Result<T, StoreError> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
     match value.get("ir_version") {
         Some(v) => {
@@ -365,10 +411,10 @@ fn deserialize_ir_blob<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T
             // parse attempt whose error would be far less clear about what
             // actually went wrong.
             let found = v.as_u64().map(|n| n as u32).unwrap_or(u32::MAX);
-            if found > CURRENT_IR_VERSION {
+            if found > max_version {
                 return Err(StoreError::IrVersionTooNew {
                     found,
-                    expected: CURRENT_IR_VERSION,
+                    expected: max_version,
                 });
             }
             let payload = value
@@ -942,7 +988,7 @@ impl Store {
         // Write the full document blob, wrapped in the ADR-019 IR envelope
         // so a future binary can tell what version of the IR shape this is.
         let doc_path = self.storage_dir.join(format!("{}.json", doc.id));
-        let doc_json = serialize_ir_blob(doc)?;
+        let doc_json = serialize_ir_blob(doc, required_ir_version(doc))?;
         let doc_bytes = match &key {
             Some(k) => encrypt_at_rest(k, doc_json.as_bytes()),
             None => doc_json.into_bytes(),
@@ -953,7 +999,7 @@ impl Store {
         // Write the token stream as a separate file for RSVP / FTS fast path
         // (also ADR-019-enveloped).
         let token_path = self.storage_dir.join(format!("{}.tokens.json", doc.id));
-        let tokens_json = serialize_ir_blob(&doc.token_stream)?;
+        let tokens_json = serialize_ir_blob(&doc.token_stream, IR_VERSION_BASE)?;
         let tokens_bytes = match &key {
             Some(k) => encrypt_at_rest(k, tokens_json.as_bytes()),
             None => tokens_json.into_bytes(),
@@ -4112,7 +4158,7 @@ mod tests {
         let doc_path = store.storage_dir().join(format!("{id}.json"));
         let raw = std::fs::read(&doc_path).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(value["ir_version"], serde_json::json!(CURRENT_IR_VERSION));
+        assert_eq!(value["ir_version"], serde_json::json!(IR_VERSION_BASE));
         assert!(value["payload"]["id"].is_string());
     }
 
@@ -4301,5 +4347,195 @@ mod tests {
         let meta: gist_model::Metadata = serde_json::from_value(json).unwrap();
         assert_eq!(meta.title, "pre-ADR-006 metadata");
         assert_eq!(meta.source_copy_ref, None);
+    }
+
+    // ── Block::Table forward-compat evidence (ADR-019 addendum, M6/R3) ───
+
+    /// The IR types exactly as a pre-table binary knew them: `Block` has no
+    /// `Table` variant. Everything else is unchanged and reused from
+    /// `gist_model`. This is what "an older binary" deserializes into.
+    mod pre_table {
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        pub enum Block {
+            Heading {
+                level: u8,
+                text: String,
+            },
+            Paragraph {
+                runs: Vec<gist_model::TextRun>,
+            },
+            Image {
+                src: String,
+                alt: Option<String>,
+                caption: Option<String>,
+            },
+            List {
+                ordered: bool,
+                items: Vec<String>,
+            },
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        pub struct Section {
+            pub id: String,
+            pub heading: Option<(u8, String)>,
+            pub blocks: Vec<Block>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        pub struct Document {
+            pub id: String,
+            pub metadata: gist_model::Metadata,
+            pub sections: Vec<Section>,
+            pub token_stream: Vec<gist_model::Token>,
+        }
+    }
+
+    fn doc_with_table(title: &str) -> gist_model::Document {
+        let section = gist_model::Section {
+            id: "s0".to_string(),
+            heading: None,
+            blocks: vec![
+                gist_model::Block::Paragraph {
+                    runs: vec![gist_model::TextRun::plain("Before the table.")],
+                },
+                gist_model::Block::Table {
+                    rows: vec![
+                        vec!["Fruit".into(), "Colour".into()],
+                        vec!["Zucchinimarrow".into(), "Green".into()],
+                    ],
+                    header_row: true,
+                },
+            ],
+        };
+        gist_model::Document::new(gist_model::Metadata::minimal(title), vec![section])
+    }
+
+    /// EVIDENCE (the problem): had `Block::Table` shipped *without* an
+    /// `ir_version` bump, an older binary would hit serde's unknown-variant
+    /// error on the whole document blob. This hand-writes exactly that
+    /// scenario (table payload stamped v1) and decodes it with the
+    /// pre-table types.
+    #[test]
+    fn without_a_version_bump_an_old_binary_fails_with_an_opaque_json_error() {
+        let doc = doc_with_table("unbumped");
+        let blob = serialize_ir_blob(&doc, IR_VERSION_BASE).unwrap(); // what "no bump" would write
+        let result =
+            deserialize_ir_blob_with_max::<pre_table::Document>(blob.as_bytes(), IR_VERSION_BASE);
+        match result {
+            Err(StoreError::Serde(e)) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("unknown variant `Table`"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected an opaque Json error, got {other:?}"),
+        }
+    }
+
+    /// EVIDENCE (the decision): with the conditional bump, the table
+    /// document is stamped v2 and the same old reader gets the typed,
+    /// designed `IrVersionTooNew` instead.
+    #[test]
+    fn with_the_conditional_bump_an_old_binary_gets_a_typed_version_error() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_table("bumped");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let raw = std::fs::read(store.storage_dir().join(format!("{id}.json"))).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(value["ir_version"], serde_json::json!(IR_VERSION_TABLES));
+
+        let old_reader = deserialize_ir_blob_with_max::<pre_table::Document>(&raw, IR_VERSION_BASE);
+        assert!(
+            matches!(
+                old_reader,
+                Err(StoreError::IrVersionTooNew {
+                    found: 2,
+                    expected: 1
+                })
+            ),
+            "{old_reader:?}"
+        );
+    }
+
+    /// A document with NO table is still stamped v1, so an old binary reads
+    /// it exactly as before: the bump has zero blast radius on existing
+    /// kinds of content.
+    #[test]
+    fn documents_without_tables_stay_v1_and_old_binaries_still_read_them() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_title("no-table");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let raw = std::fs::read(store.storage_dir().join(format!("{id}.json"))).unwrap();
+        let old: pre_table::Document =
+            deserialize_ir_blob_with_max(&raw, IR_VERSION_BASE).expect("old binary reads v1");
+        assert_eq!(old.metadata.title, "no-table");
+    }
+
+    /// The token-stream blob of a table document stays v1 (tokens contain
+    /// no `Block`), so an old binary can still run RSVP on it even though it
+    /// cannot open the document blob for the flow view.
+    #[test]
+    fn tokens_blob_of_a_table_document_is_v1_and_readable_by_old_binaries() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_table("tokens-v1");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let raw = std::fs::read(store.storage_dir().join(format!("{id}.tokens.json"))).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(value["ir_version"], serde_json::json!(IR_VERSION_BASE));
+        let tokens: Vec<gist_model::Token> =
+            deserialize_ir_blob_with_max(&raw, IR_VERSION_BASE).unwrap();
+        assert_eq!(tokens.len(), doc.token_stream.len());
+    }
+
+    /// The current binary round-trips a table document through the store
+    /// (document, tokens) and FTS finds a word that exists only inside a
+    /// table cell.
+    #[test]
+    fn table_document_round_trips_and_cell_text_is_searchable() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_table("roundtrip");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        let loaded = store.get_item(&id).unwrap().expect("item");
+        match &loaded.sections[0].blocks[1] {
+            gist_model::Block::Table { rows, header_row } => {
+                assert!(*header_row);
+                assert_eq!(rows[1], vec!["Zucchinimarrow", "Green"]);
+            }
+            other => panic!("expected a table, got {other:?}"),
+        }
+        assert_eq!(
+            store.get_tokens(&id).unwrap().unwrap().len(),
+            doc.token_stream.len()
+        );
+        let hits = store.search_items("zucchinimarrow", 10).unwrap();
+        assert_eq!(hits, vec![id]);
+    }
+
+    /// Libraries written before this change keep loading: a bare legacy blob
+    /// and an explicit v1 envelope both decode with the table-aware types.
+    #[test]
+    fn legacy_and_v1_blobs_still_load_with_table_aware_types() {
+        let doc = doc_with_title("legacy-after-tables");
+        let bare = serde_json::to_vec(&doc).unwrap();
+        let v1 = serialize_ir_blob(&doc, IR_VERSION_BASE).unwrap();
+        for bytes in [bare.as_slice(), v1.as_bytes()] {
+            let loaded: gist_model::Document = deserialize_ir_blob(bytes).unwrap();
+            assert_eq!(loaded.metadata.title, "legacy-after-tables");
+        }
     }
 }
