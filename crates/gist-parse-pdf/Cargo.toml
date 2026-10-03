@@ -6,3 +6,16 @@ publish = false
 license = "MIT"
 
 [dependencies]
+gist-model = { path = "../gist-model" }   # Document IR + ParseLimits
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+# pdfium bindings (ADR-002). Dynamic binding only: the `static` feature is
+# NOT enabled, because the macOS prebuilt ships only libpdfium.dylib (no
+# static archive); the dylib is embedded in the app bundle and loaded at
+# runtime by path (see ADR-002 addendum, N8).
+#   default-features = false drops `image_latest` (we never render pages, so
+#   the `image` crate is not needed) while keeping `pdfium_latest` bindings
+#   and `thread_safe` (pdfium itself is not thread-safe; the feature
+#   serialises calls) selected explicitly.
+pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "thread_safe"] }
