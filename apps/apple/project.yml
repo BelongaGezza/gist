@@ -65,7 +65,29 @@ targets:
     dependencies:
       - framework: ../../artifacts/GistCore.xcframework
         embed: false
+      - framework: ../../artifacts/pdfium/lib/libpdfium.dylib
+        embed: true
+        link: false
+        codeSign: true
+    # PDF import (ADR-002 addendum, M6 R1): the pinned prebuilt pdfium is a
+    # dynamic library only (no static archive), loaded at runtime by the Rust
+    # core by path (Contents/Frameworks/libpdfium.dylib). It is embedded here
+    # and code-signed on copy with the app's own identity, so Hardened
+    # Runtime library validation accepts it (security register N8) -- never
+    # add com.apple.security.cs.disable-library-validation instead. It is
+    # deliberately NOT linked (link-time resolution is what N8 warns about).
+    # Fetched + SHA-256 verified by tools/fetch-pdfium.sh (see the first
+    # preBuildScript); never committed to git.
+    # (The embed itself is the `framework: ...libpdfium.dylib` dependency
+    # above: embed: true, link: false, codeSign: true.)
     preBuildScripts:
+      - name: Fetch pinned pdfium
+        script: |
+          # Idempotent; downloads + verifies the pinned release only if absent.
+          "$SRCROOT/../../tools/fetch-pdfium.sh"
+        basedOnDependencyAnalysis: false
+        inputFiles: []
+        outputFiles: []
       - name: Generate uniffi bindings
         script: |
           # Ensure cargo is on PATH (Xcode's build environment omits ~/.cargo/bin)

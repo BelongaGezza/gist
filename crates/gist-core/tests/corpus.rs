@@ -148,6 +148,18 @@ fn run_parse_docx(bytes: Vec<u8>, stem: String, limits: ParseLimits) -> Result<b
     }
 }
 
+/// pdf: `gist_parse_pdf::parse_pdf(bytes, stem, limits)`. Needs libpdfium for
+/// anything past the cheap header checks; where it is unavailable the call
+/// returns a typed `LibraryUnavailable` error, which counts as a recognised
+/// error here (the no-panic property is what this corpus asserts).
+fn run_parse_pdf(bytes: Vec<u8>, stem: String, limits: ParseLimits) -> Result<bool, ()> {
+    match panic::catch_unwind(move || gist_parse_pdf::parse_pdf(&bytes, &stem, &limits)) {
+        Ok(Ok(doc)) => Ok(!doc.sections.is_empty()),
+        Ok(Err(_e)) => Ok(false),
+        Err(_) => Err(()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper: process a single file, record result, print outcome.
 // ---------------------------------------------------------------------------
@@ -226,6 +238,7 @@ fn corpus_no_panics() {
     let mut txt_counts = Counts::default();
     let mut epub_counts = Counts::default();
     let mut docx_counts = Counts::default();
+    let mut pdf_counts = Counts::default();
 
     // -----------------------------------------------------------------------
     // txt/ — every file in this subtree is fed to the txt parser, regardless
@@ -262,6 +275,19 @@ fn corpus_no_panics() {
         let lim = limits.clone();
         process_file(&path, &fixtures, &mut docx_counts, |bytes| {
             run_parse_docx(bytes, stem, lim)
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // pdf/ — image_only.pdf and the adversarial/ files legitimately yield
+    // typed errors (NoTextLayer / Encrypted / limits / Malformed).
+    // -----------------------------------------------------------------------
+    println!("\n--- pdf ---");
+    for path in collect_files(&fixtures.join("pdf")) {
+        let stem = stem_of(&path);
+        let lim = limits.clone();
+        process_file(&path, &fixtures, &mut pdf_counts, |bytes| {
+            run_parse_pdf(bytes, stem, lim)
         });
     }
 
@@ -306,10 +332,20 @@ fn corpus_no_panics() {
         docx_counts.panicked
     );
 
+    println!(
+        "pdf:  total={} ok={} ok-but-empty={} err={} PANICS={}",
+        pdf_counts.total,
+        pdf_counts.ok,
+        pdf_counts.ok_empty,
+        pdf_counts.err_recognised,
+        pdf_counts.panicked
+    );
+
     // -----------------------------------------------------------------------
     // Assertion — a panic is the only hard failure
     // -----------------------------------------------------------------------
-    let total_panics = txt_counts.panicked + epub_counts.panicked + docx_counts.panicked;
+    let total_panics =
+        txt_counts.panicked + epub_counts.panicked + docx_counts.panicked + pdf_counts.panicked;
 
     assert_eq!(
         total_panics, 0,
@@ -321,7 +357,7 @@ fn corpus_no_panics() {
 
     println!(
         "\n[PASS] No panics across {} fixture files.",
-        txt_counts.total + epub_counts.total + docx_counts.total
+        txt_counts.total + epub_counts.total + docx_counts.total + pdf_counts.total
     );
 
     // Write machine-readable summary for the CI artifact upload step.

@@ -435,6 +435,19 @@ pub enum ImportError {
     /// a generic import-failure toast, without string-matching error text.
     #[error("this document is protected by DRM and cannot be imported")]
     DrmProtected,
+    #[error("parse: {0}")]
+    Pdf(String),
+    /// Password-protected / permission-restricted PDF. Its own variant so
+    /// the UI can present it distinctly (never bypassed; ADR-004 posture).
+    #[error("this PDF is password-protected and cannot be imported")]
+    PdfEncrypted,
+    /// PDF with no extractable text (scanned / image-only). Its own variant
+    /// so the app can route it to the OCR pipeline instead of failing.
+    #[error("this PDF has no text layer (it appears to be a scan)")]
+    PdfNoTextLayer,
+    /// The pdfium library could not be loaded (not bundled / not found).
+    #[error("PDF support is unavailable in this build: {0}")]
+    PdfUnavailable(String),
 }
 
 // ── Import observer ─────────────────────────────────────────────────────────
@@ -983,7 +996,7 @@ impl Core {
         Ok(serde_json::to_string(&doc)?)
     }
 
-    /// Import any supported file (ePub, DOCX, TXT) into the library.
+    /// Import any supported file (ePub, DOCX, PDF, TXT) into the library.
     ///
     /// Type detection: magic bytes via `infer`, with file extension as fallback.
     /// All format parsers receive the same `ParseLimits`; limits are currently
@@ -1036,6 +1049,18 @@ impl Core {
         {
             gist_parse_docx::parse(&bytes, stem, &limits)
                 .map_err(|e| ImportError::Docx(e.to_string()))?
+        } else if mime == "application/pdf" || ext == "pdf" {
+            gist_parse_pdf::parse_pdf(&bytes, stem, &limits).map_err(|e| match e {
+                gist_parse_pdf::PdfError::Encrypted => ImportError::PdfEncrypted,
+                gist_parse_pdf::PdfError::NoTextLayer => ImportError::PdfNoTextLayer,
+                gist_parse_pdf::PdfError::LibraryUnavailable(why) => {
+                    ImportError::PdfUnavailable(why)
+                }
+                gist_parse_pdf::PdfError::ResourceLimitExceeded { limit, attempted } => {
+                    ImportError::ResourceLimitExceeded { limit, attempted }
+                }
+                other => ImportError::Pdf(other.to_string()),
+            })?
         } else if mime.starts_with("text/") || ext == "txt" || ext == "md" || ext == "text" {
             gist_parse_txt::parse(&bytes, stem, &limits)
                 .map_err(|e| ImportError::Txt(e.to_string()))?
@@ -1846,6 +1871,75 @@ mod tests {
 
         let no_match = core.search_items("nonexistentxyzzy", 10).unwrap();
         assert!(no_match.is_empty());
+    }
+
+    fn pdf_fixture(rel: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/pdf")
+            .join(rel)
+    }
+
+    /// PDF import end-to-end: parse, ADR-006 copy, ADR-013 checksum,
+    /// FTS search. Skips (with a notice) where pdfium isn't loadable, unless
+    /// `GIST_REQUIRE_PDFIUM=1`.
+    #[test]
+    fn import_pdf_round_trip_with_copy_on_import_and_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::init(&dir.path().join("t.db"), dir.path()).unwrap();
+        let src = pdf_fixture("plain_text.pdf");
+        match core.import_file(&src, &NullObserver) {
+            Err(ImportError::PdfUnavailable(why)) => {
+                assert_ne!(
+                    std::env::var("GIST_REQUIRE_PDFIUM").as_deref(),
+                    Ok("1"),
+                    "pdfium required but unavailable: {why}"
+                );
+                eprintln!("SKIP: pdfium unavailable ({why})");
+            }
+            Err(e) => panic!("unexpected import error: {e}"),
+            Ok(id) => {
+                let doc: gist_model::Document =
+                    serde_json::from_str(&core.get_document(&id).unwrap()).unwrap();
+                assert_eq!(doc.metadata.source_type, "pdf");
+                let copy = doc.metadata.source_copy_ref.expect("ADR-006 copy");
+                assert!(std::path::Path::new(&copy).exists());
+                assert!(copy.ends_with(".pdf"));
+                assert!(std::path::Path::new(&format!("{copy}.blake3")).exists());
+                assert!(core
+                    .search_items("rhythm", 10)
+                    .unwrap()
+                    .iter()
+                    .any(|i| i.id == id));
+            }
+        }
+    }
+
+    #[test]
+    fn import_pdf_typed_errors_for_encrypted_and_image_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::init(&dir.path().join("t.db"), dir.path()).unwrap();
+        for (rel, want_encrypted) in [
+            ("adversarial/encrypted_password.pdf", true),
+            ("image_only.pdf", false),
+        ] {
+            match core.import_file(&pdf_fixture(rel), &NullObserver) {
+                Err(ImportError::PdfUnavailable(_)) => {
+                    assert_ne!(std::env::var("GIST_REQUIRE_PDFIUM").as_deref(), Ok("1"));
+                }
+                Err(ImportError::PdfEncrypted) => assert!(want_encrypted, "{rel}"),
+                Err(ImportError::PdfNoTextLayer) => assert!(!want_encrypted, "{rel}"),
+                other => panic!("{rel}: unexpected {other:?}"),
+            }
+        }
+        // Nothing was written for refused PDFs.
+        assert!(core.list_items(10, 0).unwrap().is_empty());
+        assert!(
+            !dir.path().join("originals").exists()
+                || std::fs::read_dir(dir.path().join("originals"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
     }
 
     /// End-to-end check that `Core::init_encrypted` (ADR-011) actually wires

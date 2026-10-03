@@ -24,7 +24,17 @@ jobs:
       # below still see a component-less toolchain. Attach components to
       # the right toolchain directly instead.
       - run: rustup component add clippy rustfmt
-      - run: cargo test --workspace
+      # PDF import tests need the pinned prebuilt libpdfium (macOS only
+      # today; SHA-256 verified, fails closed). On ubuntu/windows those tests
+      # skip with a notice (typed LibraryUnavailable); on macOS they are
+      # required to actually run.
+      - name: Fetch pinned pdfium (macOS)
+        if: runner.os == 'macOS'
+        run: ./tools/fetch-pdfium.sh
+      - name: cargo test
+        run: cargo test --workspace
+        env:
+          GIST_REQUIRE_PDFIUM: ${{ runner.os == 'macOS' && '1' || '' }}
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo fmt --check
       # Release-mode panic containment (review Q1). Unit tests always unwind, so

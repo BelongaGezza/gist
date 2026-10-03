@@ -229,6 +229,58 @@ expression.
 | zune-core | 0.5.3 | MIT OR Apache-2.0 OR Zlib | <https://github.com/etemesi254/zune-image> |
 | zune-jpeg | 0.5.15 | MIT OR Apache-2.0 OR Zlib | <https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg> |
 
+### PDF support (added M6 R1)
+
+`gist-parse-pdf` adds `pdfium-render` and the crates below to the Rust core (all are
+permissive; no `deny.toml` change was needed). They are in addition to the table above,
+which was last regenerated 2026-09-28.
+
+| Crate | Version | Licence | Repository |
+|---|---|---|---|
+| byteorder | 1.5.0 | Unlicense OR MIT | <https://github.com/BurntSushi/byteorder> |
+| chrono | 0.4.45 | MIT OR Apache-2.0 | <https://github.com/chronotope/chrono> |
+| core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 | <https://github.com/servo/core-foundation-rs> |
+| either | 1.18.0 | MIT OR Apache-2.0 | <https://github.com/rayon-rs/either> |
+| iana-time-zone | 0.1.65 | MIT OR Apache-2.0 | <https://github.com/strawlab/iana-time-zone> |
+| itertools | 0.13.0 | MIT OR Apache-2.0 | <https://github.com/rust-itertools/itertools> |
+| libloading | 0.9.0 | ISC | <https://github.com/nagisa/rust_libloading/> |
+| maybe-owned | 0.3.4 | MIT OR Apache-2.0 | <https://github.com/rustonaut/maybe-owned> |
+| pdfium-render | 0.9.4 | MIT OR Apache-2.0 | <https://github.com/ajrcarey/pdfium-render> |
+| piston-float | 1.0.1 | MIT | <https://github.com/pistondevelopers/float.git> |
+| utf16string | 0.2.0 | MIT OR Apache-2.0 | <https://github.com/getsentry/utf16string> |
+| vecmath | 1.0.0 | MIT | <https://github.com/pistondevelopers/vecmath.git> |
+
+### PDFium (prebuilt native library, `libpdfium.dylib`)
+
+Not a Rust crate: a prebuilt universal2 (arm64 + x86_64) dynamic library from
+<https://github.com/bblanchon/pdfium-binaries>, release `chromium/8076`, fetched by
+`tools/fetch-pdfium.sh` (SHA-256 pinned, fails closed) into `artifacts/pdfium/` and
+embedded in the app bundle at `Contents/Frameworks/libpdfium.dylib` (ADR-002 addendum).
+No binary is committed to git.
+
+| Component | Licence |
+|---|---|
+| PDFium | BSD-3-Clause |
+| Abseil, LLVM libc | Apache-2.0 |
+| AGG 2.3 (Anti-Grain Geometry) | Permissive AGG 2.3 licence (use/copy/modify/sell/distribute with the notice retained) |
+| Little CMS (lcms2), simdutf, fast_float | MIT (texts in the release `licenses/` directory) |
+| zlib | Zlib |
+| libpng | PNG Reference Library License v2 |
+| libjpeg-turbo | IJG + BSD-3-Clause + Zlib |
+| OpenJPEG | BSD-2-Clause |
+| ICU | Unicode / ICU licence |
+| FreeType | FreeType Project License (BSD-style; requires the acknowledgement below) |
+
+The release archive's `licenses/` directory carries the exact texts; they are
+reproduced verbatim in the in-app Settings -> About -> Third-Party Notices screen
+(`ThirdPartyNotices.txt`). Required FreeType acknowledgement:
+
+> Portions of this software are copyright © The FreeType Project (www.freetype.org). All rights reserved.
+
+The obligation for all of the above is notice reproduction, which the bundled
+notices file satisfies. Note: AGG 2.3 (`agg23.txt`) was not in the pre-implementation
+licence survey; it is permissive and MIT-compatible.
+
 ## Apple app (`apps/apple`)
 
 The macOS/iOS SwiftUI shell has **zero direct third-party Swift dependencies**
