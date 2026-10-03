@@ -79,6 +79,24 @@ final class FlowTableTests: XCTestCase {
             FlowBlockVM.table(rows: [["a", "", "c"], ["d"]], headerRow: false).plainText, "a\t\tc\nd")
     }
 
+    /// Mirrors Rust's `image_plain_text_is_alt_only_never_caption`: a caption
+    /// must not leak into `plainText`, or every later block's byte offset in
+    /// `concatenatedPlainText` drifts from `section_text` (ADR-003).
+    func testImagePlainTextIsAltOnlyNeverCaption() throws {
+        let json = """
+        {"id": "s0", "heading": null, "blocks": [
+            {"Image": {"src": "x.png", "alt": "a dog", "caption": "Figure 1"}},
+            {"Image": {"src": "y.png", "alt": null, "caption": "Figure 2"}},
+            {"Paragraph": {"runs": [{"text": "after", "bold": false, "italic": false, "code": false}]}}
+        ]}
+        """
+        let section = try JSONDecoder().decode(FlowSectionVM.self, from: Data(json.utf8))
+        XCTAssertEqual(section.blocks[0].plainText, "a dog")
+        XCTAssertEqual(section.blocks[1].plainText, "")
+        XCTAssertEqual(section.concatenatedPlainText, "a dog\n\n\n\nafter")
+        XCTAssertEqual(section.blockByteOffset(at: 2), "a dog\n\n\n\n".utf8.count)
+    }
+
     func testTableSpeakableTextIsRowByRowAndSkipsEmptyCells() {
         let table = FlowBlockVM.table(rows: [["Fruit", "Colour"], ["Apple", ""], ["", ""]], headerRow: true)
         XCTAssertEqual(table.speakableText, "Fruit, Colour. Apple.")

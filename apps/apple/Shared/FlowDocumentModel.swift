@@ -153,12 +153,15 @@ enum FlowBlockVM: Decodable {
     case table(rows: [[String]], headerRow: Bool)
 
     /// Plain text used for search matching and (for non-paragraph blocks)
-    /// as a fallback render — mirrors `gist_model::Block::plain_text`.
+    /// as a fallback render — mirrors `gist_model::Block::plain_text`. An image
+    /// contributes its `alt` text only, never its caption: Rust anchoring
+    /// (`section_text`) and RSVP/FTS all derive from that same rule, so a
+    /// caption here would shift every later block's byte offsets (ADR-003).
     var plainText: String {
         switch self {
         case .heading(_, let text): return text
         case .paragraph(let runs): return runs.map(\.text).joined()
-        case .image(_, let alt, let caption): return alt ?? caption ?? ""
+        case .image(_, let alt, _): return alt ?? ""
         case .list(_, let items): return items.joined(separator: " ")
         case .table(let rows, _):
             return rows.map { $0.joined(separator: Self.tableCellSeparator) }

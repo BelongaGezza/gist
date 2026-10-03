@@ -541,4 +541,18 @@ mod tests {
         let back: Block = serde_json::from_str(&json).unwrap();
         assert_eq!(back.plain_text(), sample_table().plain_text());
     }
+
+    /// Pins the rule the Swift side (`FlowBlockVM.plainText`) must mirror:
+    /// an image contributes its alt text only, never its caption.
+    #[test]
+    fn image_plain_text_is_alt_only_never_caption() {
+        let img = |alt: Option<&str>, caption: Option<&str>| Block::Image {
+            src: "x.png".into(),
+            alt: alt.map(str::to_owned),
+            caption: caption.map(str::to_owned),
+        };
+        assert_eq!(img(Some("a dog"), Some("Figure 1")).plain_text(), "a dog");
+        assert_eq!(img(None, Some("Figure 1")).plain_text(), "");
+        assert_eq!(img(None, None).plain_text(), "");
+    }
 }
