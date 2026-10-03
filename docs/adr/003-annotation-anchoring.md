@@ -72,3 +72,11 @@ badge in the annotations sidebar (`apps/apple/Shared/AnnotationsSidebarView.swif
 Property tests perturbing documents (shift, delete-around, delete-through,
 missing-block) exist in `crates/gist-core/src/lib.rs`, per this ADR's own
 closing note.
+
+## Addendum: table content in `section_text` (2026-10-03, M6 R3)
+
+`Block::Table` joins the section's block list, so its text participates in `section_text`. `Block::plain_text()` for a table is **rows joined by `"\n"`, cells within a row joined by `"\t"`** (empty cells stay as empty strings, so `a\t\tc` has an empty middle cell). Cells are whitespace-normalised by every parser (`gist_model::normalize_cell_text`), so a cell never contains either separator. The table text is then joined to its neighbours with the usual `"\n\n"`. Example (pinned by `section_text_with_a_table_matches_the_cross_language_golden` in `gist-core`):
+
+    "Intro text.\n\nFruit\tColour\nApple\t\n\nOutro text after."
+
+The Swift side (`FlowBlockVM.plainText` for `.table`, consumed by `FlowSectionVM.concatenatedPlainText` / `blockByteOffset`) **must produce the identical string** — this is the same load-bearing-separator trap as the earlier `"\n\n"` vs `"\n"` bug. `FlowViewTests.testTableSectionTextMatchesRustGolden` pins the same literal and decodes the same Rust-produced JSON, so a drift on either side fails a test on that side. RSVP/TTS reuse the same linearisation: row by row, with a reading pause (a `ParagraphBreak` token) between non-empty rows.

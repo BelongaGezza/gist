@@ -305,6 +305,7 @@ Phase C:          ├──> web
 - `parse_document()`: `pStyle` → style lookup; `numPr` → list detection; `w:ins` accepted, `w:del` skipped; `has_tracked_changes` flag set.
 - All four `ParseLimits` fields enforced. `[F4]` ✅
 - Tables: parse and persist (M1); flatten at render (M2). `[Q2]` ✅ Resolved
+  - **Correction, 2026-10-03 (M6 R3): this claim was false when written.** `gist_model::Block` had no table variant, so tables were *neither parsed nor persisted as tables*. Measured on synthetic fixtures (`fixtures/docx/with_table.docx`, `fixtures/epub/with_table.epub`, `fixtures/web/table_article.html`; 3x4 table with a header row, an empty cell, and a two-paragraph cell): **DOCX** turned every cell paragraph into its own `Paragraph` block (row/column structure lost, and the empty cell vanished so later cells silently shifted columns); **ePub** *dropped bare `<td>`/`<th>` text entirely* (only `<p>`/`<div>`-wrapped cell content survived, as loose paragraphs); **web** made one `Paragraph` per cell (same loss as DOCX). Fixed in M6 R3 with `Block::Table` (see ADR-019's addendum and `docs/m6-agent-roles.md` R3).
 
 **Fixed (2026-09-12, same day):**
 - `[F16]` ✅ **Was Medium.** Same zip entry-count gap as `gist-parse-epub` above — no cap on entry count before per-entry limits apply. Fixed identically: checks `ParseLimits.max_zip_entries` immediately after `ZipArchive::new`. New test builds a 6-entry zip capped at 5 and asserts rejection.
@@ -696,6 +697,7 @@ Scoped in `docs/m6-agent-roles.md` (adopted 2026-10-03). Gaps found after M5: PD
 - DRM = detect and refuse, never circumvent (ADR-004) ✅ `[F8]`
 - Q1: Full-text search in v1.0 — committed, FTS5 implemented ✅
 - Q2: Tables parse+persist in model, flatten at render for v1.0 ✅ (DOCX parser)
+  - **Correction, 2026-10-03:** the ✅ above was premature; there was no table in the model until M6 R3 (see §2.5's correction note for what the parsers actually did). Now real: `Block::Table { rows, header_row }` (plain-text cells), populated by the DOCX, ePub and web parsers, rendered as a grid in the flow view, and linearised row by row for RSVP/TTS.
 - Q5: URL fetching on iOS — use Swift `URLSession` (system proxy, ATS, cellular-awareness) ✅
 - Q6: Copy-on-import (ADR-006) ✅
 - Q7: IR storage format — `<id>.json` + `<id>.tokens.json` on disk, SQLite holds metadata + paths (ADR-007) ✅
