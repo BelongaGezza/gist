@@ -32,6 +32,17 @@ pub enum GistError {
     /// matters; `source_ref`/`source_path` never appear here.
     #[error("checksum mismatch for {path}: file appears corrupted on disk")]
     ChecksumMismatch { path: String },
+    /// Password-protected PDF (never bypassed). Own variant so Swift can show
+    /// a dedicated message, same reason as `DrmProtected`.
+    #[error("this PDF is password-protected and cannot be imported")]
+    PdfEncrypted,
+    /// PDF with no extractable text (scan / image-only): Swift routes this to
+    /// the OCR flow instead of showing an error.
+    #[error("this PDF has no text layer (it appears to be a scan)")]
+    PdfNoTextLayer,
+    /// pdfium could not be loaded in this build/bundle.
+    #[error("PDF support is unavailable in this build")]
+    PdfUnavailable,
     #[error("internal error")]
     InternalPanic,
 }
@@ -51,6 +62,9 @@ impl From<gist_core::ImportError> for GistError {
     fn from(e: gist_core::ImportError) -> Self {
         match e {
             gist_core::ImportError::DrmProtected => GistError::DrmProtected,
+            gist_core::ImportError::PdfEncrypted => GistError::PdfEncrypted,
+            gist_core::ImportError::PdfNoTextLayer => GistError::PdfNoTextLayer,
+            gist_core::ImportError::PdfUnavailable(_) => GistError::PdfUnavailable,
             gist_core::ImportError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
                 GistError::ChecksumMismatch { path }
             }

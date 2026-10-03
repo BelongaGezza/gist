@@ -325,7 +325,7 @@ final class CoreClient: ObservableObject {
             switch gistError {
             case .DrmProtected:
                 drmProtectedFile = URL(string: urlString)
-            case .Core, .ChecksumMismatch, .InternalPanic:
+            case .Core, .ChecksumMismatch, .PdfEncrypted, .PdfNoTextLayer, .PdfUnavailable, .InternalPanic:
                 error = "\(gistError)"
             }
         } catch {
@@ -470,7 +470,7 @@ final class CoreClient: ObservableObject {
             switch gistError {
             case .DrmProtected:
                 drmProtectedFile = url
-            case .Core, .ChecksumMismatch, .InternalPanic:
+            case .Core, .ChecksumMismatch, .PdfEncrypted, .PdfNoTextLayer, .PdfUnavailable, .InternalPanic:
                 error = "\(gistError)"
             }
         } catch {
