@@ -116,7 +116,7 @@ i.e. a versioned enum of decoders (`IrPayload::V1(DocumentV1)` / `IrPayload::V2(
 
 `mod pre_table` in the tests reproduces `Block`/`Section`/`Document` exactly as a pre-table binary knew them (four `Block` variants). Playing that "old binary":
 
-- **Without any version bump** (`without_a_version_bump_an_old_binary_fails_with_an_opaque_json_error`): a document blob containing a table, stamped `ir_version` 1, fails to decode with serde's `unknown variant `Table`` error, surfaced as `StoreError::Serde`. The *whole document* is unreadable (not just the one block), and the user sees a generic JSON error instead of an "upgrade the app" signal. This confirms the caveat concretely.
+- **Without any version bump** (`without_a_version_bump_an_old_binary_fails_with_an_opaque_json_error`): a document blob containing a table, stamped `ir_version` 1, fails to decode with serde's "unknown variant Table" error, surfaced as `StoreError::Serde`. The *whole document* is unreadable (not just the one block), and the user sees a generic JSON error instead of an "upgrade the app" signal. This confirms the caveat concretely.
 - **`<id>.tokens.json` is unaffected** (`tokens_blob_of_a_table_document_is_v1_and_readable_by_old_binaries`): the token stream carries no `Block`, so an old binary can still run RSVP on a table document; only the flow view / annotation re-anchoring / anything reading `<id>.json` breaks.
 
 ### Decision: a *conditional* bump — yes, bump, but only for blobs that need it
