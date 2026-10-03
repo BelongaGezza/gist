@@ -1944,7 +1944,8 @@ mod tests {
         assert!(doc_path.exists());
         assert!(tokens_path.exists());
 
-        core.remove_items(&[id_gone.clone()], false).unwrap();
+        core.remove_items(std::slice::from_ref(&id_gone), false)
+            .unwrap();
 
         // list_items no longer surfaces the removed item, but does surface
         // the other one.
@@ -2620,7 +2621,7 @@ mod tests {
             std::sync::Arc::new(FakeKeyProvider::new(11));
 
         // First call: item is plaintext -> Encrypted.
-        let results = core.encrypt_items(&[id.clone()], key_provider.clone());
+        let results = core.encrypt_items(std::slice::from_ref(&id), key_provider.clone());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, id);
         assert!(matches!(results[0].result, Ok(EncryptOutcome::Encrypted)));
@@ -2636,7 +2637,7 @@ mod tests {
         ));
 
         // Second call: idempotent no-op -> AlreadyEncrypted, not an error.
-        let results2 = core.encrypt_items(&[id.clone()], key_provider);
+        let results2 = core.encrypt_items(std::slice::from_ref(&id), key_provider);
         assert_eq!(results2.len(), 1);
         assert!(matches!(
             results2[0].result,
@@ -2684,7 +2685,7 @@ mod tests {
         std::fs::write(&txt, b"A document encrypted on demand, then reopened.").unwrap();
         let id = core.import_file(&txt, &NullObserver).unwrap();
 
-        let results = core.encrypt_items(&[id.clone()], key_provider);
+        let results = core.encrypt_items(std::slice::from_ref(&id), key_provider);
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0].result, Ok(EncryptOutcome::Encrypted)));
 
@@ -2785,7 +2786,9 @@ mod tests {
             .iter()
             .any(|i| i.id == id));
 
-        let outcome = core.remove_items_detailed(&[id.clone()], true).unwrap();
+        let outcome = core
+            .remove_items_detailed(std::slice::from_ref(&id), true)
+            .unwrap();
         assert_eq!(outcome.removed_ids, vec![id]);
         assert_eq!(
             (outcome.files_deleted, outcome.files_failed),
@@ -3550,7 +3553,9 @@ mod tests {
             two_items_sharing_one_stored_copy(dir.path());
         let (hash_a, hash_b) = (sha256_hex(&src_a), sha256_hex(&src_b));
 
-        let outcome = core.remove_items_detailed(&[id_a.clone()], true).unwrap();
+        let outcome = core
+            .remove_items_detailed(std::slice::from_ref(&id_a), true)
+            .unwrap();
 
         assert_eq!(outcome.removed_ids, vec![id_a]);
         assert!(
@@ -3752,7 +3757,8 @@ mod tests {
             two_items_sharing_one_stored_copy(dir.path());
         let hash_a = sha256_hex(&src_a);
 
-        core.remove_items_detailed(&[id_a.clone()], true).unwrap();
+        core.remove_items_detailed(std::slice::from_ref(&id_a), true)
+            .unwrap();
 
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else {

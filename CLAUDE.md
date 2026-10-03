@@ -33,7 +33,7 @@ The app is named **GIST**. All crates use the `gist-*` prefix. The older name "R
 ```
 gist/
 ├── Cargo.toml                  # workspace root
-├── rust-toolchain.toml         # pinned to 1.87.0
+├── rust-toolchain.toml         # pinned to 1.99.0
 ├── deny.toml                   # cargo-deny: licences, advisories, bans, sources
 ├── LICENSE                     # MIT — every crate declares license = "MIT"
 ├── crates/
@@ -149,7 +149,7 @@ Exit criterion: a team member can use it as their daily reader. Getting close, n
 
 ```bash
 # Rust toolchain (pinned in rust-toolchain.toml)
-rustup show   # should say 1.88.0
+rustup show   # should say 1.99.0
 
 # Run all tests
 cargo test --workspace

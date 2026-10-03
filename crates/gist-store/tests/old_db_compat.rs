@@ -237,7 +237,7 @@ fn removing_an_old_row_still_cascades_and_clears_the_old_fts_entries() {
     let store = Store::open(&db, &storage).unwrap();
 
     let moby = id_of(&store, "Moby Dick");
-    let removed = store.remove_items(&[moby.clone()]).unwrap();
+    let removed = store.remove_items(std::slice::from_ref(&moby)).unwrap();
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].id, moby);
 
