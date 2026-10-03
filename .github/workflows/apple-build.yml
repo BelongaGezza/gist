@@ -76,7 +76,7 @@ jobs:
       # uniffi 0.28+ no longer ships a standalone uniffi-bindgen on
       # crates.io; gist-ffi builds its own via the uniffi-bindgen-bin
       # feature (see crates/gist-ffi/Cargo.toml). It needs a newer MSRV than
-      # this repo's pinned rust-toolchain.toml (1.87.0), so it's built
+      # this repo's pinned rust-toolchain.toml (1.99.0), so it's built
       # explicitly with `+stable`, mirroring the install comment in
       # tools/gen-bindings.sh.
       - name: Install uniffi-bindgen

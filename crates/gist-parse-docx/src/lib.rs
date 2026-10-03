@@ -512,15 +512,11 @@ fn parse_document(
                         in_del = false;
                     }
                     // w:b and w:i also appear as non-empty Start+End in some serialisers
-                    "b" => {
-                        if in_run {
-                            run_bold = true;
-                        }
+                    "b" if in_run => {
+                        run_bold = true;
                     }
-                    "i" => {
-                        if in_run {
-                            run_italic = true;
-                        }
+                    "i" if in_run => {
+                        run_italic = true;
                     }
                     _ => {}
                 }
