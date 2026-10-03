@@ -17,6 +17,14 @@ final class CoreClient: ObservableObject {
     /// source file is DRM-protected, so the view layer can present a
     /// dedicated DRM alert rather than a generic import-failure message.
     @Published var drmProtectedFile: URL?
+    /// PDF import outcomes that need their own UI (M6 R2), each set from the
+    /// typed `GistError` case -- never from message text. Cleared at the
+    /// start of every `importFile`.
+    @Published var pdfEncryptedFile: URL?
+    @Published var pdfUnavailableFile: URL?
+    /// An image-only (scanned) PDF: the Library presents the existing OCR
+    /// import sheet pre-loaded with this file instead of showing an error.
+    @Published var pdfOcrCandidate: URL?
 
     private let core: GistCore?
 
@@ -325,7 +333,9 @@ final class CoreClient: ObservableObject {
             switch gistError {
             case .DrmProtected:
                 drmProtectedFile = URL(string: urlString)
-            case .Core, .ChecksumMismatch, .PdfEncrypted, .PdfNoTextLayer, .PdfUnavailable, .InternalPanic:
+            case .Core, .ChecksumMismatch, .InternalPanic,
+                // PDF cases are only produced by `importFile`; unreachable here.
+                .PdfEncrypted, .PdfNoTextLayer, .PdfUnavailable:
                 error = "\(gistError)"
             }
         } catch {
@@ -462,6 +472,9 @@ final class CoreClient: ObservableObject {
     func importFile(url: URL) async {
         guard let core else { return }
         drmProtectedFile = nil
+        pdfEncryptedFile = nil
+        pdfUnavailableFile = nil
+        pdfOcrCandidate = nil
         do {
             let id = try core.importFile(path: url.path)
             error = nil
@@ -470,7 +483,14 @@ final class CoreClient: ObservableObject {
             switch gistError {
             case .DrmProtected:
                 drmProtectedFile = url
-            case .Core, .ChecksumMismatch, .PdfEncrypted, .PdfNoTextLayer, .PdfUnavailable, .InternalPanic:
+            case .PdfEncrypted:
+                pdfEncryptedFile = url
+            case .PdfUnavailable:
+                pdfUnavailableFile = url
+            case .PdfNoTextLayer:
+                // Not an error: a scan. Route to the existing OCR flow.
+                pdfOcrCandidate = url
+            case .Core, .ChecksumMismatch, .InternalPanic:
                 error = "\(gistError)"
             }
         } catch {
