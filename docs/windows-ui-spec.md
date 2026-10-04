@@ -203,7 +203,7 @@ Command bar: **Contents · Typography (Aa) · Find** (Find opens an inline find 
 - **Reading column:** max ~70 characters wide, centred, with side margins (spec §5.2 margins/text width — see §7.4 "Margins").
 - **Typography menu** (`MenuFlyout`/`Flyout`, one "Aa" button) **[P]**:
   - Size: Smaller / Larger, ±1 pt steps clamped to 13–28, default 17 (`TypographySettings`).
-  - Font: Default → Segoe UI Variable Text · Serif → Georgia · Rounded → **[W] open** (no Windows system rounded face; candidates: drop the option, or map to "Trebuchet MS"; decide in W5, keep the persisted enum value `rounded` either way).
+  - Font: Default → Segoe UI Variable Text · Serif → Georgia · Rounded → **[W] decided 2026-10-04 (W5 R3): not offered on Windows.** Windows has no system rounded face and Trebuchet MS is not rounded, so a "Rounded" label over it would mislead. The menu shows Default and Serif only. The persisted enum value `rounded` is kept and decoded (a value written by another platform or a future sync is neither lost nor an error) but resolves to the Default face at render time; the Windows UI never writes it. Revisit only if a genuinely rounded font is bundled (licence and size to be assessed).
   - Line spacing: Compact +2 / Regular +6 / Relaxed +12 (points added to line height, exactly Apple's values).
 - **Contents:** flyout listing headings, each row indented `16 epx × (level − 1)` **[P]** (Apple's `TocEntry.indentLevel`), click scrolls to the section. Headless sections are excluded; empty TOC shows a disabled button.
 - **Find in document [P]:** inline `TextBox` + Previous/Next buttons; **F3 / Shift+F3** and **Ctrl+G** for next/previous **[W]** (Windows convention; Apple uses ⌘G). Matches highlighted via `TextHighlighter` on the `RichTextBlock`s; case-insensitive, character-based offsets (same semantics as `String.rangesOfSubstring`, including multi-byte characters).
@@ -267,4 +267,4 @@ These are functional contracts, not styling, and each has an Apple test to port 
 
 ## 11. Out of scope for v1 Windows (same as Apple today)
 
-OCR import (`import_image_with_ocr` is `todo!()`; Windows OCR engine choice, Q4, is decided at W5 — see plan), annotations/highlights/bookmarks, TTS, paginated view (Q3), PDF import, ORP highlighting, export, smart collections, cover thumbnails, per-item size/word-count metadata, cloud sync.
+OCR import (*2026-10-04 correction:* `import_image_with_ocr` is implemented in Rust since M3; what is missing on Windows is the `OcrEngine` implementation and UI. Q4 design: `docs/adr/020-windows-ocr-engine.md`, `Windows.Media.Ocr`, Proposed), annotations/highlights/bookmarks, TTS, paginated view (Q3), PDF import, ORP highlighting, export, smart collections, cover thumbnails, per-item size/word-count metadata, cloud sync.
