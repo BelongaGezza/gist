@@ -148,23 +148,72 @@ enum FlowBlockVM: Decodable {
     case paragraph(runs: [FlowTextRunVM])
     case image(src: String, alt: String?, caption: String?)
     case list(ordered: Bool, items: [String])
+    /// `gist_model::Block::Table` (M6/R3). Cells are plain text; a row may be
+    /// shorter than the widest row (ragged), and an empty cell is `""`.
+    case table(rows: [[String]], headerRow: Bool)
 
     /// Plain text used for search matching and (for non-paragraph blocks)
-    /// as a fallback render — mirrors `gist_model::Block::plain_text`.
+    /// as a fallback render — mirrors `gist_model::Block::plain_text`. An image
+    /// contributes its `alt` text only, never its caption: Rust anchoring
+    /// (`section_text`) and RSVP/FTS all derive from that same rule, so a
+    /// caption here would shift every later block's byte offsets (ADR-003).
     var plainText: String {
         switch self {
         case .heading(_, let text): return text
         case .paragraph(let runs): return runs.map(\.text).joined()
-        case .image(_, let alt, let caption): return alt ?? caption ?? ""
+        case .image(_, let alt, _): return alt ?? ""
         case .list(_, let items): return items.joined(separator: " ")
+        case .table(let rows, _):
+            return rows.map { $0.joined(separator: Self.tableCellSeparator) }
+                .joined(separator: Self.tableRowSeparator)
         }
     }
 
-    private enum RootKey: String, CodingKey { case Heading, Paragraph, Image, List }
+    /// Cell and row separators in a table's `plainText`. **Load-bearing:**
+    /// these must equal `gist_model::TABLE_CELL_SEPARATOR` (`'\t'`) and
+    /// `TABLE_ROW_SEPARATOR` (`'\n'`) byte for byte, because annotation
+    /// anchoring slices the section's concatenated text by byte offset
+    /// against `gist_core::anchoring::section_text` (ADR-003 addendum,
+    /// 2026-10-03). `FlowViewTests.testTableSectionTextMatchesRustGolden`
+    /// pins the same literal the Rust side pins.
+    static let tableCellSeparator = "\t"
+    static let tableRowSeparator = "\n"
+
+    /// What read-aloud should speak for this block. Identical to
+    /// `plainText` except for tables, where a tab/newline would be spoken as
+    /// little or nothing: cells are spoken comma-separated and rows as
+    /// separate sentences ("Fruit, Colour, Count. Apple, Red, 3."), skipping
+    /// empty cells. The block index granularity is unchanged (one entry per
+    /// block), so progress-derived indices stay meaningful.
+    var speakableText: String {
+        switch self {
+        case .table(let rows, _):
+            return rows
+                .map { $0.filter { !$0.isEmpty }.joined(separator: ", ") }
+                .filter { !$0.isEmpty }
+                .map { $0 + "." }
+                .joined(separator: " ")
+        default:
+            return plainText
+        }
+    }
+
+    private enum RootKey: String, CodingKey { case Heading, Paragraph, Image, List, Table }
     private enum HeadingKeys: String, CodingKey { case level, text }
     private enum ParagraphKeys: String, CodingKey { case runs }
     private enum ImageKeys: String, CodingKey { case src, alt, caption }
     private enum ListKeys: String, CodingKey { case ordered, items }
+    /// `CoreClient.loadDocument` decodes with `.convertFromSnakeCase`
+    /// (which rewrites the incoming JSON key `header_row` to `headerRow`
+    /// *before* matching coding keys), while a plain `JSONDecoder` sees the
+    /// raw `header_row`. Accept both so the model decodes under either --
+    /// the other block types have no underscored keys, so this is the first
+    /// place the difference matters.
+    private enum TableKeys: String, CodingKey {
+        case rows
+        case headerRowSnake = "header_row"
+        case headerRowCamel = "headerRow"
+    }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: RootKey.self)
@@ -189,6 +238,13 @@ enum FlowBlockVM: Decodable {
             self = .list(
                 ordered: try inner.decode(Bool.self, forKey: .ordered),
                 items: try inner.decode([String].self, forKey: .items)
+            )
+        } else if container.contains(.Table) {
+            let inner = try container.nestedContainer(keyedBy: TableKeys.self, forKey: .Table)
+            self = .table(
+                rows: try inner.decode([[String]].self, forKey: .rows),
+                headerRow: try inner.decodeIfPresent(Bool.self, forKey: .headerRowSnake)
+                    ?? inner.decodeIfPresent(Bool.self, forKey: .headerRowCamel) ?? false
             )
         } else {
             throw DecodingError.dataCorrupted(

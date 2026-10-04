@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 
+use gist_model::normalize_cell_text;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
@@ -372,6 +373,18 @@ fn parse_document(
     let mut in_del = false; // inside w:del (skip deleted text)
     let mut nesting_depth = 0usize;
 
+    // Table state (M6/R3). Only the outermost `w:tbl` becomes a
+    // `Block::Table`; a table nested inside a cell is flattened into that
+    // cell's text (its paragraphs append to the enclosing cell).
+    let mut tbl_depth = 0usize;
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut table_header = false;
+    let mut current_row: Vec<String> = Vec::new();
+    let mut row_is_header = false;
+    let mut in_row = false;
+    let mut in_cell = false;
+    let mut cell_parts: Vec<String> = Vec::new();
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
@@ -390,7 +403,9 @@ fn parse_document(
                 match tag_local {
                     "p" => {
                         if in_para {
-                            flush_para(
+                            finish_paragraph(
+                                in_cell,
+                                &mut cell_parts,
                                 &mut blocks,
                                 &mut current_runs,
                                 &current_style_id,
@@ -419,6 +434,34 @@ fn parse_document(
                         in_del = true;
                         has_tracked_changes = true;
                     }
+                    "tbl" => {
+                        tbl_depth += 1;
+                        if tbl_depth == 1 {
+                            table_rows.clear();
+                            table_header = false;
+                            in_row = false;
+                            in_cell = false;
+                        }
+                    }
+                    "tr" if tbl_depth == 1 => {
+                        // Row cap, checked before the row is built (N9 order).
+                        if table_rows.len() >= limits.max_table_rows {
+                            return Err(ParseError::ResourceLimitExceeded {
+                                limit: format!("max_table_rows={}", limits.max_table_rows),
+                                attempted: table_rows.len() + 1,
+                            });
+                        }
+                        current_row.clear();
+                        row_is_header = false;
+                        in_row = true;
+                    }
+                    "tc" if tbl_depth == 1 && in_row => {
+                        cell_parts.clear();
+                        in_cell = true;
+                    }
+                    "tblHeader" if tbl_depth == 1 && in_row => {
+                        row_is_header = true;
+                    }
                     _ => {}
                 }
             }
@@ -429,6 +472,12 @@ fn parse_document(
                 let tag_local = tag.rsplit(':').next().unwrap_or(tag);
 
                 match tag_local {
+                    "tblHeader" if tbl_depth == 1 && in_row => {
+                        row_is_header = true;
+                    }
+                    "tc" if tbl_depth == 1 && in_row && !in_cell => {
+                        push_cell(&mut current_row, String::new(), limits)?;
+                    }
                     "pStyle" => {
                         for attr in e.attributes().flatten() {
                             let k = attr.key.as_ref();
@@ -493,7 +542,9 @@ fn parse_document(
 
                 match tag_local {
                     "p" => {
-                        flush_para(
+                        finish_paragraph(
+                            in_cell,
+                            &mut cell_parts,
                             &mut blocks,
                             &mut current_runs,
                             &current_style_id,
@@ -510,6 +561,41 @@ fn parse_document(
                     }
                     "del" => {
                         in_del = false;
+                    }
+                    "tc" if tbl_depth == 1 && in_cell => {
+                        let cell = normalize_cell_text(&cell_parts.join(" "));
+                        cell_parts.clear();
+                        in_cell = false;
+                        push_cell(&mut current_row, cell, limits)?;
+                    }
+                    "tr" if tbl_depth == 1 && in_row => {
+                        in_row = false;
+                        in_cell = false;
+                        if !current_row.is_empty() {
+                            if table_rows.is_empty() && row_is_header {
+                                table_header = true;
+                            }
+                            table_rows.push(std::mem::take(&mut current_row));
+                        }
+                    }
+                    "tbl" if tbl_depth > 0 => {
+                        tbl_depth -= 1;
+                        if tbl_depth == 0 {
+                            in_row = false;
+                            in_cell = false;
+                            // Drop a table with no text at all (layout-only
+                            // tables); keep ragged/empty-cell structure
+                            // otherwise so columns stay aligned.
+                            let any_text = table_rows.iter().flatten().any(|c| !c.is_empty());
+                            if any_text {
+                                blocks.push(gist_model::Block::Table {
+                                    rows: std::mem::take(&mut table_rows),
+                                    header_row: table_header,
+                                });
+                            }
+                            table_rows.clear();
+                            table_header = false;
+                        }
                     }
                     // w:b and w:i also appear as non-empty Start+End in some serialisers
                     "b" if in_run => {
@@ -553,7 +639,9 @@ fn parse_document(
 
     // Final flush
     if in_para {
-        flush_para(
+        finish_paragraph(
+            in_cell,
+            &mut cell_parts,
             &mut blocks,
             &mut current_runs,
             &current_style_id,
@@ -565,6 +653,48 @@ fn parse_document(
     }
 
     Ok((blocks, has_tracked_changes))
+}
+
+/// Append one cell to `row`, enforcing `max_table_cols` before the push.
+fn push_cell(
+    row: &mut Vec<String>,
+    cell: String,
+    limits: &gist_model::ParseLimits,
+) -> Result<(), ParseError> {
+    if row.len() >= limits.max_table_cols {
+        return Err(ParseError::ResourceLimitExceeded {
+            limit: format!("max_table_cols={}", limits.max_table_cols),
+            attempted: row.len() + 1,
+        });
+    }
+    row.push(cell);
+    Ok(())
+}
+
+/// End-of-paragraph handling: inside a table cell the paragraph's text is
+/// collected into the cell; otherwise it becomes a normal block.
+#[allow(clippy::too_many_arguments)]
+fn finish_paragraph(
+    in_cell: bool,
+    cell_parts: &mut Vec<String>,
+    blocks: &mut Vec<gist_model::Block>,
+    runs: &mut Vec<gist_model::TextRun>,
+    style_id: &Option<String>,
+    num_id: &Option<String>,
+    num_level: usize,
+    styles: &StyleMap,
+    numbering: &NumberingMap,
+) {
+    if in_cell {
+        let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+        let text = normalize_cell_text(&text);
+        if !text.is_empty() {
+            cell_parts.push(text);
+        }
+        runs.clear();
+    } else {
+        flush_para(blocks, runs, style_id, num_id, num_level, styles, numbering);
+    }
 }
 
 fn flush_para(
@@ -865,5 +995,156 @@ mod tests {
         assert_eq!(resolve_heading_level(&raw, "Heading1", 0), Some(1));
         assert_eq!(resolve_heading_level(&raw, "Normal", 0), None);
         assert_eq!(resolve_heading_level(&raw, "MyHeading", 0), Some(1));
+    }
+
+    // ── Tables (M6/R3) ───────────────────────────────────────────────────
+
+    /// Build a minimal DOCX whose `word/document.xml` body is `body`.
+    fn docx_with_body(body: &str) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>"#;
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+        );
+        let mut zip_bytes = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut zip_bytes);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default();
+            writer.start_file("word/styles.xml", options).unwrap();
+            writer.write_all(styles.as_bytes()).unwrap();
+            writer.start_file("word/document.xml", options).unwrap();
+            writer.write_all(document.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        zip_bytes
+    }
+
+    fn tc(text: &str) -> String {
+        format!(r#"<w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"#)
+    }
+
+    fn tables_of(doc: &gist_model::Document) -> Vec<(&Vec<Vec<String>>, bool)> {
+        doc.sections[0]
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                gist_model::Block::Table { rows, header_row } => Some((rows, *header_row)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_table_fixture_becomes_one_table_block_with_empty_cell_preserved() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/docx/with_table.docx"
+        ))
+        .unwrap();
+        let doc = parse(&bytes, "t", &ParseLimits::default()).unwrap();
+        let blocks = &doc.sections[0].blocks;
+        // paragraph, table, paragraph -- cell paragraphs are NOT separate blocks.
+        assert_eq!(blocks.len(), 3, "{blocks:?}");
+        let tables = tables_of(&doc);
+        assert_eq!(tables.len(), 1);
+        let (rows, header) = tables[0];
+        assert!(header, "first row carries w:tblHeader");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0], vec!["Fruit", "Colour", "Count"]);
+        // Empty cell kept as "" so columns stay aligned.
+        assert_eq!(rows[2], vec!["Banana", "", "12"]);
+        // Two paragraphs in one cell are joined with a space.
+        assert_eq!(rows[3][1], "Dark red almost black");
+    }
+
+    #[test]
+    fn test_nested_table_is_flattened_into_the_enclosing_cell() {
+        let nested = format!(
+            "<w:tbl><w:tr>{}{}</w:tr></w:tbl>",
+            tc("inner1"),
+            tc("inner2")
+        );
+        let body = format!(
+            "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>outer</w:t></w:r></w:p>{nested}</w:tc>{}</w:tr></w:tbl>",
+            tc("b")
+        );
+        let doc = parse(&docx_with_body(&body), "t", &ParseLimits::default()).unwrap();
+        let tables = tables_of(&doc);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].0, &vec![vec!["outer inner1 inner2", "b"]]);
+        assert!(!tables[0].1);
+    }
+
+    #[test]
+    fn test_layout_only_empty_table_is_dropped() {
+        let body = format!(
+            "<w:p><w:r><w:t>x</w:t></w:r></w:p><w:tbl><w:tr>{}</w:tr></w:tbl>",
+            "<w:tc><w:p/></w:tc>"
+        );
+        let doc = parse(&docx_with_body(&body), "t", &ParseLimits::default()).unwrap();
+        assert!(tables_of(&doc).is_empty());
+    }
+
+    #[test]
+    fn test_table_row_cap_is_enforced() {
+        let rows: String = (0..5)
+            .map(|i| format!("<w:tr>{}</w:tr>", tc(&i.to_string())))
+            .collect();
+        let limits = ParseLimits {
+            max_table_rows: 4,
+            ..ParseLimits::default()
+        };
+        let result = parse(
+            &docx_with_body(&format!("<w:tbl>{rows}</w:tbl>")),
+            "t",
+            &limits,
+        );
+        assert!(
+            matches!(result, Err(ParseError::ResourceLimitExceeded { .. })),
+            "{result:?}"
+        );
+        // Exactly at the cap is fine.
+        let rows: String = (0..4)
+            .map(|i| format!("<w:tr>{}</w:tr>", tc(&i.to_string())))
+            .collect();
+        assert!(parse(
+            &docx_with_body(&format!("<w:tbl>{rows}</w:tbl>")),
+            "t",
+            &limits
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_table_column_cap_is_enforced() {
+        let cells: String = (0..5).map(|i| tc(&i.to_string())).collect();
+        let limits = ParseLimits {
+            max_table_cols: 4,
+            ..ParseLimits::default()
+        };
+        let result = parse(
+            &docx_with_body(&format!("<w:tbl><w:tr>{cells}</w:tr></w:tbl>")),
+            "t",
+            &limits,
+        );
+        assert!(
+            matches!(result, Err(ParseError::ResourceLimitExceeded { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn test_malformed_table_markup_does_not_panic() {
+        // Cell outside a row, row outside a table, unbalanced end tags.
+        for body in [
+            "<w:tc><w:p><w:r><w:t>orphan</w:t></w:r></w:p></w:tc>",
+            "<w:tr><w:tc><w:p><w:r><w:t>orphan</w:t></w:r></w:p></w:tc></w:tr>",
+            "</w:tbl></w:tc></w:tr>",
+            "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>unclosed",
+        ] {
+            let _ = parse(&docx_with_body(body), "t", &ParseLimits::default());
+        }
     }
 }

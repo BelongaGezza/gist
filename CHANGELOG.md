@@ -23,8 +23,7 @@ pre-1.0 work, not a shipped release note.
 - Document import: plain text, ePub (with DRM detection via `META-INF/encryption.xml`, never
   circumvented), and DOCX (style resolution, tracked changes). Every parser enforces a shared
   `ParseLimits` guard (max bytes/pages/nesting depth/expanded-zip-bytes/zip-entry-count) before
-  allocating based on untrusted input. PDF import remains a one-line stub (pdfium build tooling
-  deferred).
+  allocating based on untrusted input. (PDF: see below.)
 - Image import with on-device OCR (`gist-imageprep` + an OCR callback interface implemented by
   each platform shell), with the same size/dimension caps as the other importers.
 - URL-paste import, HTTPS-only, with SSRF-safe address resolution (rejects loopback/private/
@@ -38,6 +37,17 @@ pre-1.0 work, not a shipped release note.
   driven rather than timer-driven, to avoid playback drift.
 - Full-text search (SQLite FTS5), library item removal (single/bulk), collections and tags CRUD,
   sort and tag-filter queries.
+- PDF import (macOS): text PDFs are extracted via a pinned, hash-verified build of pdfium
+  embedded in the app, with reading-order, heading and header/footer handling. Scanned
+  (image-only) PDFs are rendered page by page and routed through the existing on-device OCR
+  review screen. Password-protected PDFs are rejected with a clear message and never opened.
+  Layout heuristics are so far tuned on synthetic PDFs only.
+- Tables are now preserved as real tables (previously dropped in ePub and flattened to loose
+  paragraphs in DOCX and web imports) and shown as an accessible, theme-aware grid in the flow
+  view. Documents containing a table are stored with a newer internal format version, so an older
+  GIST build will report "needs a newer version" for them rather than failing obscurely.
+- Fixed: annotations placed after an image that had a caption but no alt text could anchor to
+  the wrong place.
 - Annotations (highlights, notes, bookmarks) with content-based re-anchoring so an annotation can
   survive a document being re-imported or re-parsed (ADR-003).
 - Opt-in, per-item encryption at rest (AES-256-GCM; key custody via the OS keychain on macOS,
@@ -103,7 +113,7 @@ rest and at-rest-integrity work described above. To report a new vulnerability, 
   tests, but a person driving every screen end-to-end — including VoiceOver navigation, actually
   hearing the read-aloud feature, and a real-display Dynamic Type/contrast check on macOS, plus
   the equivalent Windows Narrator/visual pass — has not happened yet.
-- **PDF import is not implemented** (a stub only; pdfium build tooling deferred).
+- **PDF import is new and lightly tested.** It works end to end (text PDFs and scanned PDFs via OCR), but layout heuristics are tuned on synthetic PDFs only (two-column and simple footnote-free layouts); rotated text, right-to-left scripts, footnotes and tables inside PDFs are not handled, and the signed/notarised build of the embedded pdfium library has not been verified.
 - **A paginated (page-turning) reading view is not implemented** — only the continuous flow view
   and RSVP exist today; a paginated view is an open question for a future release.
 - **IR/schema forward-compatibility policy is not yet implemented.** The persisted document

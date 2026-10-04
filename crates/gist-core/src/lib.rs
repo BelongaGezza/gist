@@ -435,6 +435,19 @@ pub enum ImportError {
     /// a generic import-failure toast, without string-matching error text.
     #[error("this document is protected by DRM and cannot be imported")]
     DrmProtected,
+    #[error("parse: {0}")]
+    Pdf(String),
+    /// Password-protected / permission-restricted PDF. Its own variant so
+    /// the UI can present it distinctly (never bypassed; ADR-004 posture).
+    #[error("this PDF is password-protected and cannot be imported")]
+    PdfEncrypted,
+    /// PDF with no extractable text (scanned / image-only). Its own variant
+    /// so the app can route it to the OCR pipeline instead of failing.
+    #[error("this PDF has no text layer (it appears to be a scan)")]
+    PdfNoTextLayer,
+    /// The pdfium library could not be loaded (not bundled / not found).
+    #[error("PDF support is unavailable in this build: {0}")]
+    PdfUnavailable(String),
 }
 
 // ── Import observer ─────────────────────────────────────────────────────────
@@ -983,7 +996,7 @@ impl Core {
         Ok(serde_json::to_string(&doc)?)
     }
 
-    /// Import any supported file (ePub, DOCX, TXT) into the library.
+    /// Import any supported file (ePub, DOCX, PDF, TXT) into the library.
     ///
     /// Type detection: magic bytes via `infer`, with file extension as fallback.
     /// All format parsers receive the same `ParseLimits`; limits are currently
@@ -1036,6 +1049,18 @@ impl Core {
         {
             gist_parse_docx::parse(&bytes, stem, &limits)
                 .map_err(|e| ImportError::Docx(e.to_string()))?
+        } else if mime == "application/pdf" || ext == "pdf" {
+            gist_parse_pdf::parse_pdf(&bytes, stem, &limits).map_err(|e| match e {
+                gist_parse_pdf::PdfError::Encrypted => ImportError::PdfEncrypted,
+                gist_parse_pdf::PdfError::NoTextLayer => ImportError::PdfNoTextLayer,
+                gist_parse_pdf::PdfError::LibraryUnavailable(why) => {
+                    ImportError::PdfUnavailable(why)
+                }
+                gist_parse_pdf::PdfError::ResourceLimitExceeded { limit, attempted } => {
+                    ImportError::ResourceLimitExceeded { limit, attempted }
+                }
+                other => ImportError::Pdf(other.to_string()),
+            })?
         } else if mime.starts_with("text/") || ext == "txt" || ext == "md" || ext == "text" {
             gist_parse_txt::parse(&bytes, stem, &limits)
                 .map_err(|e| ImportError::Txt(e.to_string()))?
@@ -1846,6 +1871,75 @@ mod tests {
 
         let no_match = core.search_items("nonexistentxyzzy", 10).unwrap();
         assert!(no_match.is_empty());
+    }
+
+    fn pdf_fixture(rel: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/pdf")
+            .join(rel)
+    }
+
+    /// PDF import end-to-end: parse, ADR-006 copy, ADR-013 checksum,
+    /// FTS search. Skips (with a notice) where pdfium isn't loadable, unless
+    /// `GIST_REQUIRE_PDFIUM=1`.
+    #[test]
+    fn import_pdf_round_trip_with_copy_on_import_and_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::init(&dir.path().join("t.db"), dir.path()).unwrap();
+        let src = pdf_fixture("plain_text.pdf");
+        match core.import_file(&src, &NullObserver) {
+            Err(ImportError::PdfUnavailable(why)) => {
+                assert_ne!(
+                    std::env::var("GIST_REQUIRE_PDFIUM").as_deref(),
+                    Ok("1"),
+                    "pdfium required but unavailable: {why}"
+                );
+                eprintln!("SKIP: pdfium unavailable ({why})");
+            }
+            Err(e) => panic!("unexpected import error: {e}"),
+            Ok(id) => {
+                let doc: gist_model::Document =
+                    serde_json::from_str(&core.get_document(&id).unwrap()).unwrap();
+                assert_eq!(doc.metadata.source_type, "pdf");
+                let copy = doc.metadata.source_copy_ref.expect("ADR-006 copy");
+                assert!(std::path::Path::new(&copy).exists());
+                assert!(copy.ends_with(".pdf"));
+                assert!(std::path::Path::new(&format!("{copy}.blake3")).exists());
+                assert!(core
+                    .search_items("rhythm", 10)
+                    .unwrap()
+                    .iter()
+                    .any(|i| i.id == id));
+            }
+        }
+    }
+
+    #[test]
+    fn import_pdf_typed_errors_for_encrypted_and_image_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::init(&dir.path().join("t.db"), dir.path()).unwrap();
+        for (rel, want_encrypted) in [
+            ("adversarial/encrypted_password.pdf", true),
+            ("image_only.pdf", false),
+        ] {
+            match core.import_file(&pdf_fixture(rel), &NullObserver) {
+                Err(ImportError::PdfUnavailable(_)) => {
+                    assert_ne!(std::env::var("GIST_REQUIRE_PDFIUM").as_deref(), Ok("1"));
+                }
+                Err(ImportError::PdfEncrypted) => assert!(want_encrypted, "{rel}"),
+                Err(ImportError::PdfNoTextLayer) => assert!(!want_encrypted, "{rel}"),
+                other => panic!("{rel}: unexpected {other:?}"),
+            }
+        }
+        // Nothing was written for refused PDFs.
+        assert!(core.list_items(10, 0).unwrap().is_empty());
+        assert!(
+            !dir.path().join("originals").exists()
+                || std::fs::read_dir(dir.path().join("originals"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
     }
 
     /// End-to-end check that `Core::init_encrypted` (ADR-011) actually wires
@@ -4321,5 +4415,117 @@ mod tests {
             .status;
         assert_eq!(clean_status, IntegrityStatus::Pass);
         assert_eq!(corrupted_status, IntegrityStatus::Failed);
+    }
+
+    // ── Tables x annotation anchoring (M6/R3) ────────────────────────────
+
+    /// A section holding paragraph, table, paragraph -- the exact fixture
+    /// `FlowViewTests.testTableSectionTextMatchesRustGolden` mirrors on the
+    /// Swift side. If either side's separators change, both tests must be
+    /// updated together (ADR-003 addendum): they pin the SAME literal.
+    fn section_with_table() -> Section {
+        Section {
+            id: "s0".to_string(),
+            heading: None,
+            blocks: vec![
+                Block::Paragraph {
+                    runs: vec![TextRun::plain("Intro text.")],
+                },
+                Block::Table {
+                    rows: vec![
+                        vec!["Fruit".to_string(), "Colour".to_string()],
+                        vec!["Apple".to_string(), String::new()],
+                    ],
+                    header_row: true,
+                },
+                Block::Paragraph {
+                    runs: vec![TextRun::plain("Outro text after.")],
+                },
+            ],
+        }
+    }
+
+    /// Golden strings shared with Swift (`FlowViewTests`): blocks joined by
+    /// "\n\n", table cells by "\t", table rows by "\n".
+    const TABLE_SECTION_TEXT_GOLDEN: &str =
+        "Intro text.\n\nFruit\tColour\nApple\t\n\nOutro text after.";
+    const TABLE_BLOCK_JSON_GOLDEN: &str =
+        r#"{"Table":{"rows":[["Fruit","Colour"],["Apple",""]],"header_row":true}}"#;
+
+    #[test]
+    fn section_text_with_a_table_matches_the_cross_language_golden() {
+        let section = section_with_table();
+        assert_eq!(anchoring::section_text(&section), TABLE_SECTION_TEXT_GOLDEN);
+        // And the JSON Swift decodes (`FlowBlockVM`) is exactly this shape.
+        assert_eq!(
+            serde_json::to_string(&section.blocks[1]).unwrap(),
+            TABLE_BLOCK_JSON_GOLDEN
+        );
+    }
+
+    #[test]
+    fn annotations_inside_and_after_a_table_stay_valid_and_survive_a_shift() {
+        let section = section_with_table();
+        let doc = Document::new(Metadata::minimal("table anchors"), vec![section.clone()]);
+        let text = anchoring::section_text(&section);
+
+        // One anchor inside a cell ("Colour"), one in the paragraph after.
+        for quote in ["Colour", "Outro text"] {
+            let start = text.find(quote).unwrap();
+            let annotation = highlight_annotation("s0", start, quote.len(), &text);
+            let (status, _) = anchoring::reanchor(&doc, &annotation);
+            assert_eq!(status, AnchorStatus::Valid, "quote {quote:?}");
+        }
+
+        // Insert text BEFORE the table: both anchors must re-anchor to the
+        // moved positions, not orphan (the table's separators must not
+        // confuse the quote search).
+        let mut shifted = section.clone();
+        shifted.blocks.insert(
+            0,
+            Block::Paragraph {
+                runs: vec![TextRun::plain("A brand new opening paragraph.")],
+            },
+        );
+        let shifted_doc = Document::new(Metadata::minimal("shifted"), vec![shifted.clone()]);
+        let shifted_text = anchoring::section_text(&shifted);
+        for quote in ["Colour", "Outro text"] {
+            let start = text.find(quote).unwrap();
+            let annotation = highlight_annotation("s0", start, quote.len(), &text);
+            let (status, updated) = anchoring::reanchor(&shifted_doc, &annotation);
+            assert!(
+                matches!(status, AnchorStatus::Reanchored { .. }),
+                "quote {quote:?}: {status:?}"
+            );
+            assert_eq!(updated.start, shifted_text.find(quote).unwrap());
+        }
+    }
+
+    /// End to end: a DOCX containing a table imports with the table as one
+    /// structured `Block::Table` (not N loose paragraphs), the JSON handed to
+    /// the UI carries it, and FTS finds cell text.
+    #[test]
+    fn import_docx_with_table_persists_structure_and_cell_text_is_searchable() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&dir.path().join("t.db"), &storage).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/docx/with_table.docx");
+        let id = core.import_file(&fixture, &NullObserver).unwrap();
+
+        let doc: Document = serde_json::from_str(&core.get_document(&id).unwrap()).unwrap();
+        let tables: Vec<_> = doc.sections[0]
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Table { .. }))
+            .collect();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(
+            tables[0].plain_text(),
+            "Fruit\tColour\tCount\nApple\tRed\t3\nBanana\t\t12\nCherry\tDark red almost black\t40"
+        );
+        let hits = core.search_items("Banana", 10).unwrap();
+        assert!(hits.iter().any(|item| item.id == id), "{hits:?}");
     }
 }

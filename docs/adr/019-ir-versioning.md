@@ -107,3 +107,33 @@ i.e. a versioned enum of decoders (`IrPayload::V1(DocumentV1)` / `IrPayload::V2(
 **Easier:** the first real breaking IR change has a documented mechanism to slot into (§4) instead of needing to invent versioning under time pressure. A corrupted-version scenario (a bug that writes a garbage `ir_version`, or a user's disk somehow getting a blob from a future GIST version via sync/backup) now fails clearly instead of either silently misreading or panicking.
 
 **Harder / to watch:** `gist-store` is now the *only* place that knows the on-disk IR format differs from `gist_model::Document`'s in-memory shape — any future code that reads `<id>.json` directly (bypassing `Store::get_item`) needs to know to unwrap the envelope, or reuse `deserialize_ir_blob`. This is already true of every existing test/tool that pokes at these files directly (several exist in `gist-core`'s and `gist-store`'s own test suites, all updated or already-legacy-compatible as noted above) — a future contributor adding a new such call site should reuse the helper rather than re-deriving raw `serde_json::from_slice`. `CURRENT_IR_VERSION` also becomes a real piece of shared state to remember to bump — its own doc comment states the bump criterion (§3's "misinterpret vs. merely not see" test) to reduce the chance of either bumping too eagerly (defeating additive compatibility's whole point) or forgetting to bump for a genuinely breaking change.
+
+## Addendum: `Block::Table` and the conditional version bump (2026-10-03, M6 R3)
+
+§3 above flagged — without resolving — that a new `Block` *variant* is not additive the way a new struct field is. `Block::Table { rows, header_row }` is the first such variant, so this is the first real exercise of that caveat. Evidence first, decision second.
+
+### Evidence (tests in `crates/gist-store/src/lib.rs`)
+
+`mod pre_table` in the tests reproduces `Block`/`Section`/`Document` exactly as a pre-table binary knew them (four `Block` variants). Playing that "old binary":
+
+- **Without any version bump** (`without_a_version_bump_an_old_binary_fails_with_an_opaque_json_error`): a document blob containing a table, stamped `ir_version` 1, fails to decode with serde's "unknown variant Table" error, surfaced as `StoreError::Serde`. The *whole document* is unreadable (not just the one block), and the user sees a generic JSON error instead of an "upgrade the app" signal. This confirms the caveat concretely.
+- **`<id>.tokens.json` is unaffected** (`tokens_blob_of_a_table_document_is_v1_and_readable_by_old_binaries`): the token stream carries no `Block`, so an old binary can still run RSVP on a table document; only the flow view / annotation re-anchoring / anything reading `<id>.json` breaks.
+
+### Decision: a *conditional* bump — yes, bump, but only for blobs that need it
+
+`CURRENT_IR_VERSION` (the highest version this binary can **read**) becomes **2**. The **writer** stamps each blob with the *lowest* version able to represent it (`required_ir_version`):
+
+| Blob | Written as |
+|---|---|
+| `<id>.json` of a document with **no** `Block::Table` | `ir_version: 1` — byte-compatible with every earlier binary, exactly as before |
+| `<id>.json` of a document containing a `Block::Table` | `ir_version: 2` |
+| `<id>.tokens.json` (always) | `ir_version: 1` (tokens contain no `Block`) |
+| any legacy bare/unversioned blob | still read as implicitly v1 (unchanged) |
+
+Consequences, each covered by a test: an old binary reading a table document now gets the **typed** `StoreError::IrVersionTooNew { found: 2, expected: 1 }` (`with_the_conditional_bump_an_old_binary_gets_a_typed_version_error`), the designed "upgrade the app" path, instead of the opaque JSON error; documents without tables are unaffected in both directions (`documents_without_tables_stay_v1_and_old_binaries_still_read_them`) so the bump has zero blast radius on existing content; and every blob written by any earlier binary — bare/unversioned or v1 — still loads (`legacy_and_v1_blobs_still_load_with_table_aware_types`, plus the pre-existing `pre_adr019_*` tests). `table_document_round_trips_and_cell_text_is_searchable` confirms the v2 blob round-trips and that FTS finds text that exists only in a table cell.
+
+**Why conditional rather than a flat bump to 2:** a flat bump would lock every older binary out of every newly written document, including the vast majority with no table, for no benefit. The ADR's §3 criterion ("misinterpret vs. merely not see") is, for an enum variant, "an older binary fails outright" — so the version must rise for payloads containing it, but only for those.
+
+**Policy going forward (supersedes §3's one-line caveat):** adding a variant to a serialized enum in the IR graph (`Block`, `TokenKind`, `AnnotationKind`) requires (1) a new `IR_VERSION_*` constant, (2) a matching check in `required_ir_version` so only payloads that actually contain the variant are stamped with it, and (3) a `pre_*`-style old-binary test like the above. Adding a struct field with `#[serde(default)]` still needs none of this. The `#[serde(other)]` fallback alternative (read the document with the unknown block dropped) was again not adopted: silently dropping content a user imported is worse than refusing with a clear message.
+
+**Not changed:** `SCHEMA_VERSION` (no SQLite change), the migration mechanism in §4 (still unbuilt — v1→v2 needs no migration, since v1 is a strict subset of v2), `gist-model`'s `wasm32` posture (the model change is a plain enum variant; note `uuid`'s v7 RNG feature, not this change, is what currently stops `cargo check -p gist-model --target wasm32-unknown-unknown` from compiling).
