@@ -913,12 +913,10 @@ impl FfiRsvpSession {
                 // non-empty stream. Reported rather than panicked.
                 return Ok(None);
             };
-            // Elapsed time at which `index` stops being current: the sum of
-            // every token's duration from the cursor through `index`.
-            let mut next_boundary_ms = 0u64;
-            for i in session.cursor..=index {
-                next_boundary_ms = next_boundary_ms.saturating_add(session.token_duration_ms(i));
-            }
+            // Asked of the engine rather than summed here: the engine has it
+            // memoised, so this stays O(log k) instead of walking every
+            // token since the cursor on every tick.
+            let next_boundary_ms = session.elapsed_at_token_end(index);
             Ok(Some(FfiRsvpFrame {
                 index: ffi_u64(index),
                 text: token.text.clone(),
