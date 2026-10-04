@@ -198,7 +198,7 @@ Goals: answer R1, make the environment reproducible.
 ### W5 — Flow reader (3 weeks) — largest phase
 - `get_document_json` → models (custom serde-enum converter tested against real output from fixtures); virtualised block list; `RichTextBlock` runs; images; lists.
 - Typography menu (size/font/line spacing; resolve the "Rounded" question), TOC flyout with indentation, in-document find with highlighting and F3, progress bar + persisted position with restore-before-first-render, keyboard navigation (native paging).
-- Decide **Q4 (Windows OCR: `Windows.Media.Ocr` vs Tesseract)** here as a design note only; implementation stays M3 scope on all platforms (`import_image_with_ocr` is still `todo!()`).
+- Decide **Q4 (Windows OCR: `Windows.Media.Ocr` vs Tesseract)** here as a design note only; implementation stays M3 scope on all platforms (`import_image_with_ocr` is still `todo!()`). *[2026-10-04 correction: stale. `import_image_with_ocr` has been implemented in Rust since M3 (2026-09-26, closing A7); only a Windows `OcrEngine` implementation and UI are missing. Q4 is now a Proposed design note, `docs/adr/020-windows-ocr-engine.md`: `Windows.Media.Ocr`.]*
 - **Exit:** spec §7.2 complete; tests for TOC/find/store/decoder green; large-document (≥ 100k words fixture) scroll stays smooth with bounded memory (measure and record; target UI thread never blocked > 50 ms).
 
 ### W6 — Hardening, accessibility, packaging (2–3 weeks)
@@ -249,8 +249,8 @@ Goals: answer R1, make the environment reproducible.
 | Q | Decide by |
 |---|---|
 | Distribution channel: Microsoft Store vs signed sideload MSIX (affects signing cost and update story) | W6 |
-| "Rounded" font option on Windows (drop vs Trebuchet MS mapping) | W5 |
-| Windows OCR engine (`Windows.Media.Ocr` vs Tesseract) — spec Q4/Q8 | W5 (design note), implement M3 |
+| "Rounded" font option on Windows (drop vs Trebuchet MS mapping) | W5 — decided 2026-10-04: not offered on Windows, see `docs/windows-ui-spec.md` §7.2 |
+| Windows OCR engine (`Windows.Media.Ocr` vs Tesseract) — spec Q4/Q8 | W5 design note written 2026-10-04 (`docs/adr/020-windows-ocr-engine.md`, Proposed); Rust side already implemented, Windows engine/UI still to build |
 | ~~.NET 8 vs .NET 10 LTS~~ resolved: .NET 10 | done W0 |
 | ~~ARM64 as a v1.0 requirement or fast-follow~~ resolved: **v1.0 requirement** (maintainer, 2026-09-20). Open sub-items: runtime-test hardware/runner by end of W1; MSIX per-arch vs bundle (ADR-017) | decided; sub-items W1 |
 | Mirror the pinned bindgen fork under a project-controlled repo (Q6) | Day 1 of W1 |
