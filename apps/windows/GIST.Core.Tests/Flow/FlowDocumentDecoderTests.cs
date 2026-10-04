@@ -286,6 +286,41 @@ public sealed class FlowDocumentDecoderTests
     }
 
     [Fact]
+    public void More_sections_than_the_cap_is_a_typed_error_not_an_allocation()
+    {
+        var json = "{\"sections\":[" + string.Join(',', Enumerable.Repeat("{}", FlowDocumentDecoder.MaxSections + 1)) + "]}";
+
+        var result = FlowDocumentDecoder.Decode(json);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(FlowDecodeError.TooManyItems, result.Error);
+    }
+
+    [Fact]
+    public void More_blocks_than_the_cap_across_sections_is_a_typed_error()
+    {
+        // Two sections whose block arrays together pass MaxTotalBlocks; the entries are never decoded.
+        var half = string.Join(',', Enumerable.Repeat("0", (FlowDocumentDecoder.MaxTotalBlocks / 2) + 1));
+        var json = "{\"sections\":[{\"id\":\"a\",\"blocks\":[" + half + "]},{\"id\":\"b\",\"blocks\":[" + half + "]}]}";
+
+        var result = FlowDocumentDecoder.Decode(json);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(FlowDecodeError.TooManyItems, result.Error);
+    }
+
+    [Fact]
+    public void A_document_exactly_at_the_section_cap_still_decodes()
+    {
+        var json = "{\"sections\":[" + string.Join(',', Enumerable.Repeat("{}", FlowDocumentDecoder.MaxSections)) + "]}";
+
+        var result = FlowDocumentDecoder.Decode(json);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(FlowDocumentDecoder.MaxSections, result.Document!.Sections.Count);
+    }
+
+    [Fact]
     public void A_document_with_no_blocks_is_valid_and_empty()
     {
         var result = FlowDocumentDecoder.Decode("{\"sections\":[]}");
