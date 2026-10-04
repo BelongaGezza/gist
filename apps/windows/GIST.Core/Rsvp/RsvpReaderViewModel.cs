@@ -37,6 +37,7 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
     private readonly IRsvpClock _clock;
     private readonly IRsvpTimer _timer;
     private readonly uint _initialWpm;
+    private readonly Action<uint>? _persistWpm;
 
     private RsvpPlaybackController? _controller;
     private RsvpLoadState _loadState = RsvpLoadState.Loading;
@@ -48,6 +49,7 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
     /// <param name="itemId">The library item being read.</param>
     /// <param name="title">Shown in the header and used as the screen's accessible name.</param>
     /// <param name="openEngine">Opens the pacing session at the given WPM; null on failure.</param>
+    /// <param name="persistWpm">Remembers a changed WPM for the next open; best-effort, may be null.</param>
     /// <param name="saveProgress">Persists a token index (production: <c>CoreClient.SaveProgressAsync</c>).</param>
     public RsvpReaderViewModel(
         string itemId,
@@ -56,7 +58,8 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
         Func<ulong, Task> saveProgress,
         IRsvpClock clock,
         IRsvpTimer timer,
-        uint initialWpm = RsvpWpm.Default)
+        uint initialWpm = RsvpWpm.Default,
+        Action<uint>? persistWpm = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(itemId);
         ArgumentNullException.ThrowIfNull(openEngine);
@@ -70,6 +73,7 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
         _clock = clock;
         _timer = timer;
         _initialWpm = initialWpm;
+        _persistWpm = persistWpm;
     }
 
     public string ItemId { get; }
@@ -131,14 +135,35 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
             return;
         }
 
-        if (engine.TokenCount == 0)
+        // Both the token-count read and the controller constructor call into the engine (FFI), so a
+        // fault here must fail the load, not escape into the page's async-void handler (F50).
+        try
         {
-            engine.Dispose();
-            LoadState = RsvpLoadState.Empty;
+            if (engine.TokenCount == 0)
+            {
+                engine.Dispose();
+                LoadState = RsvpLoadState.Empty;
+                return;
+            }
+
+            _controller = new RsvpPlaybackController(engine, _clock, _timer);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            _controller = null;
+            try
+            {
+                engine.Dispose();
+            }
+            catch (Exception)
+            {
+                // Already failing; nothing further to do.
+            }
+
+            LoadState = RsvpLoadState.Failed;
             return;
         }
 
-        _controller = new RsvpPlaybackController(engine, _clock, _timer);
         _controller.Changed += OnControllerChanged;
         LoadState = RsvpLoadState.Ready;
         RaiseAllDisplayChanged();
@@ -164,7 +189,16 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
     public void SetWpm(double wpm) => Guarded(c =>
     {
         var target = RsvpWpm.Clamp(wpm);
-        if (target != c.Wpm) c.SetWpm(target);
+        if (target == c.Wpm) return;
+        c.SetWpm(target);
+        try
+        {
+            _persistWpm?.Invoke(target);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            // Remembering the speed is a convenience; never interrupt reading for it.
+        }
     });
 
     /// <summary>
@@ -173,15 +207,21 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
     /// </summary>
     public async Task LeaveAsync()
     {
-        if (_controller is { } c)
+        try
         {
-            // Unsubscribe first so the pause below does not also queue its own (fire-and-forget) save.
-            c.Changed -= OnControllerChanged;
-            c.Pause();
-            await SaveAsync(force: true).ConfigureAwait(true);
+            if (_controller is { } c)
+            {
+                // Unsubscribe first so the pause below does not also queue its own (fire-and-forget) save.
+                c.Changed -= OnControllerChanged;
+                c.Pause();
+                await SaveAsync(force: true).ConfigureAwait(true);
+            }
         }
-
-        Dispose();
+        finally
+        {
+            // Always release the native session handle, even when Pause/Save threw (F50).
+            Dispose();
+        }
     }
 
     public void Dispose()

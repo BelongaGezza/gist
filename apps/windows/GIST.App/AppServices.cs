@@ -1,6 +1,7 @@
 using Gist.App.Theming;
 using Gist.Core.Client;
 using Gist.Core.Keys;
+using Gist.Core.Rsvp;
 using Gist.Core.Storage;
 using Gist.Core.Theming;
 using Microsoft.UI.Dispatching;
@@ -33,6 +34,8 @@ public static class AppServices
     /// <summary>W3 (spec §3.1/§7.3). Persists to <c>&lt;Root&gt;/theme-selection.txt</c>, not the real profile in dev/test.</summary>
     public static ThemeManager Theme { get; private set; } = null!;
 
+    public static FileRsvpSettingsStore RsvpSettings { get; private set; } = null!;
+
     /// <summary>Completes when the startup initialise + first list load has finished (never faults).</summary>
     public static Task StartupTask { get; private set; } = Task.CompletedTask;
 
@@ -57,6 +60,8 @@ public static class AppServices
         Theme = new ThemeManager(
             new FileThemeSettingsStore(Path.Combine(Paths.Root, "theme-selection.txt")),
             new UiSettingsThemeSystemProvider(queue));
+
+        RsvpSettings = new FileRsvpSettingsStore(Path.Combine(Paths.Root, "rsvp-settings.txt"));
 
         IsInitialized = true;
 

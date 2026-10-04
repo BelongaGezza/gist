@@ -72,7 +72,9 @@ public sealed partial class RsvpPage : Page
             wpm => core.OpenRsvpEngineAsync(itemId, wpm),
             index => core.SaveProgressAsync(itemId, index),
             new StopwatchRsvpClock(),
-            new DispatcherRsvpTimer(DispatcherQueue));
+            new DispatcherRsvpTimer(DispatcherQueue),
+            AppServices.RsvpSettings.LoadWpm() ?? RsvpWpm.Default,
+            AppServices.RsvpSettings.SaveWpm);
         _vm.PropertyChanged += OnVmChanged;
 
         if (!_themeHooked)
@@ -124,7 +126,23 @@ public sealed partial class RsvpPage : Page
 
     // ── View state ─────────────────────────────────────────────────────────
 
-    private void OnVmChanged(object? sender, PropertyChangedEventArgs e) => UpdateView();
+    private bool _updateQueued;
+
+    // The view model raises one PropertyChanged per display property per tick; UpdateView reads
+    // them all, so run it once per dispatcher turn instead of once per event (F49).
+    private void OnVmChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_updateQueued) return;
+        _updateQueued = true;
+        if (!DispatcherQueue.TryEnqueue(() =>
+            {
+                _updateQueued = false;
+                UpdateView();
+            }))
+        {
+            _updateQueued = false;
+        }
+    }
 
     private void UpdateView()
     {
@@ -148,9 +166,9 @@ public sealed partial class RsvpPage : Page
         _syncing = true;
         try
         {
-            WordText.Text = vm.Word;
-            ProgressText.Text = vm.ProgressText;
-            WpmLabel.Text = vm.WpmLabel;
+            if (WordText.Text != vm.Word) WordText.Text = vm.Word;
+            if (ProgressText.Text != vm.ProgressText) ProgressText.Text = vm.ProgressText;
+            if (WpmLabel.Text != vm.WpmLabel) WpmLabel.Text = vm.WpmLabel;
 
             var label = vm.PlayPauseLabel;
             PlayPauseText.Text = label;

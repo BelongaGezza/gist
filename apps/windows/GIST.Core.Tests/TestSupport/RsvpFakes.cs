@@ -82,7 +82,12 @@ public sealed class ScriptedRsvpEngine : IRsvpEngine
 
     public bool Disposed { get; private set; }
 
-    public ulong TokenCount => (ulong)_tokens.Count;
+    /// <summary>Test seam: make the named engine call fault like a native error would.</summary>
+    public bool ThrowOnTokenCount { get; set; }
+
+    public bool ThrowOnPause { get; set; }
+
+    public ulong TokenCount => ThrowOnTokenCount ? throw new InvalidOperationException("engine fault") : (ulong)_tokens.Count;
 
     public ulong Cursor => _cursor;
 
@@ -123,6 +128,7 @@ public sealed class ScriptedRsvpEngine : IRsvpEngine
     public void Pause(ulong elapsedMs)
     {
         PauseCalls.Add(elapsedMs);
+        if (ThrowOnPause) throw new InvalidOperationException("engine fault");
         if (!_playing) return;
         _cursor = FrameAtElapsed(elapsedMs)!.Index;
         _playing = false;
