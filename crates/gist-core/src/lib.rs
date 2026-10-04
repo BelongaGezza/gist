@@ -3254,7 +3254,9 @@ mod tests {
         let doc_path = storage.join(format!("{id}.json"));
         let handle = open_without_delete_sharing(&doc_path);
 
-        let outcome = core.remove_items_detailed(&[id.clone()], true).unwrap();
+        let outcome = core
+            .remove_items_detailed(std::slice::from_ref(&id), true)
+            .unwrap();
 
         // The removal itself happened, in full.
         assert_eq!(outcome.removed_ids, vec![id.clone()]);
@@ -3535,7 +3537,9 @@ mod tests {
         let copy_path = the_one_sandboxed_copy(&storage);
         let handle = open_without_delete_sharing(&copy_path);
 
-        let outcome = core.remove_items_detailed(&[id.clone()], true).unwrap();
+        let outcome = core
+            .remove_items_detailed(std::slice::from_ref(&id), true)
+            .unwrap();
 
         assert_eq!(outcome.removed_ids, vec![id]);
         assert_eq!(
