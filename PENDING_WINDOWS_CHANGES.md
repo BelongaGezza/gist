@@ -52,3 +52,10 @@ This entry is **not** deleted, because its ask was a *visual* confirmation and p
 
 **Delete this entry** once 1 is glanced at and 2 is either done or moved to the packaging milestone.
 
+
+## Pending Windows Change — 2026-10-04
+**File:** `apps/windows/GIST.Core/Client/CoreClient.cs` (`MapGistException`), `CoreError.cs` (`CoreErrorKind`), and whatever dialog code presents import failures (`LibraryViewModel*`, `GIST.App/Dialogs/LibraryDialogHost.cs`)
+**Change required:** `GistError` (gist-ffi) gained seven new flat variants for resource-limit rejections: `ResourceLimitTooLarge`, `ResourceLimitTooManyPages`, `ResourceLimitTooManyEntries`, `ResourceLimitTooDeeplyNested`, `ResourceLimitContentTooLarge`, `ResourceLimitTableTooLarge`, `ResourceLimitOther`. Nothing existing was renamed or removed. After regenerating the C# bindings (`tools/gen-bindings-cs.sh`) each appears as a `GistException.ResourceLimit*` subclass. Today they fall through `MapGistException`'s `_ => new CoreError(CoreErrorKind.Core, e.Message)` arm, which already shows a fixed, path-free, honest sentence (the Rust `#[error]` text, e.g. "this document has too many pages for GIST's import limits"), so **no change is required for correctness**. Optional: add a `CoreErrorKind.ResourceLimit` and match the seven exception types (never `e.Message`) to give the import-failure dialog a dedicated title, mirroring macOS's "Can't Import This File" alert.
+**Reason:** macOS now matches these cases by type to show a specific alert instead of the generic error; Windows should not regress to a message-text match if it adds the same.
+**Related commit/PR:** M7 role R3 (typed resource-limit error).
+**Action:** On a Windows session: regenerate bindings (`tools/gen-bindings-cs.sh`), build, run `GIST.Core.Tests`; confirm an over-limit import (e.g. a `.txt` larger than 256 MiB, or a zip with more than 10 000 entries renamed `.docx`) shows the new text rather than a raw Rust message; delete this entry once verified.
