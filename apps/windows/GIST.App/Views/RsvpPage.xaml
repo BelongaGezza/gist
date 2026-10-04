@@ -1,0 +1,121 @@
+<Page x:Class="Gist.App.Views.RsvpPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      PreviewKeyDown="OnPreviewKeyDown">
+    <Page.KeyboardAccelerators>
+        <!-- Spec 9: Alt+Left = back. Spec 7.1 (stretch): Left/Right = one word, Ctrl+Left/Right = five. -->
+        <KeyboardAccelerator Key="Left" Modifiers="Menu" Invoked="OnBackAccelerator" />
+        <KeyboardAccelerator Key="Left" Invoked="OnStepBack" />
+        <KeyboardAccelerator Key="Right" Invoked="OnStepForward" />
+        <KeyboardAccelerator Key="Left" Modifiers="Control" Invoked="OnJumpBack" />
+        <KeyboardAccelerator Key="Right" Modifiers="Control" Invoked="OnJumpForward" />
+    </Page.KeyboardAccelerators>
+
+    <!-- Solid theme background (spec 7.1). Brushes are applied from code (ApplyTheme) because the theme
+         engine replaces the Gist* brush objects at runtime and a StaticResource would go stale. -->
+    <Grid x:Name="RootGrid" AutomationProperties.AutomationId="RsvpPage_Root"
+          AutomationProperties.Name="RSVP reader" AutomationProperties.AccessibilityView="Content">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Header: Back, title, "Read current word" accessible action. -->
+        <Grid Grid.Row="0" Margin="16,12,16,0" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Button x:Name="BackButton" Grid.Column="0" Click="OnBackClick" TabIndex="0"
+                    AutomationProperties.AutomationId="RsvpPage_BackButton"
+                    AutomationProperties.Name="Back to library"
+                    ToolTipService.ToolTip="Back (Alt+Left)">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE72B;" FontSize="16" />
+                    <TextBlock Text="Back" />
+                </StackPanel>
+            </Button>
+            <TextBlock x:Name="TitleText" Grid.Column="1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                       AutomationProperties.AutomationId="RsvpPage_Title" />
+            <Button x:Name="ReadWordButton" Grid.Column="2" Click="OnReadWord" TabIndex="9"
+                    AutomationProperties.AutomationId="RsvpPage_ReadWordButton"
+                    AutomationProperties.Name="Read current word"
+                    ToolTipService.ToolTip="Read current word">
+                <FontIcon Glyph="&#xE767;" FontSize="16" />
+            </Button>
+        </Grid>
+
+        <!-- Loading state (spec 7.1 item 5). -->
+        <StackPanel x:Name="LoadingPanel" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Spacing="12" AutomationProperties.AutomationId="RsvpPage_Loading">
+            <ProgressRing IsActive="True" Width="48" Height="48" AutomationProperties.Name="Loading" />
+            <TextBlock x:Name="LoadingText" Text="Loading…" HorizontalAlignment="Center" />
+        </StackPanel>
+
+        <!-- Empty / failed: fixed text only, never raw error text. -->
+        <StackPanel x:Name="MessagePanel" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Spacing="12" Visibility="Collapsed" AutomationProperties.AutomationId="RsvpPage_Message">
+            <TextBlock x:Name="MessageText" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="480"
+                       AutomationProperties.AutomationId="RsvpPage_MessageText" />
+        </StackPanel>
+
+        <!-- The reader (spec 7.1): centred column. -->
+        <Grid x:Name="ReaderPanel" Grid.Row="1" Visibility="Collapsed" Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- 1. Word: 48 epx Georgia, centred, one line, no wrap/trim. Not live-announced (spec 8). -->
+            <TextBlock x:Name="WordText" Grid.Row="0" HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                       Margin="0,0,0,24" FontFamily="Georgia" FontSize="48" TextWrapping="NoWrap"
+                       TextTrimming="None" TextAlignment="Center"
+                       AutomationProperties.AutomationId="RsvpPage_Word"
+                       AutomationProperties.LiveSetting="Off" />
+
+            <StackPanel Grid.Row="1" HorizontalAlignment="Center" Spacing="16" MinWidth="360">
+                <!-- 2. Progress: n / total, caption, tabular figures. -->
+                <TextBlock x:Name="ProgressText" HorizontalAlignment="Center"
+                           Style="{StaticResource CaptionTextBlockStyle}" Typography.NumeralAlignment="Tabular"
+                           AutomationProperties.AutomationId="RsvpPage_Progress" />
+
+                <!-- Scrubber (stretch). -->
+                <Slider x:Name="Scrubber" Minimum="0" Maximum="1" StepFrequency="1" SmallChange="1" LargeChange="10"
+                        IsThumbToolTipEnabled="False" TabIndex="2"
+                        AutomationProperties.AutomationId="RsvpPage_Scrubber"
+                        AutomationProperties.Name="Position in text"
+                        ValueChanged="OnScrubberChanged" />
+
+                <!-- 3. WPM: label, slider 100-1000 step 10 (width ~200), plus NumberBox. -->
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="16">
+                    <TextBlock x:Name="WpmLabel" VerticalAlignment="Center" MinWidth="80"
+                               Typography.NumeralAlignment="Tabular"
+                               AutomationProperties.AutomationId="RsvpPage_WpmLabel" />
+                    <Slider x:Name="WpmSlider" Width="200" Minimum="100" Maximum="1000" StepFrequency="10"
+                            SmallChange="10" LargeChange="50" TabIndex="3"
+                            AutomationProperties.AutomationId="RsvpPage_WpmSlider"
+                            AutomationProperties.Name="Words per minute"
+                            ValueChanged="OnWpmSliderChanged" />
+                    <NumberBox x:Name="WpmBox" Width="120" Minimum="100" Maximum="1000" SmallChange="10"
+                               LargeChange="50" SpinButtonPlacementMode="Inline" TabIndex="4"
+                               ValidationMode="InvalidInputOverwritten"
+                               AutomationProperties.AutomationId="RsvpPage_WpmBox"
+                               AutomationProperties.Name="Words per minute, number"
+                               ValueChanged="OnWpmBoxChanged" />
+                </StackPanel>
+
+                <!-- 4. Play/Pause: large, accent. Space toggles (page-level). -->
+                <Button x:Name="PlayPauseButton" HorizontalAlignment="Center" Padding="32,14" TabIndex="1"
+                        Click="OnPlayPause" AutomationProperties.AutomationId="RsvpPage_PlayPauseButton">
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <FontIcon x:Name="PlayPauseGlyph" FontSize="24" Glyph="&#xE768;" />
+                        <TextBlock x:Name="PlayPauseText" FontSize="20" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Page>
