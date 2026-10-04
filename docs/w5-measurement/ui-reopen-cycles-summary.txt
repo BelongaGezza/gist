@@ -1,0 +1,20 @@
+W5 UI measurement: document 'Perf Large Document', 149393 words, 70 chapters, 350 headings, 1330 blocks
+machine: PROART13, 24 logical CPUs, Microsoft Windows 10.0.26200; app build under test: whichever GIST.exe the UITests project output resolves to (see LocateExe)
+  after the first leave + 5 s idle: WS 399 MiB, private 338 MiB
+  cycle 1: reopen -> ready 527 ms; after leaving + 4 s idle: WS 437 MiB, private 381 MiB
+  cycle 2: reopen -> ready 493 ms; after leaving + 4 s idle: WS 467 MiB, private 419 MiB
+  cycle 3: reopen -> ready 494 ms; after leaving + 4 s idle: WS 536 MiB, private 509 MiB
+  cycle 4: reopen -> ready 462 ms; after leaving + 4 s idle: WS 503 MiB, private 469 MiB
+  cycle 5: reopen -> ready 495 ms; after leaving + 4 s idle: WS 533 MiB, private 517 MiB
+  cycle 6: reopen -> ready 492 ms; after leaving + 4 s idle: WS 524 MiB, private 510 MiB
+  cycle 7: reopen -> ready 452 ms; after leaving + 4 s idle: WS 563 MiB, private 554 MiB
+  cycle 8: reopen -> ready 491 ms; after leaving + 4 s idle: WS 556 MiB, private 543 MiB
+  cycle 9: reopen -> ready 505 ms; after leaving + 4 s idle: WS 583 MiB, private 564 MiB
+  cycle 10: reopen -> ready 514 ms; after leaving + 4 s idle: WS 621 MiB, private 591 MiB
+  cycle 11: reopen -> ready 460 ms; after leaving + 4 s idle: WS 571 MiB, private 560 MiB
+  cycle 12: reopen -> ready 492 ms; after leaving + 4 s idle: WS 597 MiB, private 581 MiB
+  cycle 13: reopen -> ready 458 ms; after leaving + 4 s idle: WS 642 MiB, private 630 MiB
+  cycle 14: reopen -> ready 492 ms; after leaving + 4 s idle: WS 592 MiB, private 593 MiB
+  cycle 15: reopen -> ready 495 ms; after leaving + 4 s idle: WS 612 MiB, private 591 MiB
+  cycle 16: reopen -> ready 649 ms; after leaving + 4 s idle: WS 638 MiB, private 617 MiB
+  OVERALL peak working set 860 MiB, peak private bytes 842 MiB; baseline (library idle) WS 183 MiB, private 117 MiB
