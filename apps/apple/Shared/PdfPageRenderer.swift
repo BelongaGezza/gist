@@ -78,6 +78,42 @@ enum PdfPageRenderer {
         return CGSize(width: max(w.rounded(), 1), height: max(h.rounded(), 1))
     }
 
+    /// Name prefix of every per-import render directory (see `render`).
+    static let tempDirectoryPrefix = "gist-pdf-ocr-"
+
+    /// Removes render directories left behind by a crash or force-quit
+    /// (`RenderedPdfPages.cleanup()` never ran). Only directories carrying
+    /// `tempDirectoryPrefix` whose last modification is older than `age` are
+    /// touched: an in-flight render keeps writing page files, so its directory's
+    /// modification time stays fresh and it is never swept. Returns the number
+    /// removed. Security register `F35`.
+    @discardableResult
+    static func sweepStaleTempDirectories(
+        in tempRoot: URL = FileManager.default.temporaryDirectory,
+        olderThan age: TimeInterval = 60 * 60,
+        now: Date = Date()
+    ) -> Int {
+        let fm = FileManager.default
+        guard
+            let entries = try? fm.contentsOfDirectory(
+                at: tempRoot,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return 0 }
+        var removed = 0
+        for entry in entries where entry.lastPathComponent.hasPrefix(tempDirectoryPrefix) {
+            let values = try? entry.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
+            // Never follow or delete anything that is not a real directory
+            // (a symlink or file that merely has the prefix).
+            guard values?.isDirectory == true, let modified = values?.contentModificationDate,
+                now.timeIntervalSince(modified) > age
+            else { continue }
+            if (try? fm.removeItem(at: entry)) != nil { removed += 1 }
+        }
+        return removed
+    }
+
     /// Opens `url` with PDFKit and renders it. `progress(completed, total)`
     /// is called after each page; `isCancelled` is polled between pages.
     /// On any thrown error the temp directory is already removed.
@@ -117,7 +153,7 @@ enum PdfPageRenderer {
         guard total <= maxPages else { throw PdfRenderError.tooManyPages(count: total, max: maxPages) }
         guard total > 0 else { throw PdfRenderError.cannotOpen }
 
-        let directory = tempRoot.appendingPathComponent("gist-pdf-ocr-\(UUID().uuidString)", isDirectory: true)
+        let directory = tempRoot.appendingPathComponent("\(tempDirectoryPrefix)\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var urls: [URL] = []
         var totalBytes = 0
