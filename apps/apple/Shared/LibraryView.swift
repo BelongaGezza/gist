@@ -1,12 +1,13 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Supported import file types: plain text/markdown, ePub, and DOCX.
+/// Supported import file types: plain text/markdown, PDF, ePub, and DOCX.
 /// Falls back gracefully if a UTType identifier isn't registered on the
 /// running system (rather than crashing the file picker).
 private let importableContentTypes: [UTType] = [
     .plainText,
     .text,
+    .pdf,
     UTType("org.idpf.epub-container"),
     UTType("org.openxmlformats.wordprocessingml.document"),
 ].compactMap { $0 }
@@ -140,6 +141,16 @@ struct LibraryView: View {
                     }
                     .sheet(isPresented: $showOcrImportSheet) {
                         OcrImportSheet()
+                    }
+                    .sheet(
+                        isPresented: Binding(
+                            get: { core.pdfOcrCandidate != nil },
+                            set: { if !$0 { core.pdfOcrCandidate = nil } }
+                        )
+                    ) {
+                        // Scanned PDF (GistError.PdfNoTextLayer): same OCR
+                        // sheet, pre-loaded with the PDF to render + scan.
+                        OcrImportSheet(pdfURL: core.pdfOcrCandidate)
                     }
                     .fileImporter(
                         isPresented: $showImporter,
@@ -364,6 +375,32 @@ struct LibraryView: View {
                         localized: "\(core.drmProtectedFile?.lastPathComponent ?? String(localized: "This file")) is protected by DRM and can't be imported. GIST never attempts to circumvent copy protection."
                     )
                 )
+            }
+            .alert(
+                "Password-Protected PDF",
+                isPresented: Binding(
+                    get: { core.pdfEncryptedFile != nil },
+                    set: { if !$0 { core.pdfEncryptedFile = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { core.pdfEncryptedFile = nil }
+            } message: {
+                Text(
+                    String(
+                        localized: "\(core.pdfEncryptedFile?.lastPathComponent ?? String(localized: "This file")) is password-protected and can't be imported. GIST never attempts to bypass protection."
+                    )
+                )
+            }
+            .alert(
+                "PDF Support Unavailable",
+                isPresented: Binding(
+                    get: { core.pdfUnavailableFile != nil },
+                    set: { if !$0 { core.pdfUnavailableFile = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { core.pdfUnavailableFile = nil }
+            } message: {
+                Text("PDF support is unavailable in this build of GIST, so this file couldn't be imported. Other formats still work.")
             }
             .alert(
                 "Error",

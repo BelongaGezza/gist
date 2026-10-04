@@ -18,9 +18,11 @@ cross-referenced against `cargo metadata` for each crate's declared licence
 expression.
 
 **Methodology and caveats:**
-- Regenerated 2026-09-28 from `Cargo.lock` at this commit. 187 external
-  crates (excluding the 10 in-workspace `gist-*` crates themselves, which
-  aren't third-party).
+- Regenerated 2026-10-04 (M6 R7) from `Cargo.lock` at this commit, using
+  `cargo tree -p gist-ffi -e normal` (host target) joined against `cargo metadata` for each
+  crate's declared licence/repository. 199 external crates (excluding the in-workspace
+  `gist-*` crates themselves, which aren't third-party). Versions in earlier revisions of
+  this table had drifted (e.g. `thiserror`, `uniffi*`, `encoding_rs`).
 - `uniffi`'s proc-macro mode (ADR-001) pulls in a handful of crates that
   only run at compile time inside the proc-macro (e.g. `cargo_metadata`,
   `cargo-platform`, `camino`) and are not part of the shipped binary's
@@ -29,7 +31,7 @@ expression.
   licences are equally compliant either way.
 - Cross-checked against `deny.toml`'s license allow-list: every licence
   expression below resolves to at least one allowed term (`MIT`,
-  `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-2-Clause`,
+  `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`,
   `BSD-3-Clause`, `ISC`, `Zlib`, `Unicode-3.0`, `MPL-2.0`,
   `CDLA-Permissive-2.0`). Verified live: `cargo deny check bans licenses
   sources` → `bans ok, licenses ok, sources ok` (this dev environment's
@@ -53,6 +55,7 @@ expression.
 | block-buffer | 0.12.1 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 | <https://github.com/fitzgen/bumpalo> |
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | <https://github.com/Lokathor/bytemuck> |
+| byteorder | 1.5.0 | Unlicense OR MIT | <https://github.com/BurntSushi/byteorder> |
 | byteorder-lite | 0.1.0 | Unlicense OR MIT | <https://github.com/image-rs/byteorder-lite> |
 | bytes | 1.12.1 | MIT | <https://github.com/tokio-rs/bytes> |
 | camino | 1.2.5 | MIT OR Apache-2.0 | <https://github.com/camino-rs/camino> |
@@ -61,10 +64,12 @@ expression.
 | cfb | 0.14.0 | MIT | <https://github.com/mdsteele/rust-cfb> |
 | cfg-if | 1.0.4 | MIT OR Apache-2.0 | <https://github.com/rust-lang/cfg-if> |
 | chardetng | 1.0.0 | Apache-2.0 OR MIT | <https://github.com/hsivonen/chardetng> |
+| chrono | 0.4.45 | MIT OR Apache-2.0 | <https://github.com/chronotope/chrono> |
 | cipher | 0.5.2 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | cmov | 0.5.4 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | const-oid | 0.10.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats> |
 | constant_time_eq | 0.4.2 | CC0-1.0 OR MIT-0 OR Apache-2.0 | <https://github.com/cesarb/constant_time_eq> |
+| core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 | <https://github.com/servo/core-foundation-rs> |
 | cpubits | 0.1.1 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
 | cpufeatures | 0.3.1 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
 | crc32fast | 1.5.1 | MIT OR Apache-2.0 | <https://github.com/srijs/rust-crc32fast> |
@@ -82,7 +87,8 @@ expression.
 | dtoa | 1.0.11 | MIT OR Apache-2.0 | <https://github.com/dtolnay/dtoa> |
 | dtoa-short | 0.3.5 | MPL-2.0 | <https://github.com/upsuper/dtoa-short> |
 | ego-tree | 0.11.0 | ISC | <https://github.com/rust-scraper/ego-tree> |
-| encoding_rs | 0.8.41 | (Apache-2.0 OR MIT) AND BSD-3-Clause | <https://github.com/hsivonen/encoding_rs> |
+| either | 1.18.0 | MIT OR Apache-2.0 | <https://github.com/rayon-rs/either> |
+| encoding_rs | 0.8.42 | (Apache-2.0 OR MIT) AND BSD-3-Clause | <https://github.com/hsivonen/encoding_rs> |
 | equivalent | 1.0.2 | Apache-2.0 OR MIT | <https://github.com/indexmap-rs/equivalent> |
 | errno | 0.3.14 | MIT OR Apache-2.0 | <https://github.com/lambda-fairy/rust-errno> |
 | fallible-iterator | 0.3.0 | MIT/Apache-2.0 | <https://github.com/sfackler/rust-fallible-iterator> |
@@ -103,6 +109,7 @@ expression.
 | heck | 0.5.0 | MIT OR Apache-2.0 | <https://github.com/withoutboats/heck> |
 | html5ever | 0.39.0 | MIT OR Apache-2.0 | <https://github.com/servo/html5ever> |
 | hybrid-array | 0.4.15 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/hybrid-array> |
+| iana-time-zone | 0.1.65 | MIT OR Apache-2.0 | <https://github.com/strawlab/iana-time-zone> |
 | icu_collections | 2.2.0 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | icu_locale_core | 2.2.0 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | icu_normalizer | 2.2.0 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
@@ -116,13 +123,16 @@ expression.
 | indexmap | 2.14.2 | Apache-2.0 OR MIT | <https://github.com/indexmap-rs/indexmap> |
 | infer | 0.22.0 | MIT | <https://github.com/bojand/infer> |
 | inout | 0.2.2 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
+| itertools | 0.13.0 | MIT OR Apache-2.0 | <https://github.com/rust-itertools/itertools> |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | <https://github.com/dtolnay/itoa> |
 | libc | 0.2.189 | MIT OR Apache-2.0 | <https://github.com/rust-lang/libc> |
+| libloading | 0.9.0 | ISC | <https://github.com/nagisa/rust_libloading/> |
 | libsqlite3-sys | 0.38.2 | MIT | <https://github.com/rusqlite/rusqlite> |
 | litemap | 0.8.3 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 | <https://github.com/Amanieu/parking_lot> |
 | log | 0.4.34 | MIT OR Apache-2.0 | <https://github.com/rust-lang/log> |
 | markup5ever | 0.39.0 | MIT OR Apache-2.0 | <https://github.com/servo/html5ever> |
+| maybe-owned | 0.3.4 | MIT OR Apache-2.0 | <https://github.com/rustonaut/maybe-owned> |
 | memchr | 2.8.3 | Unlicense OR MIT | <https://github.com/BurntSushi/memchr> |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
@@ -134,12 +144,14 @@ expression.
 | option-ext | 0.2.0 | MPL-2.0 | <https://github.com/soc/option-ext.git> |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 | <https://github.com/Amanieu/parking_lot> |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 | <https://github.com/Amanieu/parking_lot> |
+| pdfium-render | 0.9.4 | MIT OR Apache-2.0 | <https://github.com/ajrcarey/pdfium-render> |
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 | <https://github.com/servo/rust-url/> |
 | phf | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | phf_generator | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | phf_macros | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | phf_shared | 0.13.1 | MIT | <https://github.com/rust-phf/rust-phf> |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | <https://github.com/taiki-e/pin-project-lite> |
+| piston-float | 1.0.1 | MIT | <https://github.com/pistondevelopers/float.git> |
 | png | 0.18.1 | MIT OR Apache-2.0 | <https://github.com/image-rs/image-png> |
 | polyval | 0.7.3 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/universal-hashes> |
 | potential_utf | 0.1.6 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
@@ -181,8 +193,8 @@ expression.
 | synstructure | 0.13.2 | MIT | <https://github.com/mystor/synstructure> |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | <https://github.com/Stebalien/tempfile> |
 | tendril | 0.5.1 | MIT OR Apache-2.0 | <https://github.com/servo/html5ever> |
-| thiserror | 2.0.20 | MIT OR Apache-2.0 | <https://github.com/dtolnay/thiserror> |
-| thiserror-impl | 2.0.20 | MIT OR Apache-2.0 | <https://github.com/dtolnay/thiserror> |
+| thiserror | 2.0.21 | MIT OR Apache-2.0 | <https://github.com/dtolnay/thiserror> |
+| thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | <https://github.com/dtolnay/thiserror> |
 | tinystr | 0.8.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | toml | 1.1.5+spec-1.1.0 | MIT OR Apache-2.0 | <https://github.com/toml-rs/toml> |
 | toml_datetime | 1.1.1+spec-1.1.0 | MIT OR Apache-2.0 | <https://github.com/toml-rs/toml> |
@@ -196,18 +208,20 @@ expression.
 | unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | <https://github.com/dtolnay/unicode-ident> |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | <https://github.com/unicode-rs/unicode-segmentation> |
 | unicode-width | 0.2.2 | MIT OR Apache-2.0 | <https://github.com/unicode-rs/unicode-width> |
-| uniffi | 0.32.1 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
-| uniffi_core | 0.32.1 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
-| uniffi_internal_macros | 0.32.1 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
-| uniffi_macros | 0.32.1 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
-| uniffi_meta | 0.32.1 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
-| uniffi_pipeline | 0.32.1 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
+| uniffi | 0.32.2 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
+| uniffi_core | 0.32.2 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
+| uniffi_internal_macros | 0.32.2 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
+| uniffi_macros | 0.32.2 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
+| uniffi_meta | 0.32.2 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
+| uniffi_pipeline | 0.32.2 | MPL-2.0 | <https://github.com/mozilla/uniffi-rs> |
 | universal-hash | 0.6.1 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | untrusted | 0.9.0 | ISC | <https://github.com/briansmith/untrusted> |
 | ureq | 2.12.1 | MIT OR Apache-2.0 | <https://github.com/algesten/ureq> |
 | url | 2.5.8 | MIT OR Apache-2.0 | <https://github.com/servo/rust-url> |
+| utf16string | 0.2.0 | MIT OR Apache-2.0 | <https://github.com/getsentry/utf16string> |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | <https://github.com/hsivonen/utf8_iter> |
 | uuid | 1.26.1 | Apache-2.0 OR MIT | <https://github.com/uuid-rs/uuid> |
+| vecmath | 1.0.0 | MIT | <https://github.com/pistondevelopers/vecmath.git> |
 | web-time | 1.1.0 | MIT OR Apache-2.0 | <https://github.com/daxpedda/web-time> |
 | web_atoms | 0.2.6 | MIT OR Apache-2.0 | <https://github.com/servo/html5ever> |
 | webpki-roots | 0.26.11 | CDLA-Permissive-2.0 | <https://github.com/rustls/webpki-roots> |
@@ -228,6 +242,41 @@ expression.
 | zopfli | 0.8.3 | Apache-2.0 | <https://github.com/zopfli-rs/zopfli> |
 | zune-core | 0.5.3 | MIT OR Apache-2.0 OR Zlib | <https://github.com/etemesi254/zune-image> |
 | zune-jpeg | 0.5.15 | MIT OR Apache-2.0 OR Zlib | <https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg> |
+
+### PDF support (added M6 R1)
+
+`gist-parse-pdf` adds `pdfium-render` 0.9.4 and its transitive crates (`libloading`, `chrono`, `itertools`, `vecmath`, ...); they are included in the table above (regenerated 2026-10-04 from `Cargo.lock`, which supersedes the separate sub-table R1 originally appended). All are permissive; no `deny.toml` change was needed.
+
+### PDFium (prebuilt native library, `libpdfium.dylib`)
+
+Not a Rust crate: a prebuilt universal2 (arm64 + x86_64) dynamic library from
+<https://github.com/bblanchon/pdfium-binaries>, release `chromium/8076`, fetched by
+`tools/fetch-pdfium.sh` (SHA-256 pinned, fails closed) into `artifacts/pdfium/` and
+embedded in the app bundle at `Contents/Frameworks/libpdfium.dylib` (ADR-002 addendum).
+No binary is committed to git.
+
+| Component | Licence |
+|---|---|
+| PDFium | BSD-3-Clause |
+| Abseil, LLVM libc | Apache-2.0 |
+| AGG 2.3 (Anti-Grain Geometry) | Permissive AGG 2.3 licence (use/copy/modify/sell/distribute with the notice retained) |
+| Little CMS (lcms2), simdutf, fast_float | MIT (texts in the release `licenses/` directory) |
+| zlib | Zlib |
+| libpng | PNG Reference Library License v2 |
+| libjpeg-turbo | IJG + BSD-3-Clause + Zlib |
+| OpenJPEG | BSD-2-Clause |
+| ICU | Unicode / ICU licence |
+| FreeType | FreeType Project License (BSD-style; requires the acknowledgement below) |
+
+The release archive's `licenses/` directory carries the exact texts; they are
+reproduced verbatim in the in-app Settings -> About -> Third-Party Notices screen
+(`ThirdPartyNotices.txt`). Required FreeType acknowledgement:
+
+> Portions of this software are copyright © The FreeType Project (www.freetype.org). All rights reserved.
+
+The obligation for all of the above is notice reproduction, which the bundled
+notices file satisfies. Note: AGG 2.3 (`agg23.txt`) was not in the pre-implementation
+licence survey; it is permissive and MIT-compatible.
 
 ## Apple app (`apps/apple`)
 

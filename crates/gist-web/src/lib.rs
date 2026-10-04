@@ -7,7 +7,7 @@
 //! globally routable, so a DNS-controlled hostname with a valid TLS certificate
 //! can't be used to reach loopback/RFC1918/link-local targets.
 
-use gist_model::{Block, Document, Metadata, ParseLimits, Section, TextRun};
+use gist_model::{normalize_cell_text, Block, Document, Metadata, ParseLimits, Section, TextRun};
 use scraper::{Html, Selector};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use url::Url;
@@ -103,7 +103,7 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
     let html = String::from_utf8_lossy(&body_bytes);
 
     // 7-8. Extract content and build Document.
-    build_document(&html, raw_url, limits.max_nesting_depth)
+    build_document_limited(&html, raw_url, limits)
 }
 
 // ── Agent builder ─────────────────────────────────────────────────────────────
@@ -332,12 +332,27 @@ const BLOCK_TAGS: &[&str] = &[
 /// `max_depth` bounds the DOM recursion in `collect_text` (F17) — an
 /// adversarial page with deeply nested elements is rejected with
 /// `ParseError::ResourceLimitExceeded` rather than exhausting the stack.
+#[cfg(test)]
 pub(crate) fn build_document(
     html: &str,
     url: &str,
     max_depth: usize,
 ) -> Result<Document, ParseError> {
-    let (title, blocks) = extract_content(html, max_depth)?;
+    let limits = ParseLimits {
+        max_nesting_depth: max_depth,
+        ..ParseLimits::default()
+    };
+    build_document_limited(html, url, &limits)
+}
+
+/// As [`build_document`], with the full `ParseLimits` (nesting depth and the
+/// table row/column caps).
+pub(crate) fn build_document_limited(
+    html: &str,
+    url: &str,
+    limits: &ParseLimits,
+) -> Result<Document, ParseError> {
+    let (title, blocks) = extract_content_limited(html, limits)?;
 
     let section = Section {
         id: "s0".to_string(),
@@ -367,6 +382,19 @@ pub(crate) fn build_document(
 /// crate isn't published, so widening visibility here has no external
 /// API-stability cost.
 pub fn extract_content(html: &str, max_depth: usize) -> Result<(String, Vec<Block>), ParseError> {
+    let limits = ParseLimits {
+        max_nesting_depth: max_depth,
+        ..ParseLimits::default()
+    };
+    extract_content_limited(html, &limits)
+}
+
+/// As [`extract_content`], with the full `ParseLimits` (nesting depth and
+/// the table row/column caps).
+pub fn extract_content_limited(
+    html: &str,
+    limits: &ParseLimits,
+) -> Result<(String, Vec<Block>), ParseError> {
     let document = Html::parse_document(html);
 
     // Title from <title>.
@@ -388,32 +416,31 @@ pub fn extract_content(html: &str, max_depth: usize) -> Result<(String, Vec<Bloc
 
     let blocks = match content_html {
         None => vec![],
-        Some(root) => collect_blocks(root, max_depth)?,
+        Some(root) => collect_blocks(root, limits)?,
     };
 
     Ok((title, blocks))
 }
 
-/// Walk `el`'s subtree and collect non-empty paragraphs as `Block::Paragraph`.
-fn collect_blocks(el: scraper::ElementRef<'_>, max_depth: usize) -> Result<Vec<Block>, ParseError> {
-    let mut paragraphs: Vec<String> = Vec::new();
+/// Walk `el`'s subtree and collect non-empty paragraphs as
+/// `Block::Paragraph` and `<table>`s as `Block::Table`, in document order.
+fn collect_blocks(
+    el: scraper::ElementRef<'_>,
+    limits: &ParseLimits,
+) -> Result<Vec<Block>, ParseError> {
+    let mut blocks: Vec<Block> = Vec::new();
     let mut current = String::new();
-    collect_text(el, &mut current, &mut paragraphs, 0, max_depth)?;
-    flush(&mut current, &mut paragraphs);
-
-    Ok(paragraphs
-        .into_iter()
-        .filter(|p| !p.trim().is_empty())
-        .map(|p| Block::Paragraph {
-            runs: vec![TextRun::plain(p.trim().to_string())],
-        })
-        .collect())
+    collect_text(el, &mut current, &mut blocks, 0, limits)?;
+    flush(&mut current, &mut blocks);
+    Ok(blocks)
 }
 
-fn flush(current: &mut String, paragraphs: &mut Vec<String>) {
-    let trimmed = current.trim().to_string();
+fn flush(current: &mut String, blocks: &mut Vec<Block>) {
+    let trimmed = current.trim();
     if !trimmed.is_empty() {
-        paragraphs.push(trimmed);
+        blocks.push(Block::Paragraph {
+            runs: vec![TextRun::plain(trimmed.to_string())],
+        });
     }
     current.clear();
 }
@@ -424,12 +451,13 @@ fn flush(current: &mut String, paragraphs: &mut Vec<String>) {
 fn collect_text(
     el: scraper::ElementRef<'_>,
     current: &mut String,
-    paragraphs: &mut Vec<String>,
+    blocks: &mut Vec<Block>,
     depth: usize,
-    max_depth: usize,
+    limits: &ParseLimits,
 ) -> Result<(), ParseError> {
     use scraper::node::Node;
 
+    let max_depth = limits.max_nesting_depth;
     if depth > max_depth {
         return Err(ParseError::ResourceLimitExceeded);
     }
@@ -456,16 +484,139 @@ fn collect_text(
                 // Block elements flush the current inline run first.
                 let is_block = BLOCK_TAGS.contains(&tag);
                 if is_block {
-                    flush(current, paragraphs);
+                    flush(current, blocks);
                 }
 
                 if let Some(child_el) = scraper::ElementRef::wrap(child) {
-                    collect_text(child_el, current, paragraphs, depth + 1, max_depth)?;
+                    if tag == "table" {
+                        // A table becomes one structured block (M6/R3);
+                        // its subtree is NOT also walked as paragraphs.
+                        if let Some(table) = extract_table(child_el, depth + 1, limits)? {
+                            blocks.push(table);
+                        }
+                    } else {
+                        collect_text(child_el, current, blocks, depth + 1, limits)?;
+                    }
                 }
 
                 // Flush again after a block element closes.
                 if is_block {
-                    flush(current, paragraphs);
+                    flush(current, blocks);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// ── Tables (M6/R3) ────────────────────────────────────────────────────────────
+
+/// Convert one `<table>` into a `Block::Table`. Cells are plain text
+/// (descendant text joined by spaces, whitespace-normalised); a table nested
+/// in a cell is flattened into that cell's text. Rows and columns are capped
+/// by `limits.max_table_rows` / `max_table_cols`, checked *before* each is
+/// appended; recursion is bounded by `limits.max_nesting_depth`. Returns
+/// `None` for a table with no text at all (layout-only tables).
+fn extract_table(
+    table: scraper::ElementRef<'_>,
+    depth: usize,
+    limits: &ParseLimits,
+) -> Result<Option<Block>, ParseError> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut header_row = false;
+    collect_table_rows(table, depth, limits, false, &mut rows, &mut header_row)?;
+    if rows.iter().flatten().any(|c| !c.is_empty()) {
+        Ok(Some(Block::Table { rows, header_row }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn collect_table_rows(
+    el: scraper::ElementRef<'_>,
+    depth: usize,
+    limits: &ParseLimits,
+    in_thead: bool,
+    rows: &mut Vec<Vec<String>>,
+    header_row: &mut bool,
+) -> Result<(), ParseError> {
+    if depth > limits.max_nesting_depth {
+        return Err(ParseError::ResourceLimitExceeded);
+    }
+    for child in el.children() {
+        let Some(child_el) = scraper::ElementRef::wrap(child) else {
+            continue;
+        };
+        match child_el.value().name() {
+            "thead" | "tbody" | "tfoot" => {
+                let thead = child_el.value().name() == "thead";
+                collect_table_rows(child_el, depth + 1, limits, thead, rows, header_row)?;
+            }
+            "tr" => {
+                if rows.len() >= limits.max_table_rows {
+                    return Err(ParseError::ResourceLimitExceeded);
+                }
+                let mut row: Vec<String> = Vec::new();
+                let mut has_th = false;
+                for cell in child_el.children() {
+                    let Some(cell_el) = scraper::ElementRef::wrap(cell) else {
+                        continue;
+                    };
+                    let name = cell_el.value().name();
+                    if name != "td" && name != "th" {
+                        continue;
+                    }
+                    if row.len() >= limits.max_table_cols {
+                        return Err(ParseError::ResourceLimitExceeded);
+                    }
+                    has_th |= name == "th";
+                    let mut text = String::new();
+                    cell_text(cell_el, &mut text, depth + 2, limits.max_nesting_depth)?;
+                    row.push(normalize_cell_text(&text));
+                }
+                if !row.is_empty() {
+                    if rows.is_empty() && (in_thead || has_th) {
+                        *header_row = true;
+                    }
+                    rows.push(row);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// All descendant text of `el` (skipping `SKIP_TAGS` subtrees), separated by
+/// single spaces. Depth-bounded like `collect_text` (F17).
+fn cell_text(
+    el: scraper::ElementRef<'_>,
+    out: &mut String,
+    depth: usize,
+    max_depth: usize,
+) -> Result<(), ParseError> {
+    use scraper::node::Node;
+    if depth > max_depth {
+        return Err(ParseError::ResourceLimitExceeded);
+    }
+    for child in el.children() {
+        match child.value() {
+            Node::Text(text) => {
+                let t = text.trim();
+                if !t.is_empty() {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(t);
+                }
+            }
+            Node::Element(elem) => {
+                if SKIP_TAGS.contains(&elem.name()) {
+                    continue;
+                }
+                if let Some(child_el) = scraper::ElementRef::wrap(child) {
+                    cell_text(child_el, out, depth + 1, max_depth)?;
                 }
             }
             _ => {}
@@ -799,5 +950,87 @@ mod tests {
             result.is_ok(),
             "50-deep nesting under a 200 cap should succeed"
         );
+    }
+
+    // ── Tables (M6/R3) ───────────────────────────────────────────────────
+
+    fn tables(blocks: &[Block]) -> Vec<(&Vec<Vec<String>>, bool)> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Table { rows, header_row } => Some((rows, *header_row)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_table_fixture_becomes_one_table_between_paragraphs() {
+        let html = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/web/table_article.html"
+        ))
+        .unwrap();
+        let (_, blocks) = extract_content(&html, 200).unwrap();
+        // h1 paragraph, "Before", table, "After".
+        assert_eq!(blocks.len(), 4, "{blocks:?}");
+        assert!(matches!(blocks[2], Block::Table { .. }));
+        let t = tables(&blocks);
+        assert_eq!(t.len(), 1);
+        let (rows, header) = t[0];
+        assert!(header, "thead/th marks a header row");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0], vec!["Fruit", "Colour", "Count"]);
+        assert_eq!(rows[2], vec!["Banana", "", "12"]);
+        assert_eq!(rows[3][1], "Dark red almost black");
+    }
+
+    #[test]
+    fn test_nested_table_flattens_and_layout_table_is_dropped() {
+        let html = "<body><table><tr><td><table><tr><td>x</td><td>y</td></tr></table></td><td>z</td></tr></table>\
+                    <table><tr><td> </td></tr></table></body>";
+        let (_, blocks) = extract_content(html, 200).unwrap();
+        let t = tables(&blocks);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].0, &vec![vec!["x y", "z"]]);
+        assert!(!t[0].1);
+    }
+
+    #[test]
+    fn test_table_row_and_column_caps_are_enforced() {
+        let rows: String = (0..5).map(|i| format!("<tr><td>{i}</td></tr>")).collect();
+        let html = format!("<body><table>{rows}</table></body>");
+        let limits = ParseLimits {
+            max_table_rows: 4,
+            ..ParseLimits::default()
+        };
+        assert!(matches!(
+            extract_content_limited(&html, &limits),
+            Err(ParseError::ResourceLimitExceeded)
+        ));
+        let cells: String = (0..5).map(|i| format!("<td>{i}</td>")).collect();
+        let html = format!("<body><table><tr>{cells}</tr></table></body>");
+        let limits = ParseLimits {
+            max_table_cols: 4,
+            ..ParseLimits::default()
+        };
+        assert!(matches!(
+            extract_content_limited(&html, &limits),
+            Err(ParseError::ResourceLimitExceeded)
+        ));
+    }
+
+    #[test]
+    fn test_deeply_nested_tables_hit_the_depth_cap() {
+        let depth = 300;
+        let html = format!(
+            "<body>{}x{}</body>",
+            "<table><tr><td>".repeat(depth),
+            "</td></tr></table>".repeat(depth)
+        );
+        assert!(matches!(
+            extract_content(&html, 200),
+            Err(ParseError::ResourceLimitExceeded)
+        ));
     }
 }

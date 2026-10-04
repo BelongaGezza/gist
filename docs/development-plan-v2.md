@@ -305,6 +305,7 @@ Phase C:          ├──> web
 - `parse_document()`: `pStyle` → style lookup; `numPr` → list detection; `w:ins` accepted, `w:del` skipped; `has_tracked_changes` flag set.
 - All four `ParseLimits` fields enforced. `[F4]` ✅
 - Tables: parse and persist (M1); flatten at render (M2). `[Q2]` ✅ Resolved
+  - **Correction, 2026-10-03 (M6 R3): this claim was false when written.** `gist_model::Block` had no table variant, so tables were *neither parsed nor persisted as tables*. Measured on synthetic fixtures (`fixtures/docx/with_table.docx`, `fixtures/epub/with_table.epub`, `fixtures/web/table_article.html`; 3x4 table with a header row, an empty cell, and a two-paragraph cell): **DOCX** turned every cell paragraph into its own `Paragraph` block (row/column structure lost, and the empty cell vanished so later cells silently shifted columns); **ePub** *dropped bare `<td>`/`<th>` text entirely* (only `<p>`/`<div>`-wrapped cell content survived, as loose paragraphs); **web** made one `Paragraph` per cell (same loss as DOCX). Fixed in M6 R3 with `Block::Table` (see ADR-019's addendum and `docs/m6-agent-roles.md` R3).
 
 **Fixed (2026-09-12, same day):**
 - `[F16]` ✅ **Was Medium.** Same zip entry-count gap as `gist-parse-epub` above — no cap on entry count before per-entry limits apply. Fixed identically: checks `ParseLimits.max_zip_entries` immediately after `ZipArchive::new`. New test builds a 6-entry zip capped at 5 and asserts rejection.
@@ -650,6 +651,10 @@ Beta feedback triaged; release notes; landing/README; GitHub issue templates; v1
 
 **Update 2026-09-29:** the agent-executable slice of this milestone was refined into `docs/m5-agent-roles.md` and executed in full — release notes (`CHANGELOG.md`), landing/README refresh, and GitHub issue templates (a `config.yml` chooser added to the two pre-existing templates) are done, alongside Q10 (see §7's closure note, a real gap this milestone's scoping pass found that M4's plan had missed). "Beta feedback triaged" and "v1.0 tagged and published" remain exactly as scoped — genuinely unstarted, not merely unfinished — since both need a human: real Apple signing/notarization credentials and real beta users, neither of which exist in an agent-only dev environment. `docs/v1.0-release-checklist.md` is the concrete handoff for that remaining work. See `CLAUDE.md`'s M5 milestone-register row for full verification detail.
 
+### M6 — PDF, tables, post-v1.0 gaps · **started 2026-10-03**
+
+Scoped in `docs/m6-agent-roles.md` (adopted 2026-10-03). Gaps found after M5: PDF import is in the spec's v1.0 phasing but `gist-parse-pdf` is an empty stub; `gist_model::Block` has no table variant (the Q2 line below is under review by R3 step 1 and will be corrected there if wrong); review debt `F27`/`F29`/`F30`. This run: Track A (PDF: R1 Rust, R2 Swift) and tables (R3), then R7 review. The iOS port (R5/R6, the "~8–10 weeks for iOS" below) and the paginated view (R4) are explicitly not part of this run. pdfium licence/distribution decision recorded in the plan's D4 (permissive, MIT-compatible; pinned prebuilt, embedded and signed with the app per `N8`).
+
 **Total: ~25 weeks / ~6 months** to public macOS v1.0.
 *(+2 weeks from v1 plan for security hardening sprint in M1)*
 
@@ -692,6 +697,7 @@ Beta feedback triaged; release notes; landing/README; GitHub issue templates; v1
 - DRM = detect and refuse, never circumvent (ADR-004) ✅ `[F8]`
 - Q1: Full-text search in v1.0 — committed, FTS5 implemented ✅
 - Q2: Tables parse+persist in model, flatten at render for v1.0 ✅ (DOCX parser)
+  - **Correction, 2026-10-03:** the ✅ above was premature; there was no table in the model until M6 R3 (see §2.5's correction note for what the parsers actually did). Now real: `Block::Table { rows, header_row }` (plain-text cells), populated by the DOCX, ePub and web parsers, rendered as a grid in the flow view, and linearised row by row for RSVP/TTS.
 - Q5: URL fetching on iOS — use Swift `URLSession` (system proxy, ATS, cellular-awareness) ✅
 - Q6: Copy-on-import (ADR-006) ✅
 - Q7: IR storage format — `<id>.json` + `<id>.tokens.json` on disk, SQLite holds metadata + paths (ADR-007) ✅

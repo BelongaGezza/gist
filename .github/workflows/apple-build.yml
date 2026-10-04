@@ -17,6 +17,7 @@ on:
       - 'rust-toolchain.toml'
       - 'tools/gen-bindings.sh'
       - 'tools/build-core-xcframework.sh'
+      - 'tools/fetch-pdfium.sh'
       - '.github/workflows/apple-build.yml'
 
 permissions:
@@ -93,6 +94,13 @@ jobs:
       # gist-ffi" and "generate bindings" in the correct order.
       - name: Build gist-ffi xcframework + Swift bindings
         run: ./tools/build-core-xcframework.sh
+
+      # Pinned, SHA-256-verified prebuilt pdfium (fails closed). The app
+      # embeds it at Contents/Frameworks/libpdfium.dylib (project.yml
+      # copyFiles); the Xcode preBuildScript would also fetch it, but doing
+      # it here makes a download/verification failure obvious and early.
+      - name: Fetch pinned pdfium
+        run: ./tools/fetch-pdfium.sh
 
       - name: xcodegen generate
         working-directory: apps/apple

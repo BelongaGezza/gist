@@ -136,7 +136,7 @@ enum TtsStateMachine {
 /// method), rather than this function silently renumbering everything.
 enum TtsTextExtraction {
     static func speakableBlocks(for document: FlowDocumentVM) -> [String] {
-        document.sections.flatMap { section in section.blocks.map(\.plainText) }
+        document.sections.flatMap { section in section.blocks.map(\.speakableText) }
     }
 }
 

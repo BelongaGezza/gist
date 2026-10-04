@@ -30,6 +30,14 @@ struct OcrImportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var state = OcrImportState()
     @State private var showFileImporter = false
+    /// Set when the sheet was opened for a scanned (image-only) PDF the core
+    /// reported as `GistError.PdfNoTextLayer` (M6 R2): the sheet then renders
+    /// the PDF's pages itself instead of asking for page images.
+    let pdfURL: URL?
+
+    init(pdfURL: URL? = nil) {
+        self.pdfURL = pdfURL
+    }
 
     var body: some View {
         NavigationStack {
@@ -51,7 +59,27 @@ struct OcrImportSheet: View {
                 state.beginScan(urls: urls)
             }
         }
-        .onDisappear { state.cancelScan() }
+        .onAppear {
+            if let pdfURL, case .idle = state.phase { state.beginPdf(url: pdfURL) }
+        }
+        .onDisappear { state.discard() }
+    }
+
+    private func renderingState(completed: Int, total: Int) -> some View {
+        VStack(spacing: 16) {
+            ProgressView(value: Double(completed), total: Double(max(total, 1)))
+                .frame(maxWidth: 320)
+            if total > 0 {
+                Text("Preparing PDF pages — page \(min(completed + 1, total)) of \(total)")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Opening PDF…")
+                    .foregroundStyle(.secondary)
+            }
+            Button("Cancel") { state.cancelScan() }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 
     @ViewBuilder
@@ -59,6 +87,8 @@ struct OcrImportSheet: View {
         switch state.phase {
         case .idle:
             idleState
+        case .rendering(let completed, let total):
+            renderingState(completed: completed, total: total)
         case .scanning(let completed, let total):
             scanningState(completed: completed, total: total)
         case .reviewing:
@@ -170,7 +200,9 @@ struct OcrImportSheet: View {
                 .frame(maxWidth: 420)
             HStack {
                 Button("Close") { dismiss() }
-                Button("Try Again") { state.reset() }
+                Button("Try Again") {
+                    if let pdfURL { state.beginPdf(url: pdfURL) } else { state.reset() }
+                }
                     .buttonStyle(.borderedProminent)
             }
         }

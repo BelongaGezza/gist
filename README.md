@@ -2,7 +2,7 @@
 
 GIST is a cross-platform, RSVP-style ("rapid serial visual presentation") speed-reading app. A shared Rust core handles all parsing, persistence, and pacing logic; native UI shells (SwiftUI on macOS/iOS, WinUI 3 on Windows) call into it over FFI.
 
-Import a document — plain text, ePub, or DOCX today, with PDF and OCR planned — and read it either as a flowing document view or as a paced, one-word-at-a-time RSVP stream. Everything is stored locally: there's no server component and no account system.
+Import a document — plain text, ePub, DOCX or PDF (text or scanned, via on-device OCR) — and read it either as a flowing document view or as a paced, one-word-at-a-time RSVP stream. Everything is stored locally: there's no server component and no account system.
 
 ## Status
 
@@ -23,7 +23,7 @@ for the milestone plan.
 ## Features
 
 - **Import**: plain text, ePub (with DRM detection), and DOCX today; URL-paste import and
-  on-device OCR from images also work. PDF import is not implemented yet.
+  on-device OCR from images also work. PDF import (text and scanned) is new on macOS and has only been tuned on synthetic PDFs.
 - **Reading**: a paced, one-word-at-a-time RSVP view, and a continuous "flow" document view with
   typography controls, a table of contents, and in-document search.
 - **Library**: full-text search, collections, tags, sort/filter, and removal that never touches a
@@ -48,7 +48,7 @@ gist/
 │   ├── gist-parse-txt/         # Plain text import
 │   ├── gist-parse-epub/        # ePub import (DRM detection + resource limits)
 │   ├── gist-parse-docx/        # DOCX import (style resolution + tracked changes)
-│   ├── gist-parse-pdf/         # PDF — stub, not yet implemented
+│   ├── gist-parse-pdf/         # PDF — pdfium-based text extraction (macOS)
 │   ├── gist-imageprep/         # OCR pre-processing
 │   ├── gist-web/               # URL fetch + readability extraction
 │   ├── gist-rsvp/              # Pure RSVP pacing engine (no I/O, no timers)

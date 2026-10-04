@@ -338,6 +338,26 @@ struct FlowViewSwiftUINative: ReadingLayout {
                 }
             }
             .font(.system(size: typography.fontSize, design: typography.fontDesign.fontDesign))
+        case .table(let rows, let headerRow):
+            // Highlights/matches are character offsets into the whole
+            // table's `plainText`; FlowTableView hands each cell its range so
+            // they're clipped to the cell they fall in (TableCellLayout).
+            FlowTableView(
+                rows: rows,
+                headerRow: headerRow,
+                fontSize: typography.fontSize,
+                fontDesign: typography.fontDesign.fontDesign
+            ) { text, cellRange in
+                highlighted(
+                    plain: text,
+                    matches: blockMatches.compactMap { match in
+                        TableCellLayout.clip(match.range, to: cellRange).map { (match.offset, $0) }
+                    },
+                    highlightRanges: highlightRanges.compactMap { item in
+                        TableCellLayout.clip(item.range, to: cellRange).map { ($0, item.color) }
+                    }
+                )
+            }
         case .image(_, let alt, let caption):
             VStack(alignment: .leading, spacing: 4) {
                 Image(systemName: "photo")

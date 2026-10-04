@@ -71,6 +71,9 @@ enum OcrFileSizeCheck {
 /// `GistCore.importImageWithOcr` call) -> done/failed/cancelled.
 enum OcrImportPhase: Equatable {
     case idle
+    /// Rendering a scanned PDF's pages to temp images (M6 R2), before the
+    /// normal Vision scan. Cancellable.
+    case rendering(completed: Int, total: Int)
     case scanning(completed: Int, total: Int)
     case reviewing
     case importing
@@ -81,10 +84,23 @@ enum OcrImportPhase: Equatable {
 
 @MainActor
 final class OcrImportState: ObservableObject {
-    @Published private(set) var phase: OcrImportPhase = .idle
+    @Published private(set) var phase: OcrImportPhase = .idle {
+        didSet {
+            // Temp PDF renders never outlive a terminal state.
+            switch phase {
+            case .cancelled, .failed, .done: cleanupPdfTemp()
+            default: break
+            }
+        }
+    }
     @Published var pages: [OcrReviewPage] = []
 
     private var scanTask: Task<Void, Never>?
+    /// Temp page images rendered from a scanned PDF (M6 R2). Owned here and
+    /// removed on every terminal path: commit success or failure, cancel,
+    /// reset, and the sheet disappearing (`discard()`).
+    private var renderedPdf: RenderedPdfPages?
+    private var pdfAccessURL: URL?
 
     /// Validates page sizes up front (`OcrFileSizeCheck`), then kicks off a
     /// cancellable per-page Vision scan (`VisionPageRecognizer`, in
@@ -171,6 +187,103 @@ final class OcrImportState: ObservableObject {
         scanTask?.cancel()
     }
 
+    // MARK: - PDF source (M6 R2)
+
+    /// Entry point for an image-only PDF: renders its pages to a per-import
+    /// temp directory one at a time (`PdfPageRenderer` -- page cap checked
+    /// before any render, memory bounded), then hands the page images to the
+    /// normal `beginScan` flow, so the existing Vision scan + review screen +
+    /// `importImageWithOcr` commit are reused unchanged (ADR-009). Never logs
+    /// the source path.
+    func beginPdf(url: URL) {
+        scanTask?.cancel()
+        cleanupPdfTemp()
+        pages = []
+        phase = .rendering(completed: 0, total: 0)
+        // The picker's sandbox access may have been released since the first
+        // import attempt; take our own for the render's duration.
+        if url.startAccessingSecurityScopedResource() { pdfAccessURL = url }
+        scanTask = Task {
+            do {
+                let rendered = try await Task.detached(priority: .userInitiated) {
+                    try PdfPageRenderer.render(
+                        url: url,
+                        progress: { done, total in
+                            Task { @MainActor [weak self] in
+                                guard let self, case .rendering = self.phase else { return }
+                                self.phase = .rendering(completed: done, total: total)
+                            }
+                        },
+                        isCancelled: { Task.isCancelled }
+                    )
+                }.value
+                releasePdfAccess()
+                if Task.isCancelled {
+                    rendered.cleanup()
+                    phase = .cancelled
+                    return
+                }
+                renderedPdf = rendered
+                scanTask = nil
+                beginScan(urls: rendered.pageURLs)
+            } catch {
+                releasePdfAccess()
+                phase = Self.phase(forRenderError: error)
+            }
+        }
+    }
+
+    /// Maps a render failure to a presentable terminal phase. Typed errors
+    /// only; a locked/malformed PDF gets the same honest wording as the
+    /// import alerts rather than a crash or a raw error dump.
+    nonisolated static func phase(forRenderError error: Error) -> OcrImportPhase {
+        guard let render = error as? PdfRenderError else {
+            return .failed(String(localized: "Couldn't read this PDF."))
+        }
+        switch render {
+        case .cancelled:
+            return .cancelled
+        case .locked:
+            return .failed(
+                String(
+                    localized:
+                        "This PDF is password-protected and can't be imported. GIST never attempts to bypass protection."
+                )
+            )
+        case .cannotOpen:
+            return .failed(String(localized: "This PDF couldn't be opened. It may be damaged."))
+        case .tooManyPages(let count, let max):
+            return .failed(String(localized: "This PDF has \(count) pages; GIST's limit is \(max)."))
+        case .pageRenderFailed(let index):
+            return .failed(String(localized: "Couldn't render page \(index + 1) of this PDF."))
+        case .pageTooLarge(let index):
+            return .failed(String(localized: "Page \(index + 1) of this PDF is too large to scan."))
+        case .totalSizeExceeded:
+            return .failed(String(localized: "This PDF is too large to scan on this device."))
+        }
+    }
+
+    /// Releases any temp page images and cancels in-flight work. Called when
+    /// the sheet goes away.
+    func discard() {
+        scanTask?.cancel()
+        cleanupPdfTemp()
+    }
+
+    private func releasePdfAccess() {
+        pdfAccessURL?.stopAccessingSecurityScopedResource()
+        pdfAccessURL = nil
+    }
+
+    private func cleanupPdfTemp() {
+        releasePdfAccess()
+        renderedPdf?.cleanup()
+        renderedPdf = nil
+    }
+
+    /// True while temp page images from a PDF are held (test seam).
+    var holdsPdfTempFiles: Bool { renderedPdf != nil }
+
     func updateText(forPage pageIndex: Int, text: String) {
         guard let i = pages.firstIndex(where: { $0.pageIndex == pageIndex }) else { return }
         pages[i].text = text
@@ -182,6 +295,7 @@ final class OcrImportState: ObservableObject {
     func reset() {
         scanTask?.cancel()
         scanTask = nil
+        cleanupPdfTemp()
         pages = []
         phase = .idle
     }
@@ -196,6 +310,9 @@ final class OcrImportState: ObservableObject {
         let engine = ReviewedOcrEngine(pages: orderedPages)
         let paths = orderedPages.map { $0.sourceURL.path }
         let outcome = await core.importScannedDocument(pagePaths: paths, engine: engine)
+        // The committed text and page images are copied into the store by
+        // Rust (ADR-006 §4); the temp renders are no longer needed either way.
+        defer { cleanupPdfTemp() }
         switch outcome {
         case .success(let itemId, let pageConfidences):
             phase = .done(itemId: itemId, pageConfidences: pageConfidences)

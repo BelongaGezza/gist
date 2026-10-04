@@ -89,3 +89,39 @@ jobs:
           name: fuzz-crashes
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+  # PDF parsing needs the prebuilt libpdfium, which is macOS-only today, so
+  # this target runs on a macOS runner instead of the ubuntu job above. The
+  # harness panics if pdfium cannot be loaded (otherwise it would silently
+  # fuzz nothing).
+  fuzz-pdf:
+    name: cargo-fuzz (pdf, macOS)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable
+        with:
+          toolchain: nightly-2026-09-01
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fetch pinned pdfium
+        run: ./tools/fetch-pdfium.sh
+
+      - name: Fuzz gist-parse-pdf
+        run: |
+          cargo fuzz run fuzz_parse_pdf -- \
+            -max_total_time=${{ github.event.inputs.fuzz_time || '120' }} \
+            -max_len=1048576
+        continue-on-error: false
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fuzz-pdf-crashes
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
