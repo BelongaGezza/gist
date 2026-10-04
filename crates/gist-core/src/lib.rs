@@ -1007,6 +1007,13 @@ impl Core {
         Ok(self.store.save_progress(item_id, token_index)?)
     }
 
+    /// Record that a reader (RSVP or flow) opened `item_id` just now, for
+    /// the library's "date last read" sort (ADR-021). Idempotent; an unknown
+    /// id is a no-op. Returns the Unix-millisecond timestamp written.
+    pub fn mark_item_opened(&self, item_id: &str) -> Result<i64, CoreError> {
+        Ok(self.store.mark_item_opened(item_id)?)
+    }
+
     /// Return a document's full content (metadata + section/block structure)
     /// serialised as JSON, for reading views that need the parsed block
     /// structure rather than RSVP's flat token stream — e.g. the flow-view
@@ -2380,6 +2387,38 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, tagged_id);
         assert!(items.iter().all(|i| i.id != untagged_id));
+    }
+
+    /// ADR-021: a real import reports source type, is never-opened until a
+    /// reader marks it, and an RSVP save moves derived progress. Opening the
+    /// RSVP session itself does not touch `last_opened_at` (readers call
+    /// `mark_item_opened` explicitly).
+    #[test]
+    fn reading_state_round_trip_through_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("read.txt");
+        std::fs::write(&txt, b"one two three four five six seven eight nine ten").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let item = &core.list_items(0, 10).unwrap()[0];
+        assert_eq!(item.source_type, "txt");
+        assert_eq!(item.last_opened_at, None);
+        assert_eq!(item.progress_fraction, 0.0);
+
+        core.new_rsvp_session(&id, gist_rsvp::Config::default())
+            .unwrap();
+        assert_eq!(core.list_items(0, 10).unwrap()[0].last_opened_at, None);
+
+        let ts = core.mark_item_opened(&id).unwrap();
+        core.save_progress(&id, 4).unwrap();
+        let item = &core.search_items("seven", 5).unwrap()[0];
+        assert_eq!(item.last_opened_at, Some(ts));
+        assert!(item.progress_fraction > 0.0 && item.progress_fraction < 1.0);
     }
 
     // ── Annotations (ADR-003) ────────────────────────────────────────────

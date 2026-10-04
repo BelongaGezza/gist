@@ -491,7 +491,9 @@ fn sqlite_path(db_path: &Path) -> PathBuf {
 // file, not a column, was chosen; `SCHEMA_VERSION` is unaffected.
 // v6 added the `annotations` table (ADR-003) — see Store::open's migration
 // block.
-const SCHEMA_VERSION: i64 = 6;
+// v7 added `library_items.last_opened_at` and `idx_tokens_item_idx`
+// (ADR-021, reading-state model).
+const SCHEMA_VERSION: i64 = 7;
 
 // ── LibraryItem (lightweight row, not the full Document) ──────────────────
 
@@ -513,6 +515,60 @@ pub struct LibraryItem {
     /// content — see [`Store::encrypt_item`]'s doc comment for why those are
     /// different things.
     pub content_encrypted: bool,
+    /// Normalised source format of the import (`"txt"`, `"epub"`, `"docx"`,
+    /// `"web"`, `"pdf"`, `"ocr"`), read from the stored `Metadata.source_type`
+    /// (a `docx:tracked-changes` variant is folded into `"docx"`). Empty when
+    /// the importer recorded none. ADR-021.
+    pub source_type: String,
+    /// Unix milliseconds of the last time either reader opened this item;
+    /// `None` = never opened (schema v7, ADR-021).
+    pub last_opened_at: Option<i64>,
+    /// Derived RSVP reading progress in `0.0..=1.0` (ADR-021): saved RSVP
+    /// token index over the item's last indexed word position. An item read
+    /// only in the flow view has no RSVP position, so this is `0.0` for it
+    /// even when `last_opened_at` is set (accepted limitation, D2).
+    pub progress_fraction: f64,
+}
+
+/// SELECT list + FROM/JOIN shared by every library-row query (ADR-021). The
+/// derived progress uses the `idx_tokens_item_idx` index (v7) so the per-row
+/// `MAX(token_idx)` is an index seek, and is only evaluated for rows that
+/// actually have a saved position.
+const LIBRARY_ITEM_SELECT: &str = "SELECT li.id, li.title, li.authors, li.source_path,
+        li.cover_path, li.created_at, li.content_encrypted, li.last_opened_at,
+        COALESCE(CASE WHEN json_valid(li.metadata_json)
+                      THEN json_extract(li.metadata_json, '$.source_type') END, ''),
+        -- scalar MAX/MIN return NULL if any argument is NULL, so an item with
+        -- no indexed words (no tokens rows) yields NULL -> 0.0, never a divide.
+        COALESCE(CASE WHEN COALESCE(rp.token_index, 0) > 0
+             THEN MIN(1.0, rp.token_index * 1.0 / MAX(
+                    (SELECT MAX(t.token_idx) FROM tokens t WHERE t.item_id = li.id), 1))
+             END, 0.0)
+     FROM library_items li
+     LEFT JOIN reading_progress rp ON rp.item_id = li.id";
+
+/// Maps one row of [`LIBRARY_ITEM_SELECT`] to a [`LibraryItem`].
+fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem> {
+    let authors_json: String = row.get(2)?;
+    let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
+    let raw_type: String = row.get(8)?;
+    let source_type = match raw_type.split(':').next() {
+        Some(base) => base.to_owned(),
+        None => String::new(),
+    };
+    Ok(LibraryItem {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        authors,
+        source_path: row.get(3)?,
+        cover_path: row.get(4)?,
+        created_at: row.get(5)?,
+        token_count: None, // TODO M2: populate from tokens table
+        content_encrypted: row.get(6)?,
+        source_type,
+        last_opened_at: row.get(7)?,
+        progress_fraction: row.get::<_, f64>(9)?.clamp(0.0, 1.0),
+    })
 }
 
 // ── RemovedItem (returned by remove_items so callers can clean up files) ──
@@ -899,6 +955,21 @@ impl Store {
                  COMMIT;",
             )?;
             tracing::info!("gist-store: migrated schema to version 6 (annotations)");
+        }
+
+        // v6 → v7: reading-state model (ADR-021). `last_opened_at` is NULL
+        // for every existing row (= never opened; nothing is backfilled).
+        // The index makes the per-item `MAX(token_idx)` used for derived
+        // progress an index seek instead of a scan of the whole tokens table.
+        if version < 7 {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE library_items ADD COLUMN last_opened_at INTEGER;
+                 CREATE INDEX IF NOT EXISTS idx_tokens_item_idx ON tokens(item_id, token_idx);
+                 PRAGMA user_version = 7;
+                 COMMIT;",
+            )?;
+            tracing::info!("gist-store: migrated schema to version 7 (last_opened_at)");
         }
 
         Ok(Self {
@@ -1406,41 +1477,16 @@ impl Store {
     /// Return a paginated list of library items (newest first).
     pub fn list_items(&self, offset: usize, limit: usize) -> Result<Vec<LibraryItem>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        let mut stmt = conn.prepare(
-            "SELECT id, title, authors, source_path, cover_path, created_at, content_encrypted
-             FROM library_items
-             ORDER BY created_at DESC
-             LIMIT ?1 OFFSET ?2",
-        )?;
-
-        let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
-            let authors_json: String = row.get(2)?;
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                authors_json,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, bool>(6)?,
-            ))
-        })?;
-
+        let sql = format!(
+            "{LIBRARY_ITEM_SELECT}
+             ORDER BY li.created_at DESC
+             LIMIT ?1 OFFSET ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit as i64, offset as i64], library_item_from_row)?;
         let mut items = Vec::new();
         for row in rows {
-            let (id, title, authors_json, source_path, cover_path, created_at, content_encrypted) =
-                row?;
-            let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
-            items.push(LibraryItem {
-                id,
-                title,
-                authors,
-                source_path,
-                cover_path,
-                created_at,
-                token_count: None, // TODO M2: populate from tokens table
-                content_encrypted,
-            });
+            items.push(row?);
         }
         Ok(items)
     }
@@ -1449,41 +1495,25 @@ impl Store {
     /// `None` if no such item exists.
     pub fn get_item_by_id(&self, id: &str) -> Result<Option<LibraryItem>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let sql = format!("{LIBRARY_ITEM_SELECT} WHERE li.id = ?1");
         let row = conn
-            .query_row(
-                "SELECT id, title, authors, source_path, cover_path, created_at, content_encrypted
-                 FROM library_items
-                 WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, bool>(6)?,
-                    ))
-                },
-            )
+            .query_row(&sql, params![id], library_item_from_row)
             .optional()?;
+        Ok(row)
+    }
 
-        Ok(row.map(
-            |(id, title, authors_json, source_path, cover_path, created_at, content_encrypted)| {
-                let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
-                LibraryItem {
-                    id,
-                    title,
-                    authors,
-                    source_path,
-                    cover_path,
-                    created_at,
-                    token_count: None, // TODO M2: populate from tokens table
-                    content_encrypted,
-                }
-            },
-        ))
+    /// Record that either reader opened `item_id` just now (ADR-021).
+    /// Idempotent and cheap: one indexed `UPDATE`. An unknown id updates
+    /// zero rows and is not an error (the item may have been removed
+    /// concurrently). Returns the timestamp written (Unix milliseconds).
+    pub fn mark_item_opened(&self, item_id: &str) -> Result<i64, StoreError> {
+        let now_ms = now_millis();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "UPDATE library_items SET last_opened_at = ?2 WHERE id = ?1",
+            params![item_id, now_ms],
+        )?;
+        Ok(now_ms)
     }
 
     /// Reads `path`, verifies it against its checksum sidecar if one exists
@@ -1669,43 +1699,17 @@ impl Store {
         collection_id: &str,
     ) -> Result<Vec<LibraryItem>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        let mut stmt = conn.prepare(
-            "SELECT li.id, li.title, li.authors, li.source_path, li.cover_path, li.created_at,
-                    li.content_encrypted
-             FROM library_items li
+        let sql = format!(
+            "{LIBRARY_ITEM_SELECT}
              JOIN item_collections ic ON ic.item_id = li.id
              WHERE ic.collection_id = ?1
-             ORDER BY li.created_at DESC",
-        )?;
-
-        let rows = stmt.query_map(params![collection_id], |row| {
-            let authors_json: String = row.get(2)?;
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                authors_json,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, bool>(6)?,
-            ))
-        })?;
-
+             ORDER BY li.created_at DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![collection_id], library_item_from_row)?;
         let mut items = Vec::new();
         for row in rows {
-            let (id, title, authors_json, source_path, cover_path, created_at, content_encrypted) =
-                row?;
-            let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
-            items.push(LibraryItem {
-                id,
-                title,
-                authors,
-                source_path,
-                cover_path,
-                created_at,
-                token_count: None, // TODO M2: populate from tokens table
-                content_encrypted,
-            });
+            items.push(row?);
         }
         Ok(items)
     }
@@ -1799,44 +1803,18 @@ impl Store {
     /// Mirrors `list_items_in_collection`'s query shape.
     pub fn list_items_by_tag(&self, tag_name: &str) -> Result<Vec<LibraryItem>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        let mut stmt = conn.prepare(
-            "SELECT li.id, li.title, li.authors, li.source_path, li.cover_path, li.created_at,
-                    li.content_encrypted
-             FROM library_items li
+        let sql = format!(
+            "{LIBRARY_ITEM_SELECT}
              JOIN item_tags it ON it.item_id = li.id
              JOIN tags t ON t.id = it.tag_id
              WHERE t.name = ?1
-             ORDER BY li.created_at DESC",
-        )?;
-
-        let rows = stmt.query_map(params![tag_name], |row| {
-            let authors_json: String = row.get(2)?;
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                authors_json,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, bool>(6)?,
-            ))
-        })?;
-
+             ORDER BY li.created_at DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![tag_name], library_item_from_row)?;
         let mut items = Vec::new();
         for row in rows {
-            let (id, title, authors_json, source_path, cover_path, created_at, content_encrypted) =
-                row?;
-            let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
-            items.push(LibraryItem {
-                id,
-                title,
-                authors,
-                source_path,
-                cover_path,
-                created_at,
-                token_count: None, // TODO M2: populate from tokens table
-                content_encrypted,
-            });
+            items.push(row?);
         }
         Ok(items)
     }
@@ -4537,5 +4515,192 @@ mod tests {
             let loaded: gist_model::Document = deserialize_ir_blob(bytes).unwrap();
             assert_eq!(loaded.metadata.title, "legacy-after-tables");
         }
+    }
+
+    // ── ADR-021: reading-state model (schema v7) ─────────────────────────
+
+    fn doc_with_words(title: &str, source_type: &str, words: usize) -> gist_model::Document {
+        let text = (0..words)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let section = gist_model::Section {
+            id: "s0".to_string(),
+            heading: None,
+            blocks: vec![gist_model::Block::Paragraph {
+                runs: vec![gist_model::TextRun::plain(text)],
+            }],
+        };
+        let mut meta = gist_model::Metadata::minimal(title);
+        meta.source_type = source_type.to_string();
+        gist_model::Document::new(meta, vec![section])
+    }
+
+    #[test]
+    fn newer_schema_is_rejected_with_schema_too_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("future.db");
+        {
+            let c = Connection::open(&db).unwrap();
+            c.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
+                .unwrap();
+        }
+        match Store::open(&db, &dir.path().join("s")) {
+            Err(StoreError::SchemaTooNew { found, expected }) => {
+                assert_eq!(found, SCHEMA_VERSION + 1);
+                assert_eq!(expected, SCHEMA_VERSION);
+            }
+            other => panic!("expected SchemaTooNew, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn never_opened_item_has_null_last_opened_and_zero_progress() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_words("Fresh", "txt", 10);
+        store.insert_item(&doc).unwrap();
+        let item = store.get_item_by_id(&doc.id).unwrap().unwrap();
+        assert_eq!(item.last_opened_at, None);
+        assert_eq!(item.progress_fraction, 0.0);
+        assert_eq!(item.source_type, "txt");
+    }
+
+    #[test]
+    fn mark_item_opened_round_trips_is_idempotent_and_ignores_unknown_ids() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_words("Opened", "epub", 5);
+        store.insert_item(&doc).unwrap();
+        let t1 = store.mark_item_opened(&doc.id).unwrap();
+        let got = store.get_item_by_id(&doc.id).unwrap().unwrap();
+        assert_eq!(got.last_opened_at, Some(t1));
+        let t2 = store.mark_item_opened(&doc.id).unwrap();
+        assert!(t2 >= t1);
+        assert_eq!(
+            store
+                .get_item_by_id(&doc.id)
+                .unwrap()
+                .unwrap()
+                .last_opened_at,
+            Some(t2)
+        );
+        // Unknown id: no error, no row created.
+        store.mark_item_opened("no-such-id").unwrap();
+        assert_eq!(store.list_items(0, 10).unwrap().len(), 1);
+        // The list query reports it too.
+        assert_eq!(store.list_items(0, 10).unwrap()[0].last_opened_at, Some(t2));
+    }
+
+    #[test]
+    fn progress_is_derived_from_rsvp_position_and_clamped() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_words("Progress", "txt", 101);
+        store.insert_item(&doc).unwrap();
+        // 101 words -> last word index 100 (single paragraph, no breaks).
+        let last = doc
+            .token_stream
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.kind == gist_model::TokenKind::Word)
+            .map(|(i, _)| i)
+            .max()
+            .unwrap();
+        store.save_progress(&doc.id, last / 2).unwrap();
+        let p = store
+            .get_item_by_id(&doc.id)
+            .unwrap()
+            .unwrap()
+            .progress_fraction;
+        assert!((p - ((last / 2) as f64 / last as f64)).abs() < 1e-9, "{p}");
+        // Position past the last word clamps to 1.0.
+        store.save_progress(&doc.id, last + 50).unwrap();
+        let p = store.list_items(0, 10).unwrap()[0].progress_fraction;
+        assert_eq!(p, 1.0);
+        // Position 0 is unstarted.
+        store.save_progress(&doc.id, 0).unwrap();
+        assert_eq!(store.list_items(0, 10).unwrap()[0].progress_fraction, 0.0);
+    }
+
+    #[test]
+    fn zero_token_items_never_divide_by_zero() {
+        let (_dir, store) = open_test_store();
+        let doc = Document::new(Metadata::minimal("Empty"), vec![]);
+        store.insert_item(&doc).unwrap();
+        store.save_progress(&doc.id, 5).unwrap();
+        let item = store.get_item_by_id(&doc.id).unwrap().unwrap();
+        assert_eq!(item.progress_fraction, 0.0);
+        assert!(item.progress_fraction.is_finite());
+    }
+
+    #[test]
+    fn flow_only_item_has_last_opened_but_zero_progress() {
+        // ADR-021 accepted limitation: opened (flow view) but no RSVP position.
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_words("FlowOnly", "pdf", 50);
+        store.insert_item(&doc).unwrap();
+        store.mark_item_opened(&doc.id).unwrap();
+        let item = store.get_item_by_id(&doc.id).unwrap().unwrap();
+        assert!(item.last_opened_at.is_some());
+        assert_eq!(item.progress_fraction, 0.0);
+    }
+
+    #[test]
+    fn source_type_is_normalised_and_reported_by_every_listing() {
+        let (_dir, store) = open_test_store();
+        let a = doc_with_words("A", "docx:tracked-changes", 3);
+        let b = doc_with_words("B", "web", 3);
+        store.insert_item(&a).unwrap();
+        store.insert_item(&b).unwrap();
+        let coll = store.create_collection("C").unwrap();
+        store.add_item_to_collection(&a.id, &coll).unwrap();
+        store.add_tag(&a.id, "t").unwrap();
+
+        let by_id = |items: Vec<LibraryItem>, id: &str| {
+            items.into_iter().find(|i| i.id == id).unwrap().source_type
+        };
+        assert_eq!(by_id(store.list_items(0, 10).unwrap(), &a.id), "docx");
+        assert_eq!(by_id(store.list_items(0, 10).unwrap(), &b.id), "web");
+        assert_eq!(
+            by_id(store.list_items_in_collection(&coll).unwrap(), &a.id),
+            "docx"
+        );
+        assert_eq!(by_id(store.list_items_by_tag("t").unwrap(), &a.id), "docx");
+        assert_eq!(
+            store.get_item_by_id(&a.id).unwrap().unwrap().source_type,
+            "docx"
+        );
+    }
+
+    #[test]
+    fn removal_cascades_progress_and_leaves_no_reading_state() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_words("Gone", "txt", 20);
+        store.insert_item(&doc).unwrap();
+        store.save_progress(&doc.id, 3).unwrap();
+        store.mark_item_opened(&doc.id).unwrap();
+        store.remove_items(&[doc.id.clone()]).unwrap();
+        assert!(store.get_item_by_id(&doc.id).unwrap().is_none());
+        assert_eq!(store.get_progress(&doc.id).unwrap(), 0);
+        // mark on a removed id is a harmless no-op.
+        store.mark_item_opened(&doc.id).unwrap();
+        assert!(store.list_items(0, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn item_row_queries_use_the_token_index() {
+        // The derived-progress subquery must be an index seek, not a scan of
+        // the whole tokens table (ADR-021 query-cost reasoning).
+        let (_dir, store) = open_test_store();
+        let conn = store.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let sql = format!("EXPLAIN QUERY PLAN {LIBRARY_ITEM_SELECT}");
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            plan.iter().any(|p| p.contains("idx_tokens_item_idx")),
+            "plan: {plan:?}"
+        );
     }
 }

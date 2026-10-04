@@ -19,7 +19,7 @@
 //!     shadow tables are an on-disk format, not just an API;
 //!   * the `tokens_ad` delete trigger + `ON DELETE CASCADE` still fire
 //!     correctly against rows and index entries written by the old version;
-//!   * the v3 → v4 → v5 → v6 migrations run successfully on a file created
+//!   * the v3 → v4 → v5 → v6 → v7 migrations run successfully on a file created
 //!     by the old version (fixture B is a v3-era library, from before
 //!     `source_copy_path`/`content_encrypted`/`annotations` existed);
 //!   * new writes interleave with old rows in the same index.
@@ -81,10 +81,10 @@ fn old_v5_library_opens_reads_and_searches() {
     let (_dir, db, storage) = fixture_copy("library_v5_rusqlite031.db");
     let store = Store::open(&db, &storage).expect("an existing v5 library must still open");
 
-    // One version behind current (v6 added the ADR-003 `annotations` table)
+    // Two versions behind current (v6 added the ADR-003 `annotations` table, v7 ADR-021 `last_opened_at`)
     // — migrates forward cleanly, and in particular the version-ceiling
     // check must not trip.
-    assert_eq!(user_version(&db), 6);
+    assert_eq!(user_version(&db), 7);
 
     assert_eq!(
         titles(&store),
@@ -283,14 +283,14 @@ fn removing_an_old_row_still_cascades_and_clears_the_old_fts_entries() {
 // ── fixture B: a v3-era library, so the migrations themselves are exercised ──
 
 #[test]
-fn old_v3_library_migrates_forward_to_v6() {
+fn old_v3_library_migrates_forward_to_v7() {
     let (_dir, db, storage) = fixture_copy("library_v3_rusqlite031.db");
     assert_eq!(user_version(&db), 3, "fixture must start at v3");
 
     let store = Store::open(&db, &storage).expect("a v3 library must migrate, not fail");
     assert_eq!(
         user_version(&db),
-        6,
+        7,
         "must have migrated to the current version"
     );
 
@@ -342,7 +342,7 @@ fn old_v3_library_migrates_forward_to_v6() {
     // Re-opening an already-migrated file is a no-op, not a second migration.
     drop(store);
     let store = Store::open(&db, &storage).unwrap();
-    assert_eq!(user_version(&db), 6);
+    assert_eq!(user_version(&db), 7);
     assert_eq!(store.list_items(0, 10).unwrap().len(), 1);
 }
 
@@ -380,4 +380,40 @@ fn new_version_keeps_writing_a_downgrade_readable_file_format() {
         header[18],
         header[19]
     );
+}
+
+// ── ADR-021 (schema v7): reading-state fields on a pre-existing library ──────
+
+#[test]
+fn v7_migration_leaves_existing_items_never_opened_and_derives_progress() {
+    let (_dir, db, storage) = fixture_copy("library_v5_rusqlite031.db");
+    let store = Store::open(&db, &storage).unwrap();
+
+    // Nothing is backfilled: every pre-v7 row is "never opened".
+    let items = store.list_items(0, 100).unwrap();
+    assert_eq!(items.len(), 3);
+    assert!(items.iter().all(|i| i.last_opened_at.is_none()));
+
+    // The old RSVP position (token index 7) now surfaces as derived progress;
+    // items with no saved position are 0.0. Never outside 0..=1.
+    let treasure = items
+        .iter()
+        .find(|i| i.title.as_deref() == Some("Treasure Island"))
+        .unwrap();
+    assert!(
+        treasure.progress_fraction > 0.0 && treasure.progress_fraction <= 1.0,
+        "got {}",
+        treasure.progress_fraction
+    );
+    for i in items.iter().filter(|i| i.id != treasure.id) {
+        assert_eq!(i.progress_fraction, 0.0);
+    }
+
+    // Marking opened works against an old row and survives a reopen.
+    let ts = store.mark_item_opened(&treasure.id).unwrap();
+    let treasure_id = treasure.id.clone();
+    drop(store);
+    let store = Store::open(&db, &storage).unwrap();
+    let again = store.get_item_by_id(&treasure_id).unwrap().unwrap();
+    assert_eq!(again.last_opened_at, Some(ts));
 }
