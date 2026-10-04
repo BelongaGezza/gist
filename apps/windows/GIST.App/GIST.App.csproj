@@ -37,5 +37,14 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="Assets\**\*.png" />
+    <!-- Assets\GIST.ico is copied next to the executable (not just embedded via ApplicationIcon)
+         so MainWindow can hand AppWindow.SetIcon a real file path: WinUI 3 gives the window no
+         HICON on its own, and ApplicationIcon alone only sets the EXE's Explorer icon. -->
+    <Content Include="Assets\GIST.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- generate-assets.ps1 regenerates the icon set at development time; it is not app content
+         and must not be deployed inside the app (the MSIX/WinUI tooling's Assets glob would
+         otherwise copy it to the output directory). -->
+    <Content Remove="Assets\generate-assets.ps1" />
+    <None Include="Assets\generate-assets.ps1" CopyToOutputDirectory="Never" />
   </ItemGroup>
 </Project>
