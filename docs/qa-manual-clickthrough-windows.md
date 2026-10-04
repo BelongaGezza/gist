@@ -43,7 +43,7 @@ also get PNGs of the empty / seeded / corrupt-key states for the visual pass.
 - [ ] [automated: Typing_a_partial_word_filters_by_prefix_and_Esc_clears_and_refocuses_list] Typing a partial word filters (prefix) after the debounce; Esc clears and returns focus to the list.
 - [ ] [automated: Delete_key_opens_remove_dialog_and_Cancel_changes_nothing] Delete on a selection opens the Remove dialog.
 - [ ] [automated: CtrlA_selects_every_row] Ctrl+A selects all rows.
-- [ ] [automated: Enter_on_a_row_triggers_open_which_is_the_coming_later_notice] Enter on a row triggers Open (currently the "Coming in a later update" notice; replace when the reader lands, W4).
+- [ ] [automated: Enter_on_a_row_opens_the_reader] Enter on a row triggers Open, which opens the RSVP reader (W4). Open in Flow View is still a "Coming in a later update" notice until W5.
 - [ ] [automated: CtrlO_opens_the_native_picker_which_can_be_cancelled] Ctrl+O opens the file picker.
 - [ ] [manual only] Tab order: search box -> command bar -> list; arrow keys move through rows; Space toggles the row checkbox; focus rings visible in every theme.
 - [ ] [manual only] Right-click a row: context menu (Open in Reader, Open in Flow View, Manage Tags..., Encrypt..., Remove...); right-click on an unselected row selects it first; "Encrypt..." is hidden when every selected item is already encrypted.
@@ -116,6 +116,17 @@ the UI spec and ADR-006's addendum.
 - [ ] Narrator: reads the page title, the list ("Library items"), each row ("Title, Author, encrypted"), the commands and dialogs' titles/bodies in a sensible order.
 - [ ] High contrast (Aquatic, Desert, Night sky): GIST's own palette is bypassed entirely (no Mica, no forced light/dark) and all controls and glyphs remain visible using the OS high-contrast colours.
 - [ ] Nothing shows a raw exception message, GUID or file path anywhere.
+
+## RSVP reader (W4)
+
+- [ ] [automated: Enter_on_a_row_opens_the_reader_paused_on_the_first_word, Back_button_and_Alt_Left_return_to_the_library] Open from the Library and a Collection (button, Enter, double-click, "Open in Reader"); Back button, Alt+Left and clicking the already-selected sidebar entry all return.
+- [ ] [automated: Play_advances_words_and_Pause_holds_position_without_blanking, Space_toggles_playback_even_when_a_slider_has_focus, Space_on_the_focused_play_button_toggles_exactly_once] Play/Pause (button and Space); pausing never blanks the word.
+- [ ] [automated: Arrow_keys_step_one_word_and_Ctrl_arrows_jump_five, WPM_slider_and_number_box_stay_in_step_and_the_core_range_holds] Left/Right, Ctrl+Left/Right, WPM slider and number box.
+- [ ] [automated: Leaving_persists_progress_and_reopening_restores_it] Progress persists on leaving and restores after a restart.
+- [ ] [manual only] Visual pass in all five themes: 48 px Georgia word centred on a solid theme background (OLED exactly black), accent Play button legible, progress caption, slider/number box legible; High contrast bypasses the palette.
+- [ ] [manual only] Narrator: Play/Pause announces "Play"/"Pause"; words are NOT announced as they change; "Read current word" announces the current word once.
+- [ ] [manual only] Reading feel at 300 and 600 WPM: no visible stutter, pauses at sentence/paragraph ends; a long soak shows no drift (measured numbers are in the W4 closeout in docs/windows-development-plan.md).
+- [ ] [manual only] Text scaling (Settings > Accessibility > Text size) enlarges the word; reduced animations produce no transitions (there are none).
 
 ## Known behaviour to be aware of
 
