@@ -202,12 +202,17 @@ public sealed partial class FlowPage : Page, IReadingLayout
         finally
         {
             _restoring = false;
-            FlowList.Opacity = 1;
-            ProgressRow.Visibility = Visibility.Visible;
-            if (_scroll is not null) _scroll.ViewChanged += OnViewChanged;
-            UpdateProgressFromScroll();
-            UpdateProgressUi();
-            FocusDocument();
+            // F63: Back during the restore already ran Leave(); do not re-hook handlers or steal focus on a page
+            // whose frame is navigating away.
+            if (!_left)
+            {
+                FlowList.Opacity = 1;
+                ProgressRow.Visibility = Visibility.Visible;
+                if (_scroll is not null) _scroll.ViewChanged += OnViewChanged;
+                UpdateProgressFromScroll();
+                UpdateProgressUi();
+                FocusDocument();
+            }
         }
     }
 
