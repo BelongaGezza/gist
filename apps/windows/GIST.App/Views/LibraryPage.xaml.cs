@@ -452,28 +452,13 @@ public sealed partial class LibraryPage : Page
         Frame.Navigate(typeof(RsvpPage), new RsvpNavigationArgs(item.Id, title));
     }
 
-    // TODO(W5): open the flow reader. Until then Open in Flow View is a notice.
-    private async void OnOpenFlow(object sender, RoutedEventArgs e) => await ShowComingSoonAsync();
-
-    private async Task ShowComingSoonAsync() => await SafeAsync(async () =>
+    /// <summary>Open in Flow View: the flow reader (W5) for the single selected item.</summary>
+    private void OnOpenFlow(object sender, RoutedEventArgs e)
     {
-        if (_handlingDialog || XamlRoot is null) return;
-        _handlingDialog = true;
-        try
-        {
-            await new ContentDialog
-            {
-                Title = "Coming in a later update",
-                Content = "The reader isn't available yet.",
-                CloseButtonText = "OK",
-                XamlRoot = XamlRoot,
-            }.ShowAsync();
-        }
-        finally
-        {
-            _handlingDialog = false;
-        }
-    });
+        if (_vm?.SingleSelectedItem is not { } item) return;
+        var title = string.IsNullOrWhiteSpace(item.Title) ? "Untitled" : item.Title;
+        Frame.Navigate(typeof(FlowPage), new FlowNavigationArgs(item.Id, title));
+    }
 
     private void OnSortClick(object sender, RoutedEventArgs e)
     {
