@@ -151,16 +151,18 @@ public class LibraryClickThroughTests
     }
 
     [UiFact]
-    public async Task Enter_on_a_row_triggers_open_which_is_the_coming_later_notice()
+    public async Task Enter_on_a_row_opens_the_reader()
     {
+        // W4: Open now opens the RSVP reader (full coverage in RsvpReaderTests). Open in Flow View stays a
+        // "coming later" notice until W5.
         using var c = await LaunchAsync();
         var d = c.D;
         d.ClickRow(Apple);
         d.Press(VirtualKeyShort.RETURN);
-        var dlg = d.Dialog("Coming in a later update");
-        Assert.Contains(LibraryDriver.DialogTexts(dlg), t => t == "The reader isn't available yet.");
-        d.ClickPart(dlg, "CloseButton");
-        d.WaitDialogGone("Coming in a later update");
+        d.Need("RsvpPage_Root");
+        d.Need("RsvpPage_PlayPauseButton");
+        d.InvokeCommand("RsvpPage_BackButton");
+        d.WaitForLibrary();
     }
 
     // ── 3. Sort ────────────────────────────────────────────────────────────

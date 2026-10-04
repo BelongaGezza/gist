@@ -954,13 +954,21 @@ impl Core {
         Ok(items)
     }
 
-    /// Create an RSVP session for the given item.
-    /// Returns the session serialised as JSON.
-    pub fn start_rsvp(
+    /// Build an RSVP session for the given item, with the reader's saved
+    /// progress restored.
+    ///
+    /// This is the one place that decides what a freshly opened session looks
+    /// like. [`Core::start_rsvp`] serialises the result of it for clients
+    /// that drive pacing themselves from JSON, and `gist-ffi`'s
+    /// `GistCore::open_rsvp_session` hands it to the client as a live object
+    /// that drives pacing through the engine instead
+    /// (`docs/windows-development-plan.md` §4.3) — deliberately one
+    /// implementation, so progress restore cannot drift between the two.
+    pub fn new_rsvp_session(
         &self,
         item_id: &str,
         config: gist_rsvp::Config,
-    ) -> Result<String, CoreError> {
+    ) -> Result<gist_rsvp::RsvpSession, CoreError> {
         let doc = self
             .store
             .get_item(item_id)?
@@ -975,7 +983,23 @@ impl Core {
         // Restore saved cursor position, clamped to valid range.
         session.cursor = progress.min(session.tokens.len().saturating_sub(1));
 
-        Ok(serde_json::to_string(&session)?)
+        Ok(session)
+    }
+
+    /// Create an RSVP session for the given item.
+    /// Returns the session serialised as JSON.
+    ///
+    /// The JSON shape is part of the shipped contract — Apple's
+    /// `RsvpPlayer`/`RsvpSessionVM` decodes it — so it must stay
+    /// byte-compatible.
+    pub fn start_rsvp(
+        &self,
+        item_id: &str,
+        config: gist_rsvp::Config,
+    ) -> Result<String, CoreError> {
+        Ok(serde_json::to_string(
+            &self.new_rsvp_session(item_id, config)?,
+        )?)
     }
 
     /// Persist the current token index for `item_id`.
@@ -1221,8 +1245,23 @@ impl Core {
         let mut copies_handled: std::collections::HashSet<String> = Default::default();
 
         for item in removed {
-            tally.try_delete_with_sidecar(&item.doc_path);
-            tally.try_delete_with_sidecar(&tokens_path_for(&item.doc_path));
+            // `doc_path` is read back out of the database exactly like
+            // `source_copy_path`, so it gets the same containment check
+            // (`F40`): a tampered row must not steer these deletes at a file
+            // outside the storage directory. Refused paths are counted in
+            // nothing, as for an out-of-storage stored copy.
+            let storage_dir = self.store.storage_dir();
+            let tokens_path = tokens_path_for(&item.doc_path);
+            for blob in [item.doc_path.as_str(), tokens_path.as_str()] {
+                if is_inside(storage_dir, blob) {
+                    tally.try_delete_with_sidecar(blob);
+                } else {
+                    tracing::debug!(
+                        "gist-core: refusing to delete blob outside storage: {}",
+                        blob
+                    );
+                }
+            }
 
             if delete_source_files {
                 if let Some(source_copy_path) = &item.source_copy_path {
@@ -2229,6 +2268,63 @@ mod tests {
 
         let unknown = core.get_document("not-a-real-id");
         assert!(matches!(unknown, Err(CoreError::NotFound(_))));
+    }
+
+    /// `new_rsvp_session` and `start_rsvp` must agree on everything — same
+    /// token stream, same restored cursor — because they are the two
+    /// entry points the two native shells use (object-driven pacing on
+    /// Windows, JSON-driven on Apple) and `docs/windows-development-plan.md`
+    /// §4.3 is explicit that they must not drift apart.
+    #[test]
+    fn new_rsvp_session_and_start_rsvp_agree_and_restore_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("rsvp.txt");
+        std::fs::write(
+            &txt,
+            b"one two three four five six seven eight nine ten eleven twelve",
+        )
+        .unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let config = gist_rsvp::Config {
+            wpm: 600,
+            ..Default::default()
+        };
+
+        let fresh = core.new_rsvp_session(&id, config.clone()).unwrap();
+        assert!(fresh.tokens.len() >= 12, "{} tokens", fresh.tokens.len());
+        assert_eq!(fresh.cursor, 0, "no saved progress yet");
+
+        // Save progress, then confirm both entry points restore it.
+        core.save_progress(&id, 5).unwrap();
+        let restored = core.new_rsvp_session(&id, config.clone()).unwrap();
+        assert_eq!(restored.cursor, 5);
+
+        let json = core.start_rsvp(&id, config.clone()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["cursor"], serde_json::json!(5));
+        assert_eq!(value["config"]["wpm"], serde_json::json!(600));
+        assert_eq!(
+            value["tokens"].as_array().map(Vec::len),
+            Some(restored.tokens.len())
+        );
+        // The memoised schedule must not leak into the client contract.
+        assert!(value.get("schedule").is_none(), "{value}");
+
+        // Out-of-range saved progress is clamped, not trusted.
+        core.save_progress(&id, 10_000).unwrap();
+        let clamped = core.new_rsvp_session(&id, config).unwrap();
+        assert_eq!(clamped.cursor, clamped.tokens.len() - 1);
+
+        assert!(matches!(
+            core.new_rsvp_session("not-a-real-id", gist_rsvp::Config::default()),
+            Err(CoreError::NotFound(_))
+        ));
     }
 
     #[test]
@@ -3254,7 +3350,9 @@ mod tests {
         let doc_path = storage.join(format!("{id}.json"));
         let handle = open_without_delete_sharing(&doc_path);
 
-        let outcome = core.remove_items_detailed(&[id.clone()], true).unwrap();
+        let outcome = core
+            .remove_items_detailed(std::slice::from_ref(&id), true)
+            .unwrap();
 
         // The removal itself happened, in full.
         assert_eq!(outcome.removed_ids, vec![id.clone()]);
@@ -3535,7 +3633,9 @@ mod tests {
         let copy_path = the_one_sandboxed_copy(&storage);
         let handle = open_without_delete_sharing(&copy_path);
 
-        let outcome = core.remove_items_detailed(&[id.clone()], true).unwrap();
+        let outcome = core
+            .remove_items_detailed(std::slice::from_ref(&id), true)
+            .unwrap();
 
         assert_eq!(outcome.removed_ids, vec![id]);
         assert_eq!(
@@ -3969,6 +4069,51 @@ mod tests {
             outside.exists() && sha256_hex(&outside) == outside_hash,
             "the sweep must not reach outside the storage directory either: {swept:?}"
         );
+    }
+
+    /// `F40`: the document blob paths come out of the database too, so a
+    /// row whose `doc_path` has been rewritten to a traversal path must not
+    /// make removal delete the file it resolves to (nor its `.tokens.json`
+    /// sibling).
+    #[test]
+    fn a_traversal_shaped_doc_path_never_deletes_outside_the_storage_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let (core, storage) = core_rooted_at(&root);
+        let db = root.join("test.db");
+
+        let outside = dir.path().join("precious.json");
+        std::fs::write(&outside, b"Not GIST to delete.").unwrap();
+        let outside_tokens = dir.path().join("precious.tokens.json");
+        std::fs::write(&outside_tokens, b"Nor this.").unwrap();
+
+        let src = dir.path().join("doc-traversal.txt");
+        std::fs::write(&src, b"An item whose blob path gets rewritten.").unwrap();
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        let traversal = storage.join("..").join("..").join("precious.json");
+        assert_eq!(
+            std::fs::canonicalize(&traversal).unwrap(),
+            std::fs::canonicalize(&outside).unwrap(),
+            "precondition: the traversal path must really resolve to the outside file"
+        );
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let changed = conn
+                .execute(
+                    "UPDATE library_items SET doc_path = ?1 WHERE id = ?2",
+                    rusqlite::params![traversal.to_string_lossy().as_ref(), &id],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "the tampering must actually have hit the row");
+        }
+
+        let outcome = core.remove_items_detailed(&[id], true).unwrap();
+        assert!(
+            outside.exists() && outside_tokens.exists(),
+            "removal must never delete a blob outside the storage directory: {outcome:?}"
+        );
+        assert!(src.exists());
     }
 
     /// A bulk call spanning a real id and an unknown one must report both

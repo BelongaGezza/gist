@@ -20,7 +20,8 @@
                         PaneDisplayMode="Auto"
                         IsBackButtonVisible="Collapsed"
                         IsSettingsVisible="False"
-                        SelectionChanged="OnSelectionChanged">
+                        SelectionChanged="OnSelectionChanged"
+                        ItemInvoked="OnItemInvoked">
             <NavigationView.MenuItems>
                 <NavigationViewItem x:Name="LibraryItem" Content="Library" Icon="Library" Tag="library" />
                 <NavigationViewItemHeader x:Name="CollectionsHeader" Content="Collections" Visibility="Collapsed" />

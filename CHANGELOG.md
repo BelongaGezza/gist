@@ -93,6 +93,10 @@ pre-1.0 work, not a shipped release note.
 - The RSVP reader, the flow reader, an accessibility pass, and MSIX packaging are the remaining
   planned phases and are not built yet — see `docs/windows-development-plan.md`'s W4–W6.
 
+- RSVP reader (W4): play/pause, WPM slider + number box, word stepping, scrubber, progress save/restore. Pacing comes from the shared Rust engine over FFI (no second port). A 10-minute soak at 600 WPM showed no cumulative drift. Visual/Narrator passes still pending.
+
+- Flow reader (W5): virtualised reading view with typography (size, Default/Serif, line spacing), Contents, in-document find (F3/Ctrl+G), progress with position restore, and selectable text. Opened from the Library context menu. Known issues: memory growth across repeated opens of very large documents, and very long single paragraphs are untested.
+
 ### Security
 
 GIST tracks security findings from internal and independent reviews in an open register rather

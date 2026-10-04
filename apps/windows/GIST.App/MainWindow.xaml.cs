@@ -31,6 +31,8 @@ public sealed partial class MainWindow : Window
             AppTitleBar.Visibility = Visibility.Collapsed;
         }
 
+        SetWindowIcon();
+
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1100, 720));
         Nav.SelectedItem = LibraryItem;
         _lastContentSelection = LibraryItem;
@@ -39,6 +41,45 @@ public sealed partial class MainWindow : Window
         AppServices.Theme.PropertyChanged += OnThemePropertyChanged;
         AppServices.Core.PropertyChanged += OnCorePropertyChanged;
         RebuildCollectionsNav();
+    }
+
+    /// <summary>
+    /// Gives the window a real Win32 icon from <c>Assets\GIST.ico</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>&lt;ApplicationIcon&gt;</c> in the csproj only embeds the icon as the executable's Win32
+    /// resource, which is what Explorer shows for the <em>file</em>. It does not give the window an
+    /// <c>HICON</c>: WinUI 3 never sets one on its own. Verified on 2026-10-04 by querying a running
+    /// debug build — <c>WM_GETICON</c> (SMALL/BIG/SMALL2) and <c>GetClassLongPtr</c>
+    /// (<c>GCLP_HICON</c>/<c>GCLP_HICONSM</c>) all returned NULL. Without this call the taskbar and
+    /// Alt+Tab fall back to the process image's icon, which happens to look right but is a fallback,
+    /// not the window's own icon, and Task Manager and some shell surfaces do not apply it.
+    /// </para>
+    /// <para>
+    /// The custom title bar renders <c>StoreLogo.png</c> itself (see MainWindow.xaml), so this is
+    /// specifically about the taskbar/Alt+Tab/Task Manager icon, not the title-bar strip.
+    /// </para>
+    /// <para>
+    /// Best-effort by design: a missing or unreadable icon degrades to the pre-existing
+    /// process-image fallback rather than taking the whole window down on launch. The asset is
+    /// copied next to the executable by the csproj, so the normal path is for it to be present.
+    /// </para>
+    /// </remarks>
+    private void SetWindowIcon()
+    {
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "Assets", "GIST.ico");
+            if (File.Exists(path))
+            {
+                AppWindow.SetIcon(path);
+            }
+        }
+        catch (Exception)
+        {
+            // Cosmetic only — never block startup over the window icon.
+        }
     }
 
     // ── Theme (W3, spec §3.1) ──────────────────────────────────────────────
@@ -89,6 +130,21 @@ public sealed partial class MainWindow : Window
             Nav.MenuItems.Insert(insertAt, item);
             _collectionNavItems.Add(item);
             insertAt++;
+        }
+    }
+
+    /// <summary>
+    /// While the reader is open, clicking the sidebar entry that is already selected (Library or
+    /// the collection the reader was opened from) is "go back to it": a selection change would not
+    /// fire, so without this the click would silently do nothing.
+    /// </summary>
+    private void OnItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
+    {
+        if (ContentFrame.Content is RsvpPage
+            && ReferenceEquals(args.InvokedItemContainer, Nav.SelectedItem)
+            && ContentFrame.CanGoBack)
+        {
+            ContentFrame.GoBack();
         }
     }
 

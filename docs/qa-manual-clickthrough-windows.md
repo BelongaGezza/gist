@@ -43,7 +43,7 @@ also get PNGs of the empty / seeded / corrupt-key states for the visual pass.
 - [ ] [automated: Typing_a_partial_word_filters_by_prefix_and_Esc_clears_and_refocuses_list] Typing a partial word filters (prefix) after the debounce; Esc clears and returns focus to the list.
 - [ ] [automated: Delete_key_opens_remove_dialog_and_Cancel_changes_nothing] Delete on a selection opens the Remove dialog.
 - [ ] [automated: CtrlA_selects_every_row] Ctrl+A selects all rows.
-- [ ] [automated: Enter_on_a_row_triggers_open_which_is_the_coming_later_notice] Enter on a row triggers Open (currently the "Coming in a later update" notice; replace when the reader lands, W4).
+- [ ] [automated: Enter_on_a_row_opens_the_reader] Enter on a row triggers Open, which opens the RSVP reader (W4). Open in Flow View opens the flow reader (W5).
 - [ ] [automated: CtrlO_opens_the_native_picker_which_can_be_cancelled] Ctrl+O opens the file picker.
 - [ ] [manual only] Tab order: search box -> command bar -> list; arrow keys move through rows; Space toggles the row checkbox; focus rings visible in every theme.
 - [ ] [manual only] Right-click a row: context menu (Open in Reader, Open in Flow View, Manage Tags..., Encrypt..., Remove...); right-click on an unselected row selects it first; "Encrypt..." is hidden when every selected item is already encrypted.
@@ -116,6 +116,39 @@ the UI spec and ADR-006's addendum.
 - [ ] Narrator: reads the page title, the list ("Library items"), each row ("Title, Author, encrypted"), the commands and dialogs' titles/bodies in a sensible order.
 - [ ] High contrast (Aquatic, Desert, Night sky): GIST's own palette is bypassed entirely (no Mica, no forced light/dark) and all controls and glyphs remain visible using the OS high-contrast colours.
 - [ ] Nothing shows a raw exception message, GUID or file path anywhere.
+
+## RSVP reader (W4)
+
+- [ ] [automated: Enter_on_a_row_opens_the_reader_paused_on_the_first_word, Back_button_and_Alt_Left_return_to_the_library] Open from the Library and a Collection (button, Enter, double-click, "Open in Reader"); Back button, Alt+Left and clicking the already-selected sidebar entry all return.
+- [ ] [automated: Play_advances_words_and_Pause_holds_position_without_blanking, Space_toggles_playback_even_when_a_slider_has_focus, Space_on_the_focused_play_button_toggles_exactly_once] Play/Pause (button and Space); pausing never blanks the word.
+- [ ] [automated: Arrow_keys_step_one_word_and_Ctrl_arrows_jump_five, WPM_slider_and_number_box_stay_in_step_and_the_core_range_holds] Left/Right, Ctrl+Left/Right, WPM slider and number box.
+- [ ] [automated: Leaving_persists_progress_and_reopening_restores_it] Progress persists on leaving and restores after a restart.
+- [ ] [manual only] Visual pass in all five themes: 48 px Georgia word centred on a solid theme background (OLED exactly black), accent Play button legible, progress caption, slider/number box legible; High contrast bypasses the palette.
+- [ ] [manual only] Narrator: Play/Pause announces "Play"/"Pause"; words are NOT announced as they change; "Read current word" announces the current word once.
+- [ ] [manual only] Reading feel at 300 and 600 WPM: no visible stutter, pauses at sentence/paragraph ends; a long soak shows no drift (measured numbers are in the W4 closeout in docs/windows-development-plan.md).
+- [ ] [manual only] Text scaling (Settings > Accessibility > Text size) enlarges the word; reduced animations produce no transitions (there are none).
+
+## Flow reader (W5)
+
+Spec §7.2. Tags are provisional; role R2 retags with real test names.
+
+- [ ] [automated: Open_in_Flow_View_from_the_library_shows_the_document_and_Back_returns, Open_in_Flow_View_from_a_collection_works_and_a_document_without_headings_disables_Contents] Open in Flow View from the Library and from a Collection (context menu entry); Back returns.
+- [ ] [manual only] Large document (>= 100k words): scrolling with wheel, scrollbar drag and precision touchpad stays smooth; memory stays bounded (see the W5 measurement record in docs/windows-development-plan.md).
+- [ ] [manual only] Typography (Aa) menu: Size smaller/larger clamps at 13 and 28 pt, default 17; Font offers Default and Serif only (no "Rounded" on Windows, spec §7.2); Line spacing Compact/Regular/Relaxed visibly differ; code spans stay monospaced in every font; choices persist after restart.
+- [ ] [automated: Contents_lists_every_heading_indented_by_level_and_clicking_scrolls_to_it, Open_in_Flow_View_from_a_collection_works_and_a_document_without_headings_disables_Contents] Contents flyout lists headings indented 16 epx x (level - 1); clicking scrolls to the section; a document with no headings shows a disabled Contents button.
+- [ ] [manual only] TOC indentation looks right for a document with h1-h4 headings, in all five themes.
+- [ ] [automated: Find_steps_with_buttons_F3_Shift_F3_and_Ctrl_G_and_handles_no_matches] Find: case-insensitive, matches highlighted, Next/Previous step through them, F3 and Shift+F3 and Ctrl+G navigate, empty/no-match query shows no highlight and no error.
+- [ ] [manual only] Find highlight colour is legible in every theme, and the current match is visually distinct; a match inside a multi-byte character run is highlighted at the right characters.
+- [ ] [automated: Progress_tracks_the_scroll_position_and_leaving_and_reopening_restores_it_without_a_jump, The_position_survives_an_application_restart, A_corrupt_stored_position_is_ignored_and_an_out_of_range_one_is_clamped] Progress bar and percentage track the scroll position; leaving and reopening (and restarting the app) restores the position with no visible jump; a corrupt or out-of-range stored value is ignored.
+- [ ] [manual only] Home/End jump to the first/last block; PgUp/PgDn move by about one viewport (not a fixed block count); arrow keys scroll; keys work after clicking into the text.
+- [ ] [manual only] Select text across paragraphs and press Ctrl+C; paste into Notepad matches the selection. Selection survives scrolling away and back reasonably (note any limitation).
+- [ ] [manual only] Images: sized to the column, alt text present, caption below; a missing/unsupported image shows a placeholder, never an error dialog. Ordered and unordered lists show correct numbers/bullets, including nested.
+- [ ] [manual only] Tables (if the document has any): rows/columns align, header row distinct, readable in every theme.
+- [ ] [manual only] Themes: Light, Dark, Sepia, OLED (exactly black) and System each give a legible reading surface, selection colour and progress bar; High contrast bypasses the palette.
+- [ ] [manual only] Narrator: reading column is navigable by paragraph/heading; headings announce their level; images announce alt text; Find and Contents are reachable and announce match count/position where available; progress is announced as a value, not spoken on every scroll.
+- [ ] [manual only] Text scaling (Settings > Accessibility > Text size, up to 225%): text and controls enlarge without clipping; the reading column stays centred.
+- [ ] [manual only] Window resize and narrow width: column reflows, command bar collapses to overflow, no horizontal scrollbar.
+- [ ] [manual only] Nothing shows a raw exception message, GUID or file path; opening an item whose document cannot be loaded shows a plain message and a way back.
 
 ## Known behaviour to be aware of
 

@@ -1,0 +1,77 @@
+F64 control runs: 12 cycles per arm on a tiny 3-sentence document; private bytes read from the process counter after leave + 4 s idle, with no UIA call in flight.
+(growth/cycle = least-squares slope over cycles 4..N, so warm-up allocations are excluded)
+
+== arm LibraryOnly == start: private 121 MiB
+  cycle 1: private 126.3 MiB
+  cycle 2: private 127.9 MiB
+  cycle 3: private 127.7 MiB
+  cycle 4: private 127.7 MiB
+  cycle 5: private 124.9 MiB
+  cycle 6: private 126.1 MiB
+  cycle 7: private 126.2 MiB
+  cycle 8: private 126.1 MiB
+  cycle 9: private 126.1 MiB
+  cycle 10: private 126.1 MiB
+  cycle 11: private 126.1 MiB
+  cycle 12: private 126.0 MiB
+  arm LibraryOnly: growth/cycle (cycles 4..12) = -0.06 MiB; total first->last = -0.3 MiB
+
+== arm FlowTiny == start: private 120 MiB
+  cycle 1: private 132.0 MiB
+  cycle 2: private 137.5 MiB
+  cycle 3: private 142.9 MiB
+  cycle 4: private 147.1 MiB
+  cycle 5: private 152.3 MiB
+  cycle 6: private 157.9 MiB
+  cycle 7: private 162.8 MiB
+  cycle 8: private 166.9 MiB
+  cycle 9: private 172.1 MiB
+  cycle 10: private 178.4 MiB
+  cycle 11: private 183.2 MiB
+  cycle 12: private 188.7 MiB
+  arm FlowTiny: growth/cycle (cycles 4..12) = 5.16 MiB; total first->last = 56.8 MiB
+
+== arm RsvpTiny == start: private 119 MiB
+  cycle 1: private 129.9 MiB
+  cycle 2: private 132.9 MiB
+  cycle 3: private 136.1 MiB
+  cycle 4: private 139.1 MiB
+  cycle 5: private 142.7 MiB
+  cycle 6: private 146.2 MiB
+  cycle 7: private 148.9 MiB
+  cycle 8: private 153.4 MiB
+  cycle 9: private 158.2 MiB
+  cycle 10: private 161.8 MiB
+  cycle 11: private 165.0 MiB
+  cycle 12: private 170.5 MiB
+  arm RsvpTiny: growth/cycle (cycles 4..12) = 3.88 MiB; total first->last = 40.6 MiB
+
+== arm RsvpViaMenu == start: private 120 MiB
+  cycle 1: private 132.0 MiB
+  cycle 2: private 135.5 MiB
+  cycle 3: private 140.0 MiB
+  cycle 4: private 142.9 MiB
+  cycle 5: private 146.7 MiB
+  cycle 6: private 150.4 MiB
+  cycle 7: private 154.5 MiB
+  cycle 8: private 157.7 MiB
+  cycle 9: private 162.8 MiB
+  cycle 10: private 166.9 MiB
+  cycle 11: private 171.9 MiB
+  cycle 12: private 175.5 MiB
+  arm RsvpViaMenu: growth/cycle (cycles 4..12) = 4.12 MiB; total first->last = 43.5 MiB
+
+== arm MenuEscapeThenEnter == start: private 119 MiB
+  cycle 1: private 131.0 MiB
+  cycle 2: private 135.6 MiB
+  cycle 3: private 138.3 MiB
+  cycle 4: private 140.9 MiB
+  cycle 5: private 145.1 MiB
+  cycle 6: private 149.2 MiB
+  cycle 7: private 153.4 MiB
+  cycle 8: private 157.1 MiB
+  cycle 9: private 161.6 MiB
+  cycle 10: private 165.6 MiB
+  cycle 11: private 170.7 MiB
+  cycle 12: private 171.2 MiB
+  arm MenuEscapeThenEnter: growth/cycle (cycles 4..12) = 3.98 MiB; total first->last = 40.2 MiB

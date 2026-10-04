@@ -11,6 +11,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 gist-core = { path = "../gist-core" }
+# For `TokenKind`, mirrored as `FfiTokenKind` so an RSVP reader view can tell
+# a word from a paragraph/section break without re-deriving it from the text.
+gist-model = { path = "../gist-model" }
 gist-rsvp  = { path = "../gist-rsvp" }
 gist-store = { path = "../gist-store" }
 uniffi     = "0.32"

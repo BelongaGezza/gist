@@ -1,0 +1,15 @@
+W5 core measurement (Release build of the test assembly; the Rust core is whatever gist_ffi.dll is staged)
+document: 149393 words, 70 chapters, 350 headings, 1330 blocks, epub 295 KiB
+import (ImportFileAsync, epub parse + store + FTS tokens): 1219 ms
+get_document_json: 327 / 324 / 319 ms (runs 1/2/3); 12431 KiB (12729761 UTF-16 chars)
+FlowDocumentDecoder.Decode: 140 / 131 / 128 ms; allocated 65.8 / 1.8 / 1.8 MiB per run
+retained managed heap for one decoded document (json string released: no): ~1.7 MiB
+decoded: 70 sections, 1330 block entries, 350 TOC entries, skipped blocks 0
+FlowDocument construction from decoded sections (TOC + entry flattening): 0.20 ms (350 TOC entries)
+FindAll common 'the': 11260 matches; min 12.4 ms, max 19.9 ms over 5 runs
+FindAll common 'a': 20000 matches (truncated at cap); min 7.1 ms, max 7.5 ms over 5 runs
+FindAll rare: 1 matches; min 0.2 ms, max 0.2 ms over 5 runs
+FindAll no match: 0 matches; min 0.2 ms, max 0.2 ms over 5 runs
+FindAll typing 'water' keystroke by keystroke (5 queries): 47.0 ms total
+repeated get_document_json + Decode, full GC after each; process private MiB after each: 215 189 238 238 238 243 240 240 243 242 238 240
+test process peak working set 510 MiB, peak commit (paged) 522 MiB (includes xunit + native core)

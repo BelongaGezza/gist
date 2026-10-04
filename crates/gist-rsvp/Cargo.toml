@@ -9,3 +9,16 @@ license = "MIT"
 gist-model = { path = "../gist-model" }
 unicode-segmentation = "1"
 serde = { workspace = true }
+
+[dev-dependencies]
+# Benchmarks only (W4 role R1): measures `token_at_elapsed`'s per-tick cost
+# against W4's 10-minute-soak exit criterion. Same version the rest of the
+# workspace already uses (gist-parse-txt/docx/epub, gist-store).
+criterion = "0.8"
+# Tests only: proves `Core::start_rsvp`'s serialised session JSON is
+# unchanged by the memoised schedule field (`#[serde(skip)]`).
+serde_json = { workspace = true }
+
+[[bench]]
+name = "pacing"
+harness = false

@@ -116,6 +116,12 @@ jobs:
       - name: dotnet test
         run: dotnet test apps/windows/GIST.sln -c Release --no-build
 
+      - name: RSVP drift soak (60 s, real engine)
+        env:
+          GIST_RUN_SOAK: "1"
+          GIST_SOAK_SECONDS: "60"
+        run: dotnet test apps/windows/GIST.Core.Tests -c Release --no-build --filter "FullyQualifiedName~RsvpSoakTests"
+
       - name: NuGet vulnerability gate (High/Critical fail)
         run: |
           dotnet list apps/windows/GIST.sln package --vulnerable --include-transitive 2>&1 | tee vuln.txt

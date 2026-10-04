@@ -1,3 +1,7 @@
+// One desktop, one keyboard, one foreground window: UI test classes must not run in parallel
+// (each launches its own GIST.exe and sends synthetic input; parallel classes steal each other's focus).
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
+
 namespace Gist.App.UITests;
 
 /// <summary>A Fact that reports Skipped (not failed) unless GIST_RUN_UI_TESTS=1 (needs an interactive desktop).</summary>
