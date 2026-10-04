@@ -48,7 +48,7 @@ Same protocol as `docs/m5-agent-roles.md` §0:
 5. **Advance** to the next batch when dependencies are satisfied.
 6. **Full verification on the integrated tree:** `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo fmt --check`, `cargo deny check bans licenses sources`, `xcodegen generate` + `xcodebuild build`/`test` (scheme `GISTmacOS`, `CODE_SIGNING_ALLOWED=NO`, skip `KeychainKeyProviderIntegrationTests` headless). For iOS roles also build/test the iOS scheme on a simulator.
 7. **Update the record:** `CLAUDE.md` (milestone register, security register, open questions), `docs/development-plan-v2.md`, `CHANGELOG.md`, this file's §2 status column.
-8. **Run a security/quality review of the integrated change set** (this is `F30`'s proposed standing step; see R7) before reporting.
+8. **Run a security/quality review of the integrated change set** (**permanent standing step — `F30` adopted by the user 2026-10-04**; the full text lives in `.claude/commands/proceed-with-development.md` step 7; see R7 for the M6 instance) before reporting.
 9. **Report, then stop before publishing.** Branch → PR, never push `main` directly; wait for CI (auto-merge is disabled on this repo, merge manually after checks pass).
 
 ---
@@ -124,7 +124,7 @@ Batches: **Batch 1:** R1, R3, R5 (independent). **Batch 2:** R2 (needs R1), R6 (
 - Independent security/quality review of everything M6 landed, in the style of `docs/security-quality-review-2026-09-29.md`: pdfium as a new native dependency (supply chain, memory-safety posture, linking/signing interplay with `N8`), the table variant's forward-compat behaviour, the iOS share-extension/URL-fetch trust boundary, new `ffi_catch!`/`unwrap` coverage, fuzz results. Add register rows `F31+`.
 - `F29`: prune `deny.toml`'s unused `BSD-2-Clause` entry (confirm it's still unused after pdfium) and note remaining duplicate crates.
 - `F27`: if a Windows session is available, schedule the Windows review there; on macOS only record that it's still outstanding.
-- Record `F30` outcome: whether this review step becomes a permanent line in the Team Leader protocol.
+- Record `F30` outcome: **decided 2026-10-04 — adopted permanently** (user decision, after this review found two real defects and a false claim that every role's own tests had passed). It is now step 7 of `.claude/commands/proceed-with-development.md`, run by a fresh agent that built none of the code.
 
 ---
 
