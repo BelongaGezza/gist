@@ -16,6 +16,8 @@
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+    <!-- Same generated document as GIST.Core.Tests' perf test (W5 R4). -->
+    <Compile Include="../GIST.Core.Tests/TestSupport/PerfDocumentGenerator.cs" Link="PerfDocumentGenerator.cs" />
     <ProjectReference Include="../GIST.Core/GIST.Core.csproj" />
     <!-- Build-order only: guarantees GIST.exe exists before tests run; nothing from it is referenced. -->
     <ProjectReference Include="../GIST.App/GIST.App.csproj" ReferenceOutputAssembly="false" Private="false" SkipGetTargetFrameworkProperties="true" />
