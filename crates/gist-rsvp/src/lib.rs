@@ -113,6 +113,78 @@ impl Schedule {
     }
 }
 
+// ── Token-length cap (F44) ────────────────────────────────────────────────────
+
+/// Longest word token, in bytes, a session will present as one unit.
+///
+/// A real word never approaches this. A hostile or degenerate document (a
+/// 20M-character "word") otherwise makes every per-tick `orp_split` and
+/// punctuation scan cost hundreds of milliseconds on the UI thread. Longer
+/// word tokens are split into consecutive chunks at construction, so every
+/// per-token operation is bounded.
+pub const MAX_TOKEN_BYTES: usize = 256;
+
+/// Split any word token longer than [`MAX_TOKEN_BYTES`] into consecutive
+/// chunks (grapheme-aligned where a grapheme fits, otherwise at a char
+/// boundary). `char_offset` advances by each chunk's byte length, so every
+/// chunk still points at its own slice of the plain text. Tokens at or under
+/// the cap, and non-word tokens, pass through untouched, so ordinary
+/// documents keep identical indices.
+fn split_oversized_tokens(tokens: Vec<Token>) -> Vec<Token> {
+    if tokens
+        .iter()
+        .all(|t| t.kind != TokenKind::Word || t.text.len() <= MAX_TOKEN_BYTES)
+    {
+        return tokens;
+    }
+    let mut out = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        if token.kind != TokenKind::Word || token.text.len() <= MAX_TOKEN_BYTES {
+            out.push(token);
+            continue;
+        }
+        let push_chunk = |from: usize, to: usize, out: &mut Vec<Token>| {
+            if to > from {
+                out.push(Token {
+                    text: token.text[from..to].to_string(),
+                    kind: token.kind.clone(),
+                    section_idx: token.section_idx,
+                    block_idx: token.block_idx,
+                    char_offset: token.char_offset + from,
+                });
+            }
+        };
+        let mut start = 0usize;
+        let mut end = 0usize;
+        for (gi, g) in token.text.grapheme_indices(true) {
+            if g.len() > MAX_TOKEN_BYTES {
+                // A single enormous grapheme (combining-mark abuse): flush,
+                // then cut it by chars.
+                push_chunk(start, end, &mut out);
+                let mut cs = gi;
+                for (ci, c) in g.char_indices() {
+                    let abs = gi + ci;
+                    if abs + c.len_utf8() - cs > MAX_TOKEN_BYTES {
+                        push_chunk(cs, abs, &mut out);
+                        cs = abs;
+                    }
+                }
+                push_chunk(cs, gi + g.len(), &mut out);
+                start = gi + g.len();
+                end = start;
+                continue;
+            }
+            if gi + g.len() - start > MAX_TOKEN_BYTES {
+                push_chunk(start, end, &mut out);
+                start = gi;
+            }
+            end = gi + g.len();
+        }
+        push_chunk(start, end, &mut out);
+    }
+    out
+}
+
 // ── Session ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +227,7 @@ impl RsvpSession {
     pub fn new(tokens: Vec<Token>, config: Config) -> Self {
         RsvpSession {
             config,
-            tokens,
+            tokens: split_oversized_tokens(tokens),
             state: PlayState::Paused,
             cursor: 0,
             elapsed_at_pause: 0,
@@ -401,7 +473,9 @@ impl RsvpSession {
         if self.state == PlayState::Playing {
             // Advance cursor to where we actually are.
             self.cursor = self.token_at_elapsed(elapsed_ms);
-            self.elapsed_at_pause += elapsed_ms;
+            // Saturating: `elapsed_ms` is client-supplied (`F43`). A plain add
+            // panics in debug and silently wraps in release.
+            self.elapsed_at_pause = self.elapsed_at_pause.saturating_add(elapsed_ms);
             self.state = PlayState::Paused;
         }
     }
@@ -698,6 +772,56 @@ mod tests {
                 "{w:?} -> {i} is not a cluster boundary"
             );
         }
+    }
+
+    #[test]
+    fn pause_saturates_instead_of_overflowing() {
+        let mut session =
+            RsvpSession::new(vec![word_token("a"), word_token("b")], Config::default());
+        session.resume();
+        session.elapsed_at_pause = u64::MAX - 5;
+        session.pause(1_000);
+        assert_eq!(session.elapsed_at_pause, u64::MAX);
+    }
+
+    #[test]
+    fn oversized_word_tokens_are_split_with_consistent_offsets() {
+        let big = "\u{e9}".repeat(1000); // 2000 bytes, 1000 graphemes
+        let mut t = word_token(&big);
+        t.char_offset = 10;
+        let session =
+            RsvpSession::new(vec![word_token("a"), t, word_token("b")], Config::default());
+        assert!(session.tokens.len() > 3);
+        assert_eq!(session.tokens[0].text, "a");
+        assert_eq!(session.tokens.last().unwrap().text, "b");
+        let chunks = &session.tokens[1..session.tokens.len() - 1];
+        assert!(chunks.iter().all(|c| c.text.len() <= MAX_TOKEN_BYTES));
+        let rejoined: String = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(rejoined, big, "no content lost or duplicated");
+        let mut expect = 10;
+        for c in chunks {
+            assert_eq!(c.char_offset, expect);
+            expect += c.text.len();
+        }
+    }
+
+    #[test]
+    fn a_single_giant_grapheme_is_still_bounded() {
+        let big = format!("e{}", "\u{0301}".repeat(5000)); // one grapheme, ~10 KB
+        let session = RsvpSession::new(vec![word_token(&big)], Config::default());
+        assert!(session
+            .tokens
+            .iter()
+            .all(|c| c.text.len() <= MAX_TOKEN_BYTES));
+        let rejoined: String = session.tokens.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(rejoined, big);
+    }
+
+    #[test]
+    fn ordinary_tokens_keep_their_indices() {
+        let tokens: Vec<Token> = (0..50).map(|_| word_token("word")).collect();
+        let session = RsvpSession::new(tokens, Config::default());
+        assert_eq!(session.tokens.len(), 50);
     }
 
     #[test]

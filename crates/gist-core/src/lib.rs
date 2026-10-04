@@ -1245,8 +1245,23 @@ impl Core {
         let mut copies_handled: std::collections::HashSet<String> = Default::default();
 
         for item in removed {
-            tally.try_delete_with_sidecar(&item.doc_path);
-            tally.try_delete_with_sidecar(&tokens_path_for(&item.doc_path));
+            // `doc_path` is read back out of the database exactly like
+            // `source_copy_path`, so it gets the same containment check
+            // (`F40`): a tampered row must not steer these deletes at a file
+            // outside the storage directory. Refused paths are counted in
+            // nothing, as for an out-of-storage stored copy.
+            let storage_dir = self.store.storage_dir();
+            let tokens_path = tokens_path_for(&item.doc_path);
+            for blob in [item.doc_path.as_str(), tokens_path.as_str()] {
+                if is_inside(storage_dir, blob) {
+                    tally.try_delete_with_sidecar(blob);
+                } else {
+                    tracing::debug!(
+                        "gist-core: refusing to delete blob outside storage: {}",
+                        blob
+                    );
+                }
+            }
 
             if delete_source_files {
                 if let Some(source_copy_path) = &item.source_copy_path {
@@ -4054,6 +4069,51 @@ mod tests {
             outside.exists() && sha256_hex(&outside) == outside_hash,
             "the sweep must not reach outside the storage directory either: {swept:?}"
         );
+    }
+
+    /// `F40`: the document blob paths come out of the database too, so a
+    /// row whose `doc_path` has been rewritten to a traversal path must not
+    /// make removal delete the file it resolves to (nor its `.tokens.json`
+    /// sibling).
+    #[test]
+    fn a_traversal_shaped_doc_path_never_deletes_outside_the_storage_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let (core, storage) = core_rooted_at(&root);
+        let db = root.join("test.db");
+
+        let outside = dir.path().join("precious.json");
+        std::fs::write(&outside, b"Not GIST to delete.").unwrap();
+        let outside_tokens = dir.path().join("precious.tokens.json");
+        std::fs::write(&outside_tokens, b"Nor this.").unwrap();
+
+        let src = dir.path().join("doc-traversal.txt");
+        std::fs::write(&src, b"An item whose blob path gets rewritten.").unwrap();
+        let id = core.import_file(&src, &NullObserver).unwrap();
+
+        let traversal = storage.join("..").join("..").join("precious.json");
+        assert_eq!(
+            std::fs::canonicalize(&traversal).unwrap(),
+            std::fs::canonicalize(&outside).unwrap(),
+            "precondition: the traversal path must really resolve to the outside file"
+        );
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let changed = conn
+                .execute(
+                    "UPDATE library_items SET doc_path = ?1 WHERE id = ?2",
+                    rusqlite::params![traversal.to_string_lossy().as_ref(), &id],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "the tampering must actually have hit the row");
+        }
+
+        let outcome = core.remove_items_detailed(&[id], true).unwrap();
+        assert!(
+            outside.exists() && outside_tokens.exists(),
+            "removal must never delete a blob outside the storage directory: {outcome:?}"
+        );
+        assert!(src.exists());
     }
 
     /// A bulk call spanning a real id and an unknown one must report both
