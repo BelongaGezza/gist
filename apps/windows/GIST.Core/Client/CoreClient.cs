@@ -1,6 +1,7 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using Gist.Core.Keys;
 using Gist.Core.Models;
+using Gist.Core.Rsvp;
 using uniffi.gist_ffi;
 
 namespace Gist.Core.Client;
@@ -805,6 +806,14 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
     /// </summary>
     public Task<string?> GetDocumentJsonAsync(string itemId) =>
         RunAsync(core => (string?)core.GetDocumentJson(itemId), null);
+
+    /// <summary>
+    /// Opens a live pacing session for the RSVP reader with saved progress restored (W4). The
+    /// engine is the Rust one — pacing is never computed in C# (plan §4.3). Returns null on
+    /// failure with <see cref="LastError"/> set. The caller owns (and disposes) the engine.
+    /// </summary>
+    public Task<IRsvpEngine?> OpenRsvpEngineAsync(string itemId, uint wpm) =>
+        RunAsync(core => (IRsvpEngine?)new FfiRsvpEngine(core.OpenRsvpSession(itemId, wpm)), null);
 
     /// <summary>Persists the RSVP token index so playback can resume later.</summary>
     public Task SaveProgressAsync(string itemId, ulong tokenIndex) =>
