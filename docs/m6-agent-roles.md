@@ -67,13 +67,13 @@ Same protocol as `docs/m5-agent-roles.md` §0:
 
 | # | Track | Role | Scope | Depends on | Status |
 |---|---|---|---|---|---|
-| R1 | A: PDF | Rust — `gist-parse-pdf` on pdfium behind a `PdfParser` trait | `crates/gist-parse-pdf/`, `gist-core` import wiring, `deny.toml`, `docs/THIRD-PARTY.md`, ADR-002 addendum, fuzz target | D1, D4 | Not started |
-| R2 | A: PDF | Swift — PDF import UI + image-only-PDF → OCR routing | `apps/apple/Shared/*`, `project.yml` UTType/Info.plist | R1 | Not started |
-| R3 | B: v1.1 | Rust+Swift — table model + flow-view rendering | `gist-model`, DOCX/epub/web parsers, `gist-store` IR version, `FlowDocumentModel.swift`, `FlowViewSwiftUINative.swift` | — | Not started |
-| R4 | B: v1.1 | Swift — paginated reading view (Q3) as a second `ReadingLayout` | `apps/apple/macOS/` | D3 | Not started (lowest priority) |
-| R5 | C: iOS | Build system — iOS target, shared-code compile, simulator test target | `project.yml`, `apps/apple/iOS/`, CI | D5 | Not started |
-| R6 | C: iOS | iOS shell — navigation, library, RSVP/flow on touch, share extension | `apps/apple/iOS/`, shared views | R5 | Not started |
-| R7 | E: hygiene | Review — security/quality pass over M6 changes + `F29` prune | `docs/security-quality-review-<date>.md`, `deny.toml` | R1–R6 as landed | Not started |
+| R1 | A: PDF | Rust — `gist-parse-pdf` on pdfium behind a `PdfParser` trait | `crates/gist-parse-pdf/`, `gist-core` import wiring, `deny.toml`, `docs/THIRD-PARTY.md`, ADR-002 addendum, fuzz target | D1, D4 | Done 2026-10-04 |
+| R2 | A: PDF | Swift — PDF import UI + image-only-PDF → OCR routing | `apps/apple/Shared/*`, `project.yml` UTType/Info.plist | R1 | Done 2026-10-04 |
+| R3 | B: v1.1 | Rust+Swift — table model + flow-view rendering | `gist-model`, DOCX/epub/web parsers, `gist-store` IR version, `FlowDocumentModel.swift`, `FlowViewSwiftUINative.swift` | — | Done 2026-10-03 (merged 2026-10-04) |
+| R4 | B: v1.1 | Swift — paginated reading view (Q3) as a second `ReadingLayout` | `apps/apple/macOS/` | D3 | Not run this milestone (D3: stays v1.1) |
+| R5 | C: iOS | Build system — iOS target, shared-code compile, simulator test target | `project.yml`, `apps/apple/iOS/`, CI | D5 | Not run this milestone (D5: iOS skipped) |
+| R6 | C: iOS | iOS shell — navigation, library, RSVP/flow on touch, share extension | `apps/apple/iOS/`, shared views | R5 | Not run this milestone (D5: iOS skipped) |
+| R7 | E: hygiene | Review — security/quality pass over M6 changes + `F29` prune | `docs/security-quality-review-<date>.md`, `deny.toml` | R1–R6 as landed | Done 2026-10-04 (see docs/security-quality-review-2026-10-04.md) |
 
 Batches: **Batch 1:** R1, R3, R5 (independent). **Batch 2:** R2 (needs R1), R6 (needs R5). **Batch 3:** R4 (optional), R7. R3 touches `gist-model`, which R1 does not, but both may touch `gist-core` — integrate one at a time and re-run the full gate between them.
 
