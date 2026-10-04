@@ -128,8 +128,8 @@ final class PdfUiTests: XCTestCase {
     /// (`Int(NaN)` traps in `renderJPEG`).
     func testPixelSizeIsAlwaysFiniteForHostileGeometry() {
         for size in [
-            CGSize(width: .infinity, height: 100), CGSize(width: .nan, height: 100),
-            CGSize(width: -.infinity, height: .infinity), CGSize(width: 1e300, height: 1),
+            CGSize(width: CGFloat.infinity, height: 100), CGSize(width: CGFloat.nan, height: 100),
+            CGSize(width: -CGFloat.infinity, height: CGFloat.infinity), CGSize(width: 1e300, height: 1),
         ] {
             let px = PdfPageRenderer.pixelSize(forPointSize: size)
             XCTAssertTrue(px.width.isFinite && px.height.isFinite, "\(size) -> \(px)")
