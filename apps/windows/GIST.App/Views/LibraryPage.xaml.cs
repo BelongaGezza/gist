@@ -444,9 +444,15 @@ public sealed partial class LibraryPage : Page
         if (_vm is { CanEditTags: true }) _vm.RequestDialog(LibraryDialog.TagEditor);
     }
 
-    // TODO(W4): open the RSVP reader. Until then Open / Open in Reader / Open in Flow View are a notice.
-    private async void OnOpen(object sender, RoutedEventArgs e) => await ShowComingSoonAsync();
+    /// <summary>Open / Open in Reader: the RSVP reader for the single selected item (W4).</summary>
+    private void OnOpen(object sender, RoutedEventArgs e)
+    {
+        if (_vm?.SingleSelectedItem is not { } item) return;
+        var title = string.IsNullOrWhiteSpace(item.Title) ? "Untitled" : item.Title;
+        Frame.Navigate(typeof(RsvpPage), new RsvpNavigationArgs(item.Id, title));
+    }
 
+    // TODO(W5): open the flow reader. Until then Open in Flow View is a notice.
     private async void OnOpenFlow(object sender, RoutedEventArgs e) => await ShowComingSoonAsync();
 
     private async Task ShowComingSoonAsync() => await SafeAsync(async () =>
