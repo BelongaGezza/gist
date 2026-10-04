@@ -929,7 +929,13 @@ mod tests {
         let mut size = 14.0f32;
         for _ in 0..320 {
             let mut g = Vec::new();
-            put(&mut g, "Body text of the document goes right here.", 72.0, 300.0, 12.0);
+            put(
+                &mut g,
+                "Body text of the document goes right here.",
+                72.0,
+                300.0,
+                12.0,
+            );
             put(&mut g, "H", 72.0, 500.0, size);
             size += 0.5; // 320 distinct half-point sizes in total
             pages.push(page(g));
