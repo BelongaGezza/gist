@@ -581,6 +581,9 @@ final class RsvpPlayer: ObservableObject {
         currentIndex = startIndex
         engine = RsvpWallClockEngine(cursor: startIndex)
         isLoaded = true
+        // ADR-021: stamp "last read" once per open, fire-and-forget (a
+        // failure must never interrupt reading; saveProgress is unaffected).
+        Task { await core.markItemOpened(itemId: itemId) }
     }
 
     func play() {

@@ -4677,7 +4677,7 @@ mod tests {
         store.insert_item(&doc).unwrap();
         store.save_progress(&doc.id, 3).unwrap();
         store.mark_item_opened(&doc.id).unwrap();
-        store.remove_items(&[doc.id.clone()]).unwrap();
+        store.remove_items(std::slice::from_ref(&doc.id)).unwrap();
         assert!(store.get_item_by_id(&doc.id).unwrap().is_none());
         assert_eq!(store.get_progress(&doc.id).unwrap(), 0);
         // mark on a removed id is a harmless no-op.

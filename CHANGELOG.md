@@ -63,6 +63,10 @@ pre-1.0 work, not a shipped release note.
 - Library view: list with multi-select, ⌘F-focusable search, sort, tag filter, bulk removal
   (whether removal also deletes the sandboxed copy of the original file is a persisted Settings
   default rather than a per-action choice), "Add to Collection," and a tag editor.
+- Library sort by source type, date last read, and progress (alongside date added, title and
+  author), plus a small progress bar and "Last read …" line on library rows (ADR-021). The core
+  stores a "last opened" time (schema v7) that both readers set; progress is derived from the RSVP
+  reading position. Items never opened sort last for "last read".
 - Sidebar navigation across the library and user-created collections.
 - A theme engine: system-follow, light, dark, sepia, and true-black OLED.
 - A flow (continuous document) reading view: virtualized rendering, typography controls (size,
@@ -108,6 +112,11 @@ rest and at-rest-integrity work described above. To report a new vulnerability, 
 
 ### Known limitations
 
+- **Library "progress" counts RSVP reading only.** A book you have read only in the Flow view
+  shows a correct "last read" date but 0% progress, and sorts as unstarted under the progress sort
+  (the Flow view and RSVP keep separate position stores). A shared progress value would need a
+  later schema change. See ADR-021. The database schema is now v7: an older GIST build cannot open
+  a library that a newer build has upgraded.
 - **No signed or notarized macOS release exists yet.** The release pipeline
   (`.github/workflows/release-macos.yml`, `tools/build-dmg.sh`) is built and has been exercised
   end-to-end unsigned in this environment; the signed/notarized half is blocked on a human

@@ -68,7 +68,7 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
         .background(themeManager.resolvedTheme.background)
         .foregroundStyle(themeManager.resolvedTheme.foreground)
         .task {
-            document = await core.loadDocument(itemId: itemId)
+            document = await core.openFlowDocument(itemId: itemId)
         }
         .task {
             await annotationState.reload(itemId: itemId, core: core)
