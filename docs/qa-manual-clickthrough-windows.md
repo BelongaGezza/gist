@@ -43,7 +43,7 @@ also get PNGs of the empty / seeded / corrupt-key states for the visual pass.
 - [ ] [automated: Typing_a_partial_word_filters_by_prefix_and_Esc_clears_and_refocuses_list] Typing a partial word filters (prefix) after the debounce; Esc clears and returns focus to the list.
 - [ ] [automated: Delete_key_opens_remove_dialog_and_Cancel_changes_nothing] Delete on a selection opens the Remove dialog.
 - [ ] [automated: CtrlA_selects_every_row] Ctrl+A selects all rows.
-- [ ] [automated: Enter_on_a_row_opens_the_reader] Enter on a row triggers Open, which opens the RSVP reader (W4). Open in Flow View is still a "Coming in a later update" notice until W5.
+- [ ] [automated: Enter_on_a_row_opens_the_reader] Enter on a row triggers Open, which opens the RSVP reader (W4). Open in Flow View opens the flow reader (W5).
 - [ ] [automated: CtrlO_opens_the_native_picker_which_can_be_cancelled] Ctrl+O opens the file picker.
 - [ ] [manual only] Tab order: search box -> command bar -> list; arrow keys move through rows; Space toggles the row checkbox; focus rings visible in every theme.
 - [ ] [manual only] Right-click a row: context menu (Open in Reader, Open in Flow View, Manage Tags..., Encrypt..., Remove...); right-click on an unselected row selects it first; "Encrypt..." is hidden when every selected item is already encrypted.
@@ -132,14 +132,14 @@ the UI spec and ADR-006's addendum.
 
 Spec §7.2. Tags are provisional; role R2 retags with real test names.
 
-- [ ] [automated: TBD-R2] Open in Flow View from the Library and from a Collection (context menu entry); Back returns.
+- [ ] [automated: Open_in_Flow_View_from_the_library_shows_the_document_and_Back_returns, Open_in_Flow_View_from_a_collection_works_and_a_document_without_headings_disables_Contents] Open in Flow View from the Library and from a Collection (context menu entry); Back returns.
 - [ ] [manual only] Large document (>= 100k words): scrolling with wheel, scrollbar drag and precision touchpad stays smooth; memory stays bounded (see the W5 measurement record in docs/windows-development-plan.md).
 - [ ] [manual only] Typography (Aa) menu: Size smaller/larger clamps at 13 and 28 pt, default 17; Font offers Default and Serif only (no "Rounded" on Windows, spec §7.2); Line spacing Compact/Regular/Relaxed visibly differ; code spans stay monospaced in every font; choices persist after restart.
-- [ ] [automated: TBD-R2] Contents flyout lists headings indented 16 epx x (level - 1); clicking scrolls to the section; a document with no headings shows a disabled Contents button.
+- [ ] [automated: Contents_lists_every_heading_indented_by_level_and_clicking_scrolls_to_it, Open_in_Flow_View_from_a_collection_works_and_a_document_without_headings_disables_Contents] Contents flyout lists headings indented 16 epx x (level - 1); clicking scrolls to the section; a document with no headings shows a disabled Contents button.
 - [ ] [manual only] TOC indentation looks right for a document with h1-h4 headings, in all five themes.
-- [ ] [automated: TBD-R2] Find: case-insensitive, matches highlighted, Next/Previous step through them, F3 and Shift+F3 and Ctrl+G navigate, empty/no-match query shows no highlight and no error.
+- [ ] [automated: Find_steps_with_buttons_F3_Shift_F3_and_Ctrl_G_and_handles_no_matches] Find: case-insensitive, matches highlighted, Next/Previous step through them, F3 and Shift+F3 and Ctrl+G navigate, empty/no-match query shows no highlight and no error.
 - [ ] [manual only] Find highlight colour is legible in every theme, and the current match is visually distinct; a match inside a multi-byte character run is highlighted at the right characters.
-- [ ] [automated: TBD-R2] Progress bar and percentage track the scroll position; leaving and reopening (and restarting the app) restores the position with no visible jump; a corrupt or out-of-range stored value is ignored.
+- [ ] [automated: Progress_tracks_the_scroll_position_and_leaving_and_reopening_restores_it_without_a_jump, The_position_survives_an_application_restart, A_corrupt_stored_position_is_ignored_and_an_out_of_range_one_is_clamped] Progress bar and percentage track the scroll position; leaving and reopening (and restarting the app) restores the position with no visible jump; a corrupt or out-of-range stored value is ignored.
 - [ ] [manual only] Home/End jump to the first/last block; PgUp/PgDn move by about one viewport (not a fixed block count); arrow keys scroll; keys work after clicking into the text.
 - [ ] [manual only] Select text across paragraphs and press Ctrl+C; paste into Notepad matches the selection. Selection survives scrolling away and back reasonably (note any limitation).
 - [ ] [manual only] Images: sized to the column, alt text present, caption below; a missing/unsupported image shows a placeholder, never an error dialog. Ordered and unordered lists show correct numbers/bullets, including nested.

@@ -1,0 +1,228 @@
+<Page x:Class="Gist.App.Views.FlowPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:local="using:Gist.App.Views"
+      PreviewKeyDown="OnPreviewKeyDown">
+    <Page.KeyboardAccelerators>
+        <!-- Spec 9: Alt+Left = back; F3 / Shift+F3 / Ctrl+G = find next / previous; Ctrl+F opens find. -->
+        <KeyboardAccelerator Key="Left" Modifiers="Menu" Invoked="OnBackAccelerator" />
+        <KeyboardAccelerator Key="F3" Invoked="OnFindNextAccelerator" />
+        <KeyboardAccelerator Key="F3" Modifiers="Shift" Invoked="OnFindPreviousAccelerator" />
+        <KeyboardAccelerator Key="G" Modifiers="Control" Invoked="OnFindNextAccelerator" />
+        <KeyboardAccelerator Key="F" Modifiers="Control" Invoked="OnFindAccelerator" />
+    </Page.KeyboardAccelerators>
+
+    <!-- Brushes are applied from code (ApplyTheme): the theme engine replaces the Gist* brush objects at runtime
+         and a StaticResource would go stale. -->
+    <Grid x:Name="RootGrid" AutomationProperties.AutomationId="FlowPage_Root"
+          AutomationProperties.Name="Flow reader" AutomationProperties.AccessibilityView="Content">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Header: Back, title, command bar (Contents · Aa · Find). -->
+        <Grid Grid.Row="0" Margin="16,12,16,0" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Button x:Name="BackButton" Grid.Column="0" Click="OnBackClick" TabIndex="0"
+                    AutomationProperties.AutomationId="FlowPage_BackButton"
+                    AutomationProperties.Name="Back to library"
+                    ToolTipService.ToolTip="Back (Alt+Left)">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE72B;" FontSize="16" />
+                    <TextBlock Text="Back" />
+                </StackPanel>
+            </Button>
+            <TextBlock x:Name="TitleText" Grid.Column="1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                       AutomationProperties.AutomationId="FlowPage_Title" />
+            <CommandBar x:Name="FlowCommandBar" Grid.Column="2" Background="Transparent" DefaultLabelPosition="Right"
+                        OverflowButtonVisibility="Collapsed" IsOpen="False" TabIndex="1"
+                        AutomationProperties.AutomationId="FlowPage_CommandBar"
+                        AutomationProperties.Name="Flow reader commands">
+                <AppBarButton x:Name="ContentsButton" Icon="List" Label="Contents" IsEnabled="False"
+                              AutomationProperties.AutomationId="FlowPage_ContentsButton"
+                              AutomationProperties.Name="Contents"
+                              ToolTipService.ToolTip="Contents">
+                    <AppBarButton.Flyout>
+                        <Flyout x:Name="TocFlyout" Placement="BottomEdgeAlignedRight">
+                            <ListView x:Name="TocList" Width="360" MaxHeight="480" SelectionMode="None"
+                                      IsItemClickEnabled="True" ItemClick="OnTocItemClick"
+                                      ContainerContentChanging="OnTocContainerContentChanging"
+                                      AutomationProperties.AutomationId="FlowPage_TocList"
+                                      AutomationProperties.Name="Table of contents">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate x:DataType="local:TocRow">
+                                        <TextBlock Text="{x:Bind Title}" Margin="{x:Bind Indent}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                        </Flyout>
+                    </AppBarButton.Flyout>
+                </AppBarButton>
+
+                <AppBarButton x:Name="TypographyButton" Label="Aa" IsEnabled="False"
+                              AutomationProperties.AutomationId="FlowPage_TypographyButton"
+                              AutomationProperties.Name="Typography"
+                              ToolTipService.ToolTip="Typography">
+                    <AppBarButton.Icon>
+                        <FontIcon Glyph="&#xE8D2;" />
+                    </AppBarButton.Icon>
+                    <AppBarButton.Flyout>
+                        <Flyout x:Name="TypographyFlyout" Placement="BottomEdgeAlignedRight">
+                            <StackPanel Spacing="12" MinWidth="260">
+                                <TextBlock Text="Size" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Button x:Name="SmallerButton" Grid.Column="0" Content="Smaller" Click="OnSmaller"
+                                            AutomationProperties.AutomationId="FlowPage_FontSmaller"
+                                            AutomationProperties.Name="Smaller text" />
+                                    <TextBlock x:Name="SizeText" Grid.Column="1" HorizontalAlignment="Center"
+                                               VerticalAlignment="Center" Typography.NumeralAlignment="Tabular"
+                                               AutomationProperties.AutomationId="FlowPage_FontSizeText" />
+                                    <Button x:Name="LargerButton" Grid.Column="2" Content="Larger" Click="OnLarger"
+                                            AutomationProperties.AutomationId="FlowPage_FontLarger"
+                                            AutomationProperties.Name="Larger text" />
+                                </Grid>
+                                <TextBlock Text="Font" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <StackPanel Spacing="2">
+                                    <RadioButton x:Name="FontDefaultRadio" Content="Default" GroupName="FlowFont"
+                                                 Tag="Default" Click="OnFontClick"
+                                                 AutomationProperties.AutomationId="FlowPage_Font_Default" />
+                                    <RadioButton x:Name="FontSerifRadio" Content="Serif" GroupName="FlowFont"
+                                                 Tag="Serif" Click="OnFontClick"
+                                                 AutomationProperties.AutomationId="FlowPage_Font_Serif" />
+                                </StackPanel>
+                                <TextBlock Text="Line spacing" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <StackPanel Spacing="2">
+                                    <RadioButton x:Name="SpacingCompactRadio" Content="Compact" GroupName="FlowSpacing"
+                                                 Tag="Compact" Click="OnSpacingClick"
+                                                 AutomationProperties.AutomationId="FlowPage_Spacing_Compact" />
+                                    <RadioButton x:Name="SpacingRegularRadio" Content="Regular" GroupName="FlowSpacing"
+                                                 Tag="Regular" Click="OnSpacingClick"
+                                                 AutomationProperties.AutomationId="FlowPage_Spacing_Regular" />
+                                    <RadioButton x:Name="SpacingRelaxedRadio" Content="Relaxed" GroupName="FlowSpacing"
+                                                 Tag="Relaxed" Click="OnSpacingClick"
+                                                 AutomationProperties.AutomationId="FlowPage_Spacing_Relaxed" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Flyout>
+                    </AppBarButton.Flyout>
+                </AppBarButton>
+
+                <AppBarToggleButton x:Name="FindToggle" Icon="Find" Label="Find" IsEnabled="False"
+                                    Click="OnFindToggle"
+                                    AutomationProperties.AutomationId="FlowPage_FindButton"
+                                    AutomationProperties.Name="Find"
+                                    ToolTipService.ToolTip="Find (Ctrl+F)" />
+            </CommandBar>
+        </Grid>
+
+        <!-- Inline find box. -->
+        <Grid x:Name="FindBar" Grid.Row="1" Margin="16,8,16,0" ColumnSpacing="8" Visibility="Collapsed"
+              AutomationProperties.AutomationId="FlowPage_FindBar">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="360" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="FindBox" Grid.Column="0" PlaceholderText="Find in document"
+                     TextChanged="OnFindTextChanged" KeyDown="OnFindKeyDown"
+                     AutomationProperties.AutomationId="FlowPage_FindBox"
+                     AutomationProperties.Name="Find in document" />
+            <TextBlock x:Name="FindStatus" Grid.Column="1" VerticalAlignment="Center" MinWidth="80"
+                       Typography.NumeralAlignment="Tabular"
+                       AutomationProperties.AutomationId="FlowPage_FindStatus"
+                       AutomationProperties.LiveSetting="Polite" />
+            <Button x:Name="FindPreviousButton" Grid.Column="2" Click="OnFindPreviousClick"
+                    AutomationProperties.AutomationId="FlowPage_FindPrevious"
+                    AutomationProperties.Name="Previous match"
+                    ToolTipService.ToolTip="Previous match (Shift+F3)">
+                <FontIcon Glyph="&#xE70E;" FontSize="14" />
+            </Button>
+            <Button x:Name="FindNextButton" Grid.Column="3" Click="OnFindNextClick"
+                    AutomationProperties.AutomationId="FlowPage_FindNext"
+                    AutomationProperties.Name="Next match"
+                    ToolTipService.ToolTip="Next match (F3)">
+                <FontIcon Glyph="&#xE70D;" FontSize="14" />
+            </Button>
+            <Button x:Name="FindCloseButton" Grid.Column="4" Click="OnFindCloseClick"
+                    AutomationProperties.AutomationId="FlowPage_FindClose"
+                    AutomationProperties.Name="Close find"
+                    ToolTipService.ToolTip="Close find (Esc)">
+                <FontIcon Glyph="&#xE711;" FontSize="14" />
+            </Button>
+        </Grid>
+
+        <!-- Content states. -->
+        <StackPanel x:Name="LoadingPanel" Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Spacing="12" AutomationProperties.AutomationId="FlowPage_Loading">
+            <ProgressRing IsActive="True" Width="48" Height="48" AutomationProperties.Name="Loading" />
+            <TextBlock x:Name="LoadingText" Text="Loading…" HorizontalAlignment="Center" />
+        </StackPanel>
+
+        <StackPanel x:Name="MessagePanel" Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Spacing="12" Visibility="Collapsed" AutomationProperties.AutomationId="FlowPage_Message">
+            <TextBlock x:Name="MessageText" HorizontalAlignment="Center" TextWrapping="Wrap" MaxWidth="480"
+                       AutomationProperties.AutomationId="FlowPage_MessageText" />
+        </StackPanel>
+
+        <!-- The document: a genuinely virtualising ListView (ItemsStackPanel). Blocks are built in code from
+             ContainerContentChanging; the container is a plain, non-selectable host. -->
+        <ListView x:Name="FlowList" Grid.Row="2" Visibility="Collapsed" SelectionMode="None" IsItemClickEnabled="False"
+                  ContainerContentChanging="OnFlowContainerContentChanging" TabIndex="2"
+                  ScrollViewer.VerticalScrollBarVisibility="Auto"
+                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                  AutomationProperties.AutomationId="FlowPage_List"
+                  AutomationProperties.Name="Document">
+            <ListView.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <ItemsStackPanel />
+                </ItemsPanelTemplate>
+            </ListView.ItemsPanel>
+            <ListView.ItemContainerStyle>
+                <Style TargetType="ListViewItem">
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                    <Setter Property="Padding" Value="0" />
+                    <Setter Property="MinHeight" Value="0" />
+                    <Setter Property="Margin" Value="0" />
+                    <Setter Property="Background" Value="Transparent" />
+                </Style>
+            </ListView.ItemContainerStyle>
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <Border />
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <!-- Slim progress bar + percentage. -->
+        <Grid x:Name="ProgressRow" Grid.Row="3" Margin="16,6,16,10" ColumnSpacing="12" Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <ProgressBar x:Name="FlowProgressBar" Grid.Column="0" Minimum="0" Maximum="1" Height="4"
+                         VerticalAlignment="Center" IsHitTestVisible="False"
+                         AutomationProperties.AutomationId="FlowPage_ProgressBar"
+                         AutomationProperties.Name="Reading progress" />
+            <TextBlock x:Name="ProgressText" Grid.Column="1" MinWidth="40" TextAlignment="Right"
+                       Style="{StaticResource CaptionTextBlockStyle}" Typography.NumeralAlignment="Tabular"
+                       AutomationProperties.AutomationId="FlowPage_ProgressText" />
+        </Grid>
+    </Grid>
+</Page>

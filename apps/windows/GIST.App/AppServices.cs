@@ -1,5 +1,6 @@
 using Gist.App.Theming;
 using Gist.Core.Client;
+using Gist.Core.Flow;
 using Gist.Core.Keys;
 using Gist.Core.Rsvp;
 using Gist.Core.Storage;
@@ -36,6 +37,12 @@ public static class AppServices
 
     public static FileRsvpSettingsStore RsvpSettings { get; private set; } = null!;
 
+    /// <summary>W5: global flow-reader typography (size/font/line spacing), one file, not per item.</summary>
+    public static FileTypographySettingsStore FlowTypography { get; private set; } = null!;
+
+    /// <summary>W5: per-item flow scroll fractions, one small file each, under <c>flow-positions</c>.</summary>
+    public static FileFlowScrollPositionStore FlowPositions { get; private set; } = null!;
+
     /// <summary>Completes when the startup initialise + first list load has finished (never faults).</summary>
     public static Task StartupTask { get; private set; } = Task.CompletedTask;
 
@@ -62,6 +69,8 @@ public static class AppServices
             new UiSettingsThemeSystemProvider(queue));
 
         RsvpSettings = new FileRsvpSettingsStore(Path.Combine(Paths.Root, "rsvp-settings.txt"));
+        FlowTypography = new FileTypographySettingsStore(Path.Combine(Paths.Root, "flow-typography.txt"));
+        FlowPositions = new FileFlowScrollPositionStore(Path.Combine(Paths.Root, "flow-positions"));
 
         IsInitialized = true;
 
