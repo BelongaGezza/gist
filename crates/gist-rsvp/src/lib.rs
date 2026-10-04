@@ -218,13 +218,22 @@ impl RsvpSession {
     /// `x86_64-pc-windows-msvc` (release, 2026-10-04) over a 20 000-token
     /// synthetic stream with a realistic punctuation/numeral/accent mix.
     /// "steady state" is a repeated query with the schedule already
-    /// tabulated that far, i.e. an ordinary playback tick:
+    /// tabulated that far, i.e. an ordinary playback tick. The "linear scan"
+    /// column was measured on this same bench against the pre-memoisation
+    /// code, in the same session but a separate run — run-to-run variance on
+    /// this machine reaches ~2×, so treat the ratios as orders of magnitude,
+    /// not exact factors:
     ///
     /// | tokens between `cursor` and the answer | linear scan | memoised (steady state) |
     /// |---|---|---|
-    /// | 1     | 21.0 ns | 5.72 ns |
-    /// | 600   | 7.72 µs | 15.8 ns |
-    /// | 6 000 | 78.8 µs | 21.7 ns |
+    /// | 1     | 21.0 ns | 8.70 ns |
+    /// | 600   | 7.72 µs | 33.8 ns |
+    /// | 6 000 | 78.8 µs | 41.0 ns |
+    ///
+    /// A whole tick — this plus
+    /// [`elapsed_at_token_end`](RsvpSession::elapsed_at_token_end), which is
+    /// what a client needs to know when to wake next — measured 17.7 ns at
+    /// 1 token ahead and 53.0 ns at 6 000.
     ///
     /// 6 000 is W4's exit criterion made concrete — a 10-minute soak at 600
     /// WPM with no intervening pause, re-asked on every tick. The linear
@@ -233,15 +242,16 @@ impl RsvpSession {
     /// per frame), so this is not a fix for an observed stall. It was taken
     /// because the scan's cost grows with *uninterrupted* reading time and
     /// has no natural ceiling — a 100 000-token book read straight through
-    /// reaches ~1.3 ms per tick — while the memoised path stays ~22 ns,
-    /// ~3 600× faster at the soak point and flat beyond it.
+    /// reaches ~1.3 ms per tick — while the memoised path stays in the tens
+    /// of nanoseconds: ~1 900× faster at the soak point, and flat beyond it.
     ///
     /// The cost is paid on the first query after any [`ScheduleKey`] change
     /// (`set_wpm`, `seek`, `back_words`, `pause`, or a direct assignment to
     /// a `pub` field), which tabulates forward from the new cursor to the
     /// answer — the same work the linear scan did, done once instead of per
-    /// tick. `set_wpm` mid-session on this stream measured 9.70 µs memoised
-    /// vs 8.04 µs scanning, a 1.2× one-off. Space is 8 bytes per *traversed*
+    /// tick. `set_wpm` mid-session on this stream measured 9.70–16.9 µs
+    /// memoised across runs vs 8.04 µs scanning — the same order, paid once
+    /// per speed change rather than per tick. Space is 8 bytes per *traversed*
     /// token, not per token in the document, because the table is extended
     /// lazily and is discarded whenever the cursor moves.
     ///
@@ -259,10 +269,10 @@ impl RsvpSession {
             return last;
         }
 
-        self.extend_schedule_to_cover(elapsed_ms);
+        self.extend_schedule(elapsed_ms, 0);
         let slot = self.schedule.borrow();
         let Some(schedule) = slot.as_ref() else {
-            // Unreachable: `extend_schedule_to_cover` just populated it.
+            // Unreachable: `extend_schedule` just populated it.
             // Falling back to the reference scan rather than panicking keeps
             // this crate free of `unwrap()`/`expect()`/`unreachable!()`.
             drop(slot);
@@ -299,12 +309,49 @@ impl RsvpSession {
         self.tokens.len().saturating_sub(1)
     }
 
-    /// Make the memoised schedule usable for a query at `elapsed_ms`:
-    /// discard it if it was built for a different [`ScheduleKey`], then
-    /// tabulate forward until its running total exceeds `elapsed_ms` or the
-    /// token stream runs out — whichever comes first. Never tabulates past
-    /// the token a query can reach.
-    fn extend_schedule_to_cover(&self, elapsed_ms: u64) {
+    /// Elapsed-ms value, on the same clock as
+    /// [`token_at_elapsed`](RsvpSession::token_at_elapsed)'s argument, at
+    /// which `idx` stops being the token to show — i.e. when a client's
+    /// timer should next wake. Waking at the boundary and re-deriving the
+    /// index from measured time is what keeps a late or coalesced tick from
+    /// compounding into drift.
+    ///
+    /// `0` for an index before `cursor` or an empty stream. For the last
+    /// token it is the remaining total, which is also the point past which
+    /// `token_at_elapsed` simply clamps.
+    ///
+    /// O(log k) once the schedule is tabulated that far, where a client
+    /// summing `token_duration_ms` itself would be O(k) **per tick** — the
+    /// cost the memoisation exists to remove.
+    pub fn elapsed_at_token_end(&self, idx: usize) -> u64 {
+        let len = self.tokens.len();
+        if len == 0 || self.cursor >= len || idx < self.cursor {
+            return 0;
+        }
+        // Number of tabulated entries needed: one per token from `cursor`
+        // through `idx`, clamped to the end of the stream.
+        let offset = idx.min(len - 1) - self.cursor + 1;
+        self.extend_schedule(0, offset);
+        let slot = self.schedule.borrow();
+        match slot.as_ref().and_then(|s| s.cumulative.get(offset)) {
+            Some(&total) => total,
+            // Unreachable: `extend_schedule` tabulates `offset` entries.
+            // Sum directly rather than panicking.
+            None => {
+                drop(slot);
+                (self.cursor..=idx.min(len - 1))
+                    .map(|i| self.token_duration_ms(i))
+                    .fold(0u64, u64::saturating_add)
+            }
+        }
+    }
+
+    /// Make the memoised schedule usable for a query: discard it if it was
+    /// built for a different [`ScheduleKey`], then tabulate forward until
+    /// its running total exceeds `cover_elapsed_ms` **and** it holds at
+    /// least `min_entries` entries — stopping early when the token stream
+    /// runs out. Never tabulates past the token a query can reach.
+    fn extend_schedule(&self, cover_elapsed_ms: u64, min_entries: usize) {
         let key = self.schedule_key();
         let mut slot = self.schedule.borrow_mut();
         if !slot.as_ref().is_some_and(|s| s.key == key) {
@@ -317,11 +364,13 @@ impl RsvpSession {
             return;
         };
         // Saturating: `cursor` is a `pub` field and may be out of range.
-        // (`token_at_elapsed` already returns early in that case; this keeps
-        // the helper sound on its own terms.)
+        // (callers already return early in that case; this keeps the helper
+        // sound on its own terms.)
         let remaining = self.tokens.len().saturating_sub(key.cursor);
         let mut total = schedule.total();
-        while total <= elapsed_ms && schedule.built() < remaining {
+        while schedule.built() < remaining
+            && (total <= cover_elapsed_ms || schedule.built() < min_entries)
+        {
             total = total.saturating_add(self.token_duration_ms(key.cursor + schedule.built()));
             schedule.cumulative.push(total);
         }
@@ -787,6 +836,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `elapsed_at_token_end` must equal the direct sum of durations from
+    /// the cursor through the index — that is the contract a client's timer
+    /// relies on — and must be exactly the elapsed value at which
+    /// `token_at_elapsed` moves on.
+    #[test]
+    fn elapsed_at_token_end_matches_the_direct_sum_and_is_the_switch_point() {
+        for wpm in [100u32, 250, 1000] {
+            let mut session = RsvpSession::new(
+                mixed_tokens(),
+                Config {
+                    wpm,
+                    ..Config::default()
+                },
+            );
+            session.resume();
+            let len = session.tokens.len();
+
+            for cursor in 0..len {
+                session.cursor = cursor;
+                let mut expected = 0u64;
+                for idx in cursor..len {
+                    expected += session.token_duration_ms(idx);
+                    assert_eq!(
+                        session.elapsed_at_token_end(idx),
+                        expected,
+                        "wpm {wpm}, cursor {cursor}, idx {idx}"
+                    );
+                    // One ms before the boundary the token is still current;
+                    // at the boundary the next one is (unless we ran out).
+                    assert_eq!(session.token_at_elapsed(expected - 1), idx);
+                    if idx + 1 < len {
+                        assert_eq!(session.token_at_elapsed(expected), idx + 1);
+                    } else {
+                        assert_eq!(session.token_at_elapsed(expected), idx);
+                    }
+                }
+                // Indices at or before the cursor, and past the end.
+                if cursor > 0 {
+                    assert_eq!(session.elapsed_at_token_end(cursor - 1), 0);
+                }
+                assert_eq!(session.elapsed_at_token_end(usize::MAX), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn elapsed_at_token_end_is_zero_for_a_degenerate_session() {
+        let empty = RsvpSession::new(Vec::new(), Config::default());
+        assert_eq!(empty.elapsed_at_token_end(0), 0);
+        assert_eq!(empty.elapsed_at_token_end(usize::MAX), 0);
+
+        let mut out_of_range = RsvpSession::new(plain_tokens(4), Config::default());
+        out_of_range.cursor = 99;
+        assert_eq!(out_of_range.elapsed_at_token_end(99), 0);
     }
 
     /// Changing WPM must re-derive the schedule, not reuse the old one:

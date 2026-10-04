@@ -91,6 +91,25 @@ fn bench_token_at_elapsed(c: &mut Criterion) {
     group.finish();
 }
 
+/// The per-tick path a UI actually runs: "which token now?" plus "when does
+/// it stop being current?". Both have to be cheap, not just the first.
+fn bench_tick(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rsvp_tick");
+
+    for ahead in [1usize, 6_000] {
+        let s = session(20_000, 600);
+        let elapsed = elapsed_for(&s, ahead);
+        group.bench_function(format!("index_and_boundary_{ahead}_from_cursor"), |b| {
+            b.iter(|| {
+                let idx = s.token_at_elapsed(elapsed);
+                s.elapsed_at_token_end(idx)
+            })
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_mutations(c: &mut Criterion) {
     let mut group = c.benchmark_group("rsvp_mutations");
 
@@ -110,5 +129,5 @@ fn bench_mutations(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_token_at_elapsed, bench_mutations);
+criterion_group!(benches, bench_token_at_elapsed, bench_tick, bench_mutations);
 criterion_main!(benches);
