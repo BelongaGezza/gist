@@ -733,6 +733,10 @@ pub struct FfiRsvpFrame {
     /// at which `index` stops being the token to display. A client's timer
     /// should wake at this, not after a fixed interval, and re-ask — which
     /// is what keeps a late or coalesced tick from compounding into drift.
+    ///
+    /// When `is_last` is true there is nothing to advance to, so this is
+    /// simply when the final token's own display time runs out: a client
+    /// should stop playback there rather than scheduling another tick.
     pub next_boundary_ms: u64,
     /// True when `index` is the last token in the stream, i.e. playback has
     /// nothing left to advance to.
