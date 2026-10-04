@@ -872,6 +872,7 @@ name = "gist-ffi"
 version = "0.1.0"
 dependencies = [
  "gist-core",
+ "gist-model",
  "gist-rsvp",
  "gist-store",
  "serde",

@@ -954,13 +954,21 @@ impl Core {
         Ok(items)
     }
 
-    /// Create an RSVP session for the given item.
-    /// Returns the session serialised as JSON.
-    pub fn start_rsvp(
+    /// Build an RSVP session for the given item, with the reader's saved
+    /// progress restored.
+    ///
+    /// This is the one place that decides what a freshly opened session looks
+    /// like. [`Core::start_rsvp`] serialises the result of it for clients
+    /// that drive pacing themselves from JSON, and `gist-ffi`'s
+    /// `GistCore::open_rsvp_session` hands it to the client as a live object
+    /// that drives pacing through the engine instead
+    /// (`docs/windows-development-plan.md` §4.3) — deliberately one
+    /// implementation, so progress restore cannot drift between the two.
+    pub fn new_rsvp_session(
         &self,
         item_id: &str,
         config: gist_rsvp::Config,
-    ) -> Result<String, CoreError> {
+    ) -> Result<gist_rsvp::RsvpSession, CoreError> {
         let doc = self
             .store
             .get_item(item_id)?
@@ -975,7 +983,23 @@ impl Core {
         // Restore saved cursor position, clamped to valid range.
         session.cursor = progress.min(session.tokens.len().saturating_sub(1));
 
-        Ok(serde_json::to_string(&session)?)
+        Ok(session)
+    }
+
+    /// Create an RSVP session for the given item.
+    /// Returns the session serialised as JSON.
+    ///
+    /// The JSON shape is part of the shipped contract — Apple's
+    /// `RsvpPlayer`/`RsvpSessionVM` decodes it — so it must stay
+    /// byte-compatible.
+    pub fn start_rsvp(
+        &self,
+        item_id: &str,
+        config: gist_rsvp::Config,
+    ) -> Result<String, CoreError> {
+        Ok(serde_json::to_string(
+            &self.new_rsvp_session(item_id, config)?,
+        )?)
     }
 
     /// Persist the current token index for `item_id`.
@@ -2229,6 +2253,63 @@ mod tests {
 
         let unknown = core.get_document("not-a-real-id");
         assert!(matches!(unknown, Err(CoreError::NotFound(_))));
+    }
+
+    /// `new_rsvp_session` and `start_rsvp` must agree on everything — same
+    /// token stream, same restored cursor — because they are the two
+    /// entry points the two native shells use (object-driven pacing on
+    /// Windows, JSON-driven on Apple) and `docs/windows-development-plan.md`
+    /// §4.3 is explicit that they must not drift apart.
+    #[test]
+    fn new_rsvp_session_and_start_rsvp_agree_and_restore_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&db, &storage).unwrap();
+
+        let txt = dir.path().join("rsvp.txt");
+        std::fs::write(
+            &txt,
+            b"one two three four five six seven eight nine ten eleven twelve",
+        )
+        .unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+
+        let config = gist_rsvp::Config {
+            wpm: 600,
+            ..Default::default()
+        };
+
+        let fresh = core.new_rsvp_session(&id, config.clone()).unwrap();
+        assert!(fresh.tokens.len() >= 12, "{} tokens", fresh.tokens.len());
+        assert_eq!(fresh.cursor, 0, "no saved progress yet");
+
+        // Save progress, then confirm both entry points restore it.
+        core.save_progress(&id, 5).unwrap();
+        let restored = core.new_rsvp_session(&id, config.clone()).unwrap();
+        assert_eq!(restored.cursor, 5);
+
+        let json = core.start_rsvp(&id, config.clone()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["cursor"], serde_json::json!(5));
+        assert_eq!(value["config"]["wpm"], serde_json::json!(600));
+        assert_eq!(
+            value["tokens"].as_array().map(Vec::len),
+            Some(restored.tokens.len())
+        );
+        // The memoised schedule must not leak into the client contract.
+        assert!(value.get("schedule").is_none(), "{value}");
+
+        // Out-of-range saved progress is clamped, not trusted.
+        core.save_progress(&id, 10_000).unwrap();
+        let clamped = core.new_rsvp_session(&id, config).unwrap();
+        assert_eq!(clamped.cursor, clamped.tokens.len() - 1);
+
+        assert!(matches!(
+            core.new_rsvp_session("not-a-real-id", gist_rsvp::Config::default()),
+            Err(CoreError::NotFound(_))
+        ));
     }
 
     #[test]

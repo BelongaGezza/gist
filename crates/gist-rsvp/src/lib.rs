@@ -498,6 +498,30 @@ pub fn orp_index(word: &str) -> usize {
     clusters[idx].0
 }
 
+/// Split `word` into `(before, focus, after)` at its ORP, where `focus` is
+/// the single grapheme cluster [`orp_index`] selects.
+///
+/// Exists so clients never have to do the slicing themselves: [`orp_index`]
+/// returns a **byte** offset into UTF-8, which is meaningless in C# (UTF-16)
+/// and error-prone in Swift, and slicing at the wrong offset would undo the
+/// very thing the cluster-based ORP rule is careful about — never splitting
+/// an emoji, flag or accented letter. For an empty `word` all three pieces
+/// are empty.
+pub fn orp_split(word: &str) -> (&str, &str, &str) {
+    let start = orp_index(word);
+    let (before, rest) = match (word.get(..start), word.get(start..)) {
+        (Some(b), Some(r)) => (b, r),
+        // Unreachable: `orp_index` always returns a cluster boundary within
+        // `word`. Degrade to "all focus" rather than panicking.
+        _ => ("", word),
+    };
+    let focus_len = rest.graphemes(true).next().map_or(0, str::len);
+    match (rest.get(..focus_len), rest.get(focus_len..)) {
+        (Some(f), Some(a)) => (before, f, a),
+        _ => (before, rest, ""),
+    }
+}
+
 // ── Pause helpers ─────────────────────────────────────────────────────────────
 
 /// True if `text` ends with a sentence-terminating character (`.`, `!`, `?`).
