@@ -124,6 +124,20 @@ final class PdfUiTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(tiny.width, 1)
     }
 
+    /// M6 R7: a non-finite media box must never produce a NaN pixel size
+    /// (`Int(NaN)` traps in `renderJPEG`).
+    func testPixelSizeIsAlwaysFiniteForHostileGeometry() {
+        for size in [
+            CGSize(width: .infinity, height: 100), CGSize(width: .nan, height: 100),
+            CGSize(width: -.infinity, height: .infinity), CGSize(width: 1e300, height: 1),
+        ] {
+            let px = PdfPageRenderer.pixelSize(forPointSize: size)
+            XCTAssertTrue(px.width.isFinite && px.height.isFinite, "\(size) -> \(px)")
+            XCTAssertGreaterThanOrEqual(px.width, 1)
+            XCTAssertLessThanOrEqual(max(px.width, px.height), PdfPageRenderer.maxPixelDimension)
+        }
+    }
+
     func testRendersRealImageOnlyPdfToBoundedJpegFiles() throws {
         let root = try makeRenderRoot()
         var progressCalls: [(Int, Int)] = []

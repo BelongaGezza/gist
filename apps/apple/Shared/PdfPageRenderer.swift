@@ -63,8 +63,12 @@ enum PdfPageRenderer {
         maxPixelDimension: CGFloat = PdfPageRenderer.maxPixelDimension
     ) -> CGSize {
         let scale = dpi / 72
-        var w = max(pointSize.width * scale, 1)
-        var h = max(pointSize.height * scale, 1)
+        // A hostile PDF can declare a non-finite media box; `inf * (cap/inf)`
+        // is NaN and `Int(NaN)` traps. Treat non-finite sides as the cap.
+        let rawW = pointSize.width.isFinite ? pointSize.width : maxPixelDimension
+        let rawH = pointSize.height.isFinite ? pointSize.height : maxPixelDimension
+        var w = max(rawW * scale, 1)
+        var h = max(rawH * scale, 1)
         let longest = max(w, h)
         if longest > maxPixelDimension {
             let k = maxPixelDimension / longest
