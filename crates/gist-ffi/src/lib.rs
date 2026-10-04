@@ -618,6 +618,416 @@ impl From<gist_core::SweepOutcome> for FfiSweepOutcome {
     }
 }
 
+// ── RSVP pacing (docs/windows-development-plan.md §4.3) ─────────────────────
+
+/// Mirrors `gist_rsvp::PlayState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiPlayState {
+    Playing,
+    Paused,
+}
+
+impl From<&gist_rsvp::PlayState> for FfiPlayState {
+    fn from(s: &gist_rsvp::PlayState) -> Self {
+        match s {
+            gist_rsvp::PlayState::Playing => FfiPlayState::Playing,
+            gist_rsvp::PlayState::Paused => FfiPlayState::Paused,
+        }
+    }
+}
+
+/// Mirrors `gist_model::TokenKind` — what a token in the RSVP stream is, so
+/// a reader view can render a paragraph/section break differently from a
+/// word without re-deriving it from the token text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiTokenKind {
+    Word,
+    ParagraphBreak,
+    SectionBreak,
+}
+
+impl From<&gist_model::TokenKind> for FfiTokenKind {
+    fn from(k: &gist_model::TokenKind) -> Self {
+        match k {
+            gist_model::TokenKind::Word => FfiTokenKind::Word,
+            gist_model::TokenKind::ParagraphBreak => FfiTokenKind::ParagraphBreak,
+            gist_model::TokenKind::SectionBreak => FfiTokenKind::SectionBreak,
+        }
+    }
+}
+
+/// Mirrors `gist_rsvp::SessionStats`.
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiSessionStats {
+    pub words_shown: u32,
+    /// Pace actually achieved, which differs from the configured WPM once
+    /// punctuation pauses and back-word rewinds are factored in. `0.0` while
+    /// no play time has elapsed, never a division by zero.
+    pub estimated_wpm: f32,
+    /// Total play time in ms, excluding paused gaps.
+    pub duration_ms: u64,
+}
+
+impl From<gist_rsvp::SessionStats> for FfiSessionStats {
+    fn from(s: gist_rsvp::SessionStats) -> Self {
+        FfiSessionStats {
+            words_shown: s.words_shown,
+            estimated_wpm: s.estimated_wpm,
+            duration_ms: s.duration_ms,
+        }
+    }
+}
+
+/// A word split at its Optimal Recognition Point, ready to render as three
+/// runs (the middle one highlighted/aligned).
+///
+/// Deliberately pre-split rather than exposing `gist_rsvp::orp_index`'s
+/// return value directly: that is a **byte** offset into UTF-8, which is
+/// meaningless in C# (UTF-16) and error-prone in Swift, and slicing a string
+/// at a wrong offset is exactly the class of bug the ORP code already goes
+/// to trouble to avoid (it works in grapheme clusters so it never splits an
+/// emoji, flag or accented letter). Handing over the three pieces makes that
+/// impossible to get wrong in a client and means ORP does not become a
+/// fourth hand-port of engine logic.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiOrpSplit {
+    /// Text before the focus cluster. Empty when the focus is the first
+    /// cluster of the word.
+    pub before: String,
+    /// The single grapheme cluster to highlight. Empty only for an empty
+    /// word.
+    pub focus: String,
+    /// Text after the focus cluster.
+    pub after: String,
+}
+
+impl FfiOrpSplit {
+    fn of(word: &str) -> Self {
+        let (before, focus, after) = gist_rsvp::orp_split(word);
+        FfiOrpSplit {
+            before: before.to_owned(),
+            focus: focus.to_owned(),
+            after: after.to_owned(),
+        }
+    }
+}
+
+/// Everything a reader view needs to draw one frame, in a single FFI call.
+///
+/// Returned by [`FfiRsvpSession::frame_at_elapsed`]. The individual
+/// accessors next to it return the same values one at a time; this exists so
+/// the per-tick path is one call and one lock acquisition rather than five,
+/// which matters for W4's "10-minute soak at 600 WPM" exit criterion.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiRsvpFrame {
+    /// Index of the token to display.
+    pub index: u64,
+    pub text: String,
+    pub kind: FfiTokenKind,
+    /// `text` split at its ORP. For a break token (empty text) every field
+    /// is empty.
+    pub orp: FfiOrpSplit,
+    /// How long this token should stay on screen, in ms.
+    pub duration_ms: u64,
+    /// Elapsed-ms value (on the same clock as `frame_at_elapsed`'s argument)
+    /// at which `index` stops being the token to display. A client's timer
+    /// should wake at this, not after a fixed interval, and re-ask — which
+    /// is what keeps a late or coalesced tick from compounding into drift.
+    ///
+    /// When `is_last` is true there is nothing to advance to, so this is
+    /// simply when the final token's own display time runs out: a client
+    /// should stop playback there rather than scheduling another tick.
+    pub next_boundary_ms: u64,
+    /// True when `index` is the last token in the stream, i.e. playback has
+    /// nothing left to advance to.
+    pub is_last: bool,
+    /// Total tokens in the stream, so a progress readout needs no second
+    /// call.
+    pub token_count: u64,
+}
+
+/// The RSVP pacing engine, live, as an object a UI drives directly.
+///
+/// This exists so no native shell has to re-implement pacing.
+/// `docs/windows-development-plan.md` §4.3: Apple's `RsvpPlayer`/
+/// `RsvpWallClockEngine` is already a hand-port of `token_duration_ms` and
+/// its punctuation helpers (and `RsvpStats` a hand-port of the stats
+/// arithmetic), kept in sync by hand; **Windows must not become a third
+/// copy.** A client drives this by re-anchoring to a monotonic clock
+/// (`Stopwatch`/`DispatcherQueueTimer` on Windows) and asking
+/// [`frame_at_elapsed`](FfiRsvpSession::frame_at_elapsed) what to show for
+/// the elapsed time it measured — never by sleeping a fixed interval per
+/// token and trusting the sleep.
+///
+/// # Threading
+///
+/// `gist_rsvp::RsvpSession`'s mutators take `&mut self` while every uniffi
+/// export takes `&self`, so the session lives behind a `Mutex`. Every
+/// acquisition is poison-tolerant (`.unwrap_or_else(|p| p.into_inner())`)
+/// per this project's mutex policy: a panic inside one method must not
+/// permanently brick the reader, and `ffi_catch!` has already converted
+/// that panic into a returned error for the caller.
+///
+/// # Index arguments
+///
+/// Indices cross this boundary as `u64` (the file's existing convention,
+/// cf. `save_progress`) and are converted with a saturating cast, never a
+/// bare `as`. Nothing here indexes the token slice with a client-supplied
+/// integer: out-of-range reads go through `Option`/clamping, matching the
+/// engine's own behaviour.
+#[derive(uniffi::Object)]
+pub struct FfiRsvpSession {
+    inner: std::sync::Mutex<gist_rsvp::RsvpSession>,
+}
+
+/// `u64` from a client -> `usize`, saturating rather than truncating. On a
+/// 32-bit target a huge value becomes `usize::MAX`, which every engine
+/// entry point already clamps; it must never wrap round to a small
+/// in-range index.
+fn ffi_index(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+/// `usize` -> `u64` for a return value. Saturating for symmetry; cannot
+/// actually saturate on any target this ships to.
+fn ffi_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+impl FfiRsvpSession {
+    fn new(session: gist_rsvp::RsvpSession) -> Arc<Self> {
+        Arc::new(Self {
+            inner: std::sync::Mutex::new(session),
+        })
+    }
+
+    /// Poison-tolerant lock, per this project's mutex policy. A bare
+    /// `.lock().unwrap()` is forbidden.
+    fn lock(&self) -> std::sync::MutexGuard<'_, gist_rsvp::RsvpSession> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+#[uniffi::export]
+impl FfiRsvpSession {
+    // ── Read-only accessors ───────────────────────────────────────────────
+
+    /// Total number of tokens in the stream (words plus breaks).
+    pub fn token_count(&self) -> Result<u64, GistError> {
+        ffi_catch!({ Ok(ffi_u64(self.lock().tokens.len())) })
+    }
+
+    /// Index the current play window starts from — where the last
+    /// `pause`/`seek`/`back_words`/`set_wpm` left the reader, and the point
+    /// `elapsed_ms` arguments are measured relative to.
+    pub fn cursor(&self) -> Result<u64, GistError> {
+        ffi_catch!({ Ok(ffi_u64(self.lock().cursor)) })
+    }
+
+    pub fn play_state(&self) -> Result<FfiPlayState, GistError> {
+        ffi_catch!({ Ok((&self.lock().state).into()) })
+    }
+
+    /// The effective words-per-minute, already clamped to 100–1000 by the
+    /// core (`docs/windows-ui-spec.md` §7.1: "Range enforced by the core,
+    /// not just the control").
+    pub fn wpm(&self) -> Result<u32, GistError> {
+        ffi_catch!({ Ok(self.lock().config.wpm) })
+    }
+
+    /// Text of the token at `index`, or `None` if `index` is out of range.
+    pub fn token_text(&self, index: u64) -> Result<Option<String>, GistError> {
+        ffi_catch!({
+            Ok(self
+                .lock()
+                .tokens
+                .get(ffi_index(index))
+                .map(|t| t.text.clone()))
+        })
+    }
+
+    /// Kind of the token at `index`, or `None` if `index` is out of range.
+    pub fn token_kind(&self, index: u64) -> Result<Option<FfiTokenKind>, GistError> {
+        ffi_catch!({
+            Ok(self
+                .lock()
+                .tokens
+                .get(ffi_index(index))
+                .map(|t| (&t.kind).into()))
+        })
+    }
+
+    /// Whether `index` is the last token in the stream. `false` for an
+    /// out-of-range index and for an empty stream — there is no last token
+    /// to be.
+    pub fn is_last_token(&self, index: u64) -> Result<bool, GistError> {
+        ffi_catch!({
+            let session = self.lock();
+            let len = session.tokens.len();
+            Ok(len > 0 && ffi_index(index) == len - 1)
+        })
+    }
+
+    /// `text` of the token at `index`, split at its Optimal Recognition
+    /// Point. `None` if `index` is out of range.
+    pub fn orp_split(&self, index: u64) -> Result<Option<FfiOrpSplit>, GistError> {
+        ffi_catch!({
+            Ok(self
+                .lock()
+                .tokens
+                .get(ffi_index(index))
+                .map(|t| FfiOrpSplit::of(&t.text)))
+        })
+    }
+
+    // ── Pacing ────────────────────────────────────────────────────────────
+
+    /// How long the token at `index` should be displayed, in ms. `0` for an
+    /// out-of-range index (matching the engine).
+    pub fn token_duration_ms(&self, index: u64) -> Result<u64, GistError> {
+        ffi_catch!({ Ok(self.lock().token_duration_ms(ffi_index(index))) })
+    }
+
+    /// Index of the token that should be on screen `elapsed_ms` after the
+    /// last [`resume`](FfiRsvpSession::resume), clamped to the last token
+    /// once the stream runs out. Pure — does not advance the cursor.
+    pub fn token_at_elapsed(&self, elapsed_ms: u64) -> Result<u64, GistError> {
+        ffi_catch!({ Ok(ffi_u64(self.lock().token_at_elapsed(elapsed_ms))) })
+    }
+
+    /// Everything needed to draw one frame at `elapsed_ms`, in one call.
+    /// `None` only when the token stream is empty.
+    ///
+    /// This is the per-tick entry point: a client measures elapsed time on a
+    /// monotonic clock, calls this, renders, and sleeps until
+    /// `next_boundary_ms` before asking again. Because the answer is
+    /// recomputed from measured elapsed time every time rather than
+    /// accumulated, a late or coalesced tick self-corrects instead of
+    /// compounding into drift.
+    pub fn frame_at_elapsed(&self, elapsed_ms: u64) -> Result<Option<FfiRsvpFrame>, GistError> {
+        ffi_catch!({
+            let session = self.lock();
+            let len = session.tokens.len();
+            if len == 0 {
+                return Ok(None);
+            }
+            let index = session.token_at_elapsed(elapsed_ms);
+            let Some(token) = session.tokens.get(index) else {
+                // Unreachable: `token_at_elapsed` clamps into range for a
+                // non-empty stream. Reported rather than panicked.
+                return Ok(None);
+            };
+            // Asked of the engine rather than summed here: the engine has it
+            // memoised, so this stays O(log k) instead of walking every
+            // token since the cursor on every tick.
+            let next_boundary_ms = session.elapsed_at_token_end(index);
+            Ok(Some(FfiRsvpFrame {
+                index: ffi_u64(index),
+                text: token.text.clone(),
+                kind: (&token.kind).into(),
+                orp: FfiOrpSplit::of(&token.text),
+                duration_ms: session.token_duration_ms(index),
+                next_boundary_ms,
+                is_last: index == len - 1,
+                token_count: ffi_u64(len),
+            }))
+        })
+    }
+
+    // ── Mutations ─────────────────────────────────────────────────────────
+
+    /// Jump to `index`, clamped to the last token. The caller must reset its
+    /// elapsed counter afterwards.
+    pub fn seek(&self, index: u64) -> Result<(), GistError> {
+        ffi_catch!({
+            self.lock().seek(ffi_index(index));
+            Ok(())
+        })
+    }
+
+    /// Pause at `elapsed_ms`: pins the cursor to the token that was on
+    /// screen and adds `elapsed_ms` to the session's accumulated play time,
+    /// so a pause gap never counts as reading time.
+    pub fn pause(&self, elapsed_ms: u64) -> Result<(), GistError> {
+        ffi_catch!({
+            self.lock().pause(elapsed_ms);
+            Ok(())
+        })
+    }
+
+    /// Resume playing. The caller must restart its elapsed counter from 0 at
+    /// the same moment.
+    pub fn resume(&self) -> Result<(), GistError> {
+        ffi_catch!({
+            self.lock().resume();
+            Ok(())
+        })
+    }
+
+    /// Jump back `n` **word** tokens from the position current at
+    /// `elapsed_ms` (paragraph/section breaks are skipped over, not
+    /// counted). Saturates at the start of the stream. The caller must reset
+    /// its elapsed counter afterwards.
+    pub fn back_words(&self, n: u64, elapsed_ms: u64) -> Result<(), GistError> {
+        ffi_catch!({
+            self.lock().back_words(ffi_index(n), elapsed_ms);
+            Ok(())
+        })
+    }
+
+    /// Change speed mid-session. The position current at `elapsed_ms` is
+    /// pinned **under the old speed** before the new one is applied, so a
+    /// speed change never jumps the reader. `wpm` is clamped to 100–1000
+    /// here, in the core — a UI control's own range is not relied on. The
+    /// caller must reset its elapsed counter afterwards.
+    pub fn set_wpm(&self, wpm: u32, elapsed_ms: u64) -> Result<(), GistError> {
+        ffi_catch!({
+            self.lock().set_wpm(wpm, elapsed_ms);
+            Ok(())
+        })
+    }
+
+    // ── Stats ─────────────────────────────────────────────────────────────
+
+    /// Live stats at `elapsed_ms`: words actually shown, play time
+    /// excluding paused gaps, and the pace achieved. While paused,
+    /// `elapsed_ms` is ignored and the pinned cursor is used.
+    ///
+    /// This is what a stats readout should call. [`stats`](FfiRsvpSession::stats)
+    /// reports the engine's caller-maintained counter instead, which nothing
+    /// in this stack increments.
+    pub fn stats_at_elapsed(&self, elapsed_ms: u64) -> Result<FfiSessionStats, GistError> {
+        ffi_catch!({ Ok(self.lock().stats_at_elapsed(elapsed_ms).into()) })
+    }
+
+    /// `gist_rsvp::RsvpSession::stats()` verbatim.
+    ///
+    /// Its `words_shown`/`estimated_wpm` come from the engine's
+    /// `session_words_shown` field, which **nothing in this stack ever
+    /// increments** — so they read `0` unless a caller maintains it, which
+    /// no caller can from here. Exposed for completeness of the session
+    /// surface; use [`stats_at_elapsed`](FfiRsvpSession::stats_at_elapsed)
+    /// for anything a user sees.
+    pub fn stats(&self) -> Result<FfiSessionStats, GistError> {
+        ffi_catch!({ Ok(self.lock().stats().into()) })
+    }
+
+    /// Number of **word** tokens strictly before `index` — the words a
+    /// reader has already been shown when `index` is on screen. Clamped, so
+    /// an out-of-range index returns the stream's whole word count.
+    pub fn words_shown_through(&self, index: u64) -> Result<u32, GistError> {
+        ffi_catch!({ Ok(self.lock().words_shown_through(ffi_index(index))) })
+    }
+}
+
+/// Split an arbitrary word at its Optimal Recognition Point, without a
+/// session. Same engine function the reader uses, exposed for previews and
+/// settings screens that render a sample word.
+#[uniffi::export]
+pub fn rsvp_orp_split(word: String) -> Result<FfiOrpSplit, GistError> {
+    ffi_catch!({ Ok(FfiOrpSplit::of(&word)) })
+}
+
 // ── GistCore object ──────────────────────────────────────────────────────────
 
 #[derive(uniffi::Object)]
@@ -769,6 +1179,16 @@ impl GistCore {
         })
     }
 
+    /// Create an RSVP session for `item_id` and return it serialised as
+    /// JSON, with the reader's saved progress restored.
+    ///
+    /// Clients that take this have to drive pacing themselves from the JSON,
+    /// which is what `docs/windows-development-plan.md` §4.3 identifies as
+    /// the problem: Apple's shipped `RsvpPlayer` does exactly that and
+    /// hand-ports `token_duration_ms` and its punctuation helpers to do it.
+    /// Prefer [`GistCore::open_rsvp_session`], which hands over the engine
+    /// itself. Kept — and kept byte-compatible — because Apple's shipped
+    /// `CoreClient.startRsvp` depends on this exact shape.
     pub fn start_rsvp(&self, item_id: String, wpm: u32) -> Result<String, GistError> {
         ffi_catch!({
             let config = gist_rsvp::Config {
@@ -778,6 +1198,38 @@ impl GistCore {
             self.inner
                 .start_rsvp(&item_id, config)
                 .map_err(GistError::from)
+        })
+    }
+
+    /// Open a live RSVP pacing session for `item_id`, with the reader's
+    /// saved progress restored.
+    ///
+    /// The object-returning counterpart to [`GistCore::start_rsvp`], and the
+    /// one a reader view should use: pacing stays in the core instead of
+    /// being re-implemented per platform (`docs/windows-development-plan.md`
+    /// §4.3). Both go through `gist_core::Core::new_rsvp_session`, so
+    /// progress restore cannot drift between them.
+    ///
+    /// `wpm` is clamped to 100–1000 by the core.
+    pub fn open_rsvp_session(
+        &self,
+        item_id: String,
+        wpm: u32,
+    ) -> Result<Arc<FfiRsvpSession>, GistError> {
+        ffi_catch!({
+            let config = gist_rsvp::Config {
+                // `Config::wpm` is only clamped where it is *used*
+                // (`token_duration_ms`) and by `set_wpm`; clamp here too so
+                // `FfiRsvpSession::wpm()` never reports a value the engine
+                // would not honour.
+                wpm: wpm.clamp(100, 1000),
+                ..Default::default()
+            };
+            let session = self
+                .inner
+                .new_rsvp_session(&item_id, config)
+                .map_err(GistError::from)?;
+            Ok(FfiRsvpSession::new(session))
         })
     }
 
@@ -1342,6 +1794,474 @@ mod tests {
         let outcomes = core.verify_library_integrity().unwrap();
         assert_eq!(outcomes.len(), 1);
         assert!(matches!(outcomes[0].status, FfiIntegrityStatus::Pass));
+    }
+
+    // ── RSVP pacing over FFI (W4 role R1, plan §4.3) ─────────────────────
+
+    /// A real `GistCore` over a real temp-dir store, with `body` imported as
+    /// a .txt item, plus the item's id.
+    fn rsvp_fixture(body: &str) -> (tempfile::TempDir, Arc<GistCore>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = GistCore::new(
+            db.to_string_lossy().into_owned(),
+            storage.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let txt = dir.path().join("rsvp.txt");
+        std::fs::write(&txt, body.as_bytes()).unwrap();
+        let id = core
+            .import_file(txt.to_string_lossy().into_owned())
+            .unwrap();
+        (dir, core, id)
+    }
+
+    const TWELVE_WORDS: &str = "alpha bravo charlie delta echo foxtrot golf hotel india juliett \
+                                kilo lima";
+
+    /// The session has to come up with real tokens, the requested speed, and
+    /// the whole read-only surface answering consistently.
+    #[test]
+    fn open_rsvp_session_exposes_the_whole_read_only_surface() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        let session = core.open_rsvp_session(id, 600).unwrap();
+
+        let count = session.token_count().unwrap();
+        assert!(count >= 12, "{count} tokens");
+        assert_eq!(session.cursor().unwrap(), 0);
+        assert_eq!(session.wpm().unwrap(), 600);
+        assert_eq!(session.play_state().unwrap(), FfiPlayState::Paused);
+
+        assert_eq!(session.token_text(0).unwrap().as_deref(), Some("alpha"));
+        assert_eq!(session.token_kind(0).unwrap(), Some(FfiTokenKind::Word));
+        assert!(!session.is_last_token(0).unwrap());
+        assert!(session.is_last_token(count - 1).unwrap());
+        assert!(session.token_duration_ms(0).unwrap() > 0);
+
+        let orp = session.orp_split(0).unwrap().expect("token 0 exists");
+        assert_eq!(
+            format!("{}{}{}", orp.before, orp.focus, orp.after),
+            "alpha",
+            "the three pieces must reassemble the word exactly"
+        );
+        assert_eq!(orp.focus.chars().count(), 1);
+    }
+
+    /// Everything that takes an index must clamp or return `None` for an
+    /// out-of-range value — never panic, and never index the token slice
+    /// with a client-supplied integer.
+    #[test]
+    fn out_of_range_indices_are_clamped_not_fatal() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        let session = core.open_rsvp_session(id, 600).unwrap();
+        let count = session.token_count().unwrap();
+
+        for index in [count, count + 1, u64::MAX, u64::MAX - 1] {
+            assert_eq!(session.token_text(index).unwrap(), None, "{index}");
+            assert_eq!(session.token_kind(index).unwrap(), None, "{index}");
+            assert!(session.orp_split(index).unwrap().is_none(), "{index}");
+            assert!(!session.is_last_token(index).unwrap(), "{index}");
+            assert_eq!(session.token_duration_ms(index).unwrap(), 0, "{index}");
+            // Seeking past the end lands on the last token, not out of range.
+            session.seek(index).unwrap();
+            assert_eq!(session.cursor().unwrap(), count - 1, "{index}");
+            session.seek(0).unwrap();
+        }
+
+        // And an absurd elapsed value clamps to the last token.
+        session.resume().unwrap();
+        assert_eq!(session.token_at_elapsed(u64::MAX).unwrap(), count - 1);
+        let frame = session
+            .frame_at_elapsed(u64::MAX)
+            .unwrap()
+            .expect("non-empty stream");
+        assert_eq!(frame.index, count - 1);
+        assert!(frame.is_last);
+    }
+
+    /// A paused gap must not count: elapsed passed after a resume is
+    /// measured from the resume, and the cursor stays where the pause
+    /// pinned it.
+    #[test]
+    fn pause_then_resume_excludes_paused_time() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        let session = core.open_rsvp_session(id, 600).unwrap(); // 100 ms/word
+        session.resume().unwrap();
+        assert_eq!(session.play_state().unwrap(), FfiPlayState::Playing);
+
+        assert_eq!(session.token_at_elapsed(550).unwrap(), 5);
+        session.pause(550).unwrap();
+        assert_eq!(session.cursor().unwrap(), 5);
+        assert_eq!(session.play_state().unwrap(), FfiPlayState::Paused);
+        assert_eq!(session.stats_at_elapsed(0).unwrap().duration_ms, 550);
+
+        // However long the pause lasted, the caller restarts its clock at
+        // the resume, so elapsed 0 must still be token 5.
+        session.resume().unwrap();
+        assert_eq!(session.token_at_elapsed(0).unwrap(), 5);
+        assert_eq!(session.token_at_elapsed(99).unwrap(), 5);
+        assert_eq!(session.token_at_elapsed(100).unwrap(), 6);
+
+        session.pause(250).unwrap();
+        assert_eq!(session.cursor().unwrap(), 7);
+        assert_eq!(
+            session.stats_at_elapsed(0).unwrap().duration_ms,
+            800,
+            "play time only, no pause gap"
+        );
+    }
+
+    /// `set_wpm` must pin the position under the *old* speed before applying
+    /// the new one. Apple's `RsvpWallClockEngine` mirrors this exactly; a
+    /// regression silently makes every speed change jump the reader.
+    #[test]
+    fn set_wpm_pins_the_cursor_under_the_old_speed() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        let session = core.open_rsvp_session(id, 600).unwrap(); // 100 ms/word
+        session.resume().unwrap();
+
+        // 650 ms at 600 wpm is token 6. At the new 120 ms/word it would be
+        // token 5 — so a cursor of 5 would mean the new speed was applied
+        // before the position was pinned.
+        session.set_wpm(500, 650).unwrap();
+        assert_eq!(session.cursor().unwrap(), 6);
+        assert_eq!(session.wpm().unwrap(), 500);
+        assert_eq!(session.token_at_elapsed(0).unwrap(), 6);
+        assert_eq!(
+            session.token_at_elapsed(120).unwrap(),
+            7,
+            "120 ms/word at 500 wpm"
+        );
+    }
+
+    /// `docs/windows-ui-spec.md` §7.1: "Range enforced by the core, not just
+    /// the control." Both the opening speed and a later change must clamp.
+    #[test]
+    fn wpm_is_clamped_to_100_1000_by_the_core() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+
+        assert_eq!(
+            core.open_rsvp_session(id.clone(), 0)
+                .unwrap()
+                .wpm()
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            core.open_rsvp_session(id.clone(), 7)
+                .unwrap()
+                .wpm()
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            core.open_rsvp_session(id.clone(), u32::MAX)
+                .unwrap()
+                .wpm()
+                .unwrap(),
+            1000
+        );
+
+        let session = core.open_rsvp_session(id, 400).unwrap();
+        session.set_wpm(1, 0).unwrap();
+        assert_eq!(session.wpm().unwrap(), 100);
+        session.set_wpm(99_999, 0).unwrap();
+        assert_eq!(session.wpm().unwrap(), 1000);
+    }
+
+    #[test]
+    fn back_words_from_the_start_does_not_underflow() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        let session = core.open_rsvp_session(id, 600).unwrap();
+        session.resume().unwrap();
+
+        session.back_words(5, 0).unwrap();
+        assert_eq!(session.cursor().unwrap(), 0);
+        session.back_words(u64::MAX, 0).unwrap();
+        assert_eq!(session.cursor().unwrap(), 0);
+
+        // And from mid-stream it walks back exactly that many words.
+        session.seek(9).unwrap();
+        session.back_words(4, 0).unwrap();
+        assert_eq!(session.cursor().unwrap(), 5);
+    }
+
+    /// `frame_at_elapsed` is the per-tick path: it must agree with the
+    /// one-at-a-time accessors, and `next_boundary_ms` must be the elapsed
+    /// value at which the frame actually changes (that is what lets a
+    /// client's timer wake at a boundary instead of drifting).
+    #[test]
+    fn frame_at_elapsed_agrees_with_the_individual_accessors() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        let session = core.open_rsvp_session(id, 600).unwrap();
+        session.resume().unwrap();
+
+        for elapsed in [0u64, 1, 99, 100, 101, 550, 1_000] {
+            let frame = session
+                .frame_at_elapsed(elapsed)
+                .unwrap()
+                .expect("non-empty stream");
+            let index = session.token_at_elapsed(elapsed).unwrap();
+            assert_eq!(frame.index, index, "elapsed {elapsed}");
+            assert_eq!(
+                frame.text,
+                session.token_text(index).unwrap().unwrap_or_default()
+            );
+            assert_eq!(Some(frame.kind), session.token_kind(index).unwrap());
+            assert_eq!(
+                frame.duration_ms,
+                session.token_duration_ms(index).unwrap(),
+                "elapsed {elapsed}"
+            );
+            assert_eq!(frame.is_last, session.is_last_token(index).unwrap());
+            assert_eq!(frame.token_count, session.token_count().unwrap());
+            assert_eq!(
+                format!("{}{}{}", frame.orp.before, frame.orp.focus, frame.orp.after),
+                frame.text
+            );
+
+            // The boundary is in the future, and is exactly where the frame
+            // changes.
+            assert!(frame.next_boundary_ms > elapsed, "elapsed {elapsed}");
+            assert_eq!(
+                session
+                    .token_at_elapsed(frame.next_boundary_ms - 1)
+                    .unwrap(),
+                index,
+                "frame must still be current 1ms before its boundary"
+            );
+            if !frame.is_last {
+                assert_eq!(
+                    session.token_at_elapsed(frame.next_boundary_ms).unwrap(),
+                    index + 1,
+                    "frame must change exactly at its boundary"
+                );
+            }
+        }
+    }
+
+    /// Simulates the W4 exit criterion's shape: a long uninterrupted run
+    /// where the client's tick arrives late or early each time. The reported
+    /// position must track measured elapsed time exactly, never accumulate.
+    #[test]
+    fn jittery_ticks_never_accumulate_drift() {
+        let body = (0..600)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (_dir, core, id) = rsvp_fixture(&body);
+        let session = core.open_rsvp_session(id, 600).unwrap(); // 100 ms/word
+        session.resume().unwrap();
+
+        // Ticks land at the nominal boundary plus a varying lateness.
+        let jitter = [0u64, 7, 23, 1, 91, 48, 3];
+        for word in 0..500u64 {
+            let nominal = word * 100;
+            let late = jitter[(word as usize) % jitter.len()];
+            let frame = session
+                .frame_at_elapsed(nominal + late)
+                .unwrap()
+                .expect("non-empty stream");
+            assert_eq!(
+                frame.index, word,
+                "a tick {late}ms late at {nominal}ms must still report word {word}"
+            );
+            assert_eq!(frame.text, format!("word{word}"));
+        }
+
+        // Including a tick so late it skips a token entirely — the answer
+        // follows the clock rather than advancing by one.
+        let frame = session.frame_at_elapsed(50_250).unwrap().unwrap();
+        assert_eq!(frame.index, 502);
+    }
+
+    #[test]
+    fn stats_at_elapsed_is_live_and_stats_reports_the_unmaintained_counter() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        let session = core.open_rsvp_session(id, 600).unwrap();
+        session.resume().unwrap();
+
+        let at_start = session.stats_at_elapsed(0).unwrap();
+        assert_eq!(at_start.words_shown, 0);
+        assert_eq!(at_start.duration_ms, 0);
+        assert_eq!(at_start.estimated_wpm, 0.0);
+
+        let mid = session.stats_at_elapsed(550).unwrap();
+        assert_eq!(mid.words_shown, 5);
+        assert_eq!(mid.duration_ms, 550);
+        assert!(
+            mid.estimated_wpm > 500.0 && mid.estimated_wpm < 600.0,
+            "5 words in 550ms is ~545 wpm, got {}",
+            mid.estimated_wpm
+        );
+        assert_eq!(session.words_shown_through(5).unwrap(), 5);
+        assert_eq!(session.words_shown_through(u64::MAX).unwrap(), 12);
+
+        // `stats()` reflects the engine's caller-maintained counter, which
+        // nothing in this stack increments — pinned so the difference
+        // between the two is deliberate and visible.
+        assert_eq!(session.stats().unwrap().words_shown, 0);
+    }
+
+    /// A zero-token stream has to answer every accessor sanely. Reached in
+    /// practice by importing a file with no extractable words.
+    #[test]
+    fn an_empty_token_stream_never_panics() {
+        let (_dir, core, id) = rsvp_fixture("   \n\n   \n");
+        let session = core.open_rsvp_session(id, 600).unwrap();
+        assert_eq!(
+            session.token_count().unwrap(),
+            0,
+            "fixture must actually produce no tokens for this test to mean anything"
+        );
+        session.resume().unwrap();
+
+        assert_eq!(session.cursor().unwrap(), 0);
+        assert_eq!(session.token_text(0).unwrap(), None);
+        assert_eq!(session.token_kind(0).unwrap(), None);
+        assert!(!session.is_last_token(0).unwrap());
+        assert_eq!(session.token_duration_ms(0).unwrap(), 0);
+        assert_eq!(session.token_at_elapsed(0).unwrap(), 0);
+        assert_eq!(session.token_at_elapsed(u64::MAX).unwrap(), 0);
+        assert!(session.frame_at_elapsed(0).unwrap().is_none());
+        assert!(session.frame_at_elapsed(u64::MAX).unwrap().is_none());
+        assert!(session.orp_split(0).unwrap().is_none());
+        assert_eq!(session.words_shown_through(u64::MAX).unwrap(), 0);
+        session.seek(u64::MAX).unwrap();
+        session.back_words(u64::MAX, u64::MAX).unwrap();
+        session.pause(u64::MAX).unwrap();
+        session.set_wpm(0, u64::MAX).unwrap();
+        assert_eq!(session.cursor().unwrap(), 0);
+        assert_eq!(session.stats_at_elapsed(0).unwrap().words_shown, 0);
+    }
+
+    #[test]
+    fn a_single_token_stream_is_immediately_the_last_token() {
+        let (_dir, core, id) = rsvp_fixture("solitary");
+        let session = core.open_rsvp_session(id, 600).unwrap();
+        assert_eq!(session.token_count().unwrap(), 1);
+        session.resume().unwrap();
+
+        assert!(session.is_last_token(0).unwrap());
+        let frame = session.frame_at_elapsed(0).unwrap().expect("one token");
+        assert_eq!(frame.index, 0);
+        assert_eq!(frame.text, "solitary");
+        assert!(frame.is_last);
+        assert_eq!(session.token_at_elapsed(u64::MAX).unwrap(), 0);
+        session.back_words(3, 0).unwrap();
+        assert_eq!(session.cursor().unwrap(), 0);
+    }
+
+    /// ORP splitting must never cut a grapheme cluster — the whole reason
+    /// the pieces are handed over pre-split rather than as a byte offset.
+    #[test]
+    fn orp_split_handles_multi_byte_and_degenerate_words() {
+        for word in [
+            "",
+            "a",
+            "Hello",
+            "naïve",
+            "re\u{0301}sume\u{0301}",
+            "👍🏽",
+            "🇬🇧",
+            "👨\u{200D}👩x",
+            "日本語のテキスト",
+            "...",
+        ] {
+            let split = rsvp_orp_split(word.to_string()).unwrap();
+            assert_eq!(
+                format!("{}{}{}", split.before, split.focus, split.after),
+                word,
+                "{word:?} did not reassemble"
+            );
+            if word.is_empty() {
+                assert!(split.focus.is_empty());
+            } else {
+                assert!(!split.focus.is_empty(), "{word:?} has an empty focus");
+                // One grapheme cluster, however many bytes or chars it is.
+                assert!(
+                    split.focus.chars().count() >= 1,
+                    "{word:?} focus {:?}",
+                    split.focus
+                );
+            }
+        }
+    }
+
+    /// Progress restore must be the *same* restore `start_rsvp` does — one
+    /// implementation in `gist_core::Core::new_rsvp_session`, per plan §4.3.
+    #[test]
+    fn open_rsvp_session_restores_the_same_saved_progress_as_start_rsvp() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        core.save_progress(id.clone(), 7).unwrap();
+
+        let session = core.open_rsvp_session(id.clone(), 600).unwrap();
+        assert_eq!(session.cursor().unwrap(), 7);
+        assert_eq!(session.token_at_elapsed(0).unwrap(), 7);
+
+        let json = core.start_rsvp(id.clone(), 600).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["cursor"], serde_json::json!(7));
+
+        // Out-of-range saved progress is clamped by both.
+        core.save_progress(id.clone(), 9_999).unwrap();
+        let clamped = core.open_rsvp_session(id.clone(), 600).unwrap();
+        assert_eq!(
+            clamped.cursor().unwrap(),
+            clamped.token_count().unwrap() - 1
+        );
+        let json = core.start_rsvp(id, 600).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["cursor"],
+            serde_json::json!(clamped.token_count().unwrap() - 1)
+        );
+    }
+
+    #[test]
+    fn open_rsvp_session_on_an_unknown_id_is_an_error_not_a_panic() {
+        let (_dir, core, _id) = rsvp_fixture(TWELVE_WORDS);
+        let result = core.open_rsvp_session("not-a-real-id".to_string(), 600);
+        assert!(
+            matches!(result, Err(GistError::Core(_))),
+            "{:?}",
+            result.map(|_| "unexpected session")
+        );
+    }
+
+    /// The session is behind a `Mutex` and uniffi hands the same `Arc` to
+    /// however many threads a client cares to use it from. Hammer it from
+    /// several at once: no deadlock, no poisoned-lock failure, and the
+    /// invariants still hold afterwards.
+    #[test]
+    fn concurrent_use_from_several_threads_is_safe() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        let session = core.open_rsvp_session(id, 600).unwrap();
+        session.resume().unwrap();
+
+        std::thread::scope(|scope| {
+            for t in 0..8u64 {
+                let session = Arc::clone(&session);
+                scope.spawn(move || {
+                    for i in 0..200u64 {
+                        let _ = session.frame_at_elapsed(i * 13 + t).unwrap();
+                        let _ = session.stats_at_elapsed(i).unwrap();
+                        if i % 7 == 0 {
+                            session.set_wpm(100 + (i as u32 % 900), i).unwrap();
+                        }
+                        if i % 11 == 0 {
+                            session.seek(i % 12).unwrap();
+                        }
+                    }
+                });
+            }
+        });
+
+        let count = session.token_count().unwrap();
+        assert!(session.cursor().unwrap() < count);
+        assert!((100..=1000).contains(&session.wpm().unwrap()));
     }
 }
 
