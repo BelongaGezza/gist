@@ -134,9 +134,10 @@ public sealed class RsvpSoakTests : IDisposable
         // Lateness is bounded by timer granularity and does not trend upward.
         Assert.True(late.Max() < 250, $"worst lateness {late.Max()} ms");
         Assert.True(means.Count == 0 || means[^1] - means[0] < 20, "mean lateness grew across the run");
-        // Position tracks the clock: the last shown token must be the engine's answer for the wall time.
-        var expected = engine.FrameAtElapsed(0); // engine still readable: paused? just sanity that it is alive
-        Assert.NotNull(expected);
+        // Position tracks the clock: the reader advanced, and late ticks skipped (at most) a sliver
+        // of tokens rather than falling behind (the old assertion here was a tautology, F51).
+        Assert.True(all[^1].Index > 0, "the reader never advanced");
+        Assert.True(skipped <= (ulong)(all.Length / 100), $"{skipped} tokens skipped by late ticks");
     }
 
     private static long Percentile(long[] values, int p)

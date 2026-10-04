@@ -248,4 +248,60 @@ public sealed class RsvpReaderViewModelTests
 
         public void Dispose() => _inner.Dispose();
     }
+
+    [Fact]
+    public async Task A_fault_reading_the_token_count_fails_the_load_and_releases_the_engine()
+    {
+        var engine = new ScriptedRsvpEngine(new[] { "a", "b" }) { ThrowOnTokenCount = true };
+        using var vm = Create(_ => Task.FromResult<IRsvpEngine?>(engine));
+
+        await vm.LoadAsync();
+
+        Assert.Equal(RsvpLoadState.Failed, vm.LoadState);
+        Assert.True(engine.Disposed);
+    }
+
+    [Fact]
+    public async Task Leaving_releases_the_engine_even_when_pausing_throws()
+    {
+        var engine = new ScriptedRsvpEngine(new[] { "a", "b", "c" });
+        var vm = Create(_ => Task.FromResult<IRsvpEngine?>(engine));
+        await vm.LoadAsync();
+        vm.TogglePlayPause();
+        engine.ThrowOnPause = true;
+
+        await Assert.ThrowsAnyAsync<Exception>(() => vm.LeaveAsync());
+
+        Assert.True(engine.Disposed);
+    }
+
+    [Fact]
+    public async Task Changing_wpm_is_reported_for_persistence_once_per_change()
+    {
+        var remembered = new List<uint>();
+        var vm = new RsvpReaderViewModel("item-1", "A Book",
+            Engine("a", "b", "c"), _ => Task.CompletedTask, _clock, _timer,
+            persistWpm: remembered.Add);
+        await vm.LoadAsync();
+
+        vm.SetWpm(450);
+        vm.SetWpm(450);
+        vm.SetWpm(5000);
+
+        Assert.Equal(new uint[] { 450, RsvpWpm.Max }, remembered);
+    }
+
+    [Fact]
+    public async Task A_failing_wpm_persist_never_interrupts_reading()
+    {
+        var vm = new RsvpReaderViewModel("item-1", "A Book",
+            Engine("a", "b", "c"), _ => Task.CompletedTask, _clock, _timer,
+            persistWpm: _ => throw new IOException("disk full"));
+        await vm.LoadAsync();
+
+        vm.SetWpm(450);
+
+        Assert.Equal(RsvpLoadState.Ready, vm.LoadState);
+        Assert.Equal(450U, vm.Wpm);
+    }
 }
