@@ -11,3 +11,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 unicode-segmentation = "1"
+
+# wasm32-unknown-unknown has no OS randomness source, so uuid's v7 generator
+# refuses to compile there unless a JS-backed RNG is selected. Enabled for that
+# one target only: native (macOS/Windows/Linux) builds are unaffected.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+uuid = { workspace = true, features = ["js"] }
