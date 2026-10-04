@@ -128,6 +128,28 @@ the UI spec and ADR-006's addendum.
 - [ ] [manual only] Reading feel at 300 and 600 WPM: no visible stutter, pauses at sentence/paragraph ends; a long soak shows no drift (measured numbers are in the W4 closeout in docs/windows-development-plan.md).
 - [ ] [manual only] Text scaling (Settings > Accessibility > Text size) enlarges the word; reduced animations produce no transitions (there are none).
 
+## Flow reader (W5)
+
+Spec §7.2. Tags are provisional; role R2 retags with real test names.
+
+- [ ] [automated: TBD-R2] Open in Flow View from the Library and from a Collection (context menu entry); Back returns.
+- [ ] [manual only] Large document (>= 100k words): scrolling with wheel, scrollbar drag and precision touchpad stays smooth; memory stays bounded (see the W5 measurement record in docs/windows-development-plan.md).
+- [ ] [manual only] Typography (Aa) menu: Size smaller/larger clamps at 13 and 28 pt, default 17; Font offers Default and Serif only (no "Rounded" on Windows, spec §7.2); Line spacing Compact/Regular/Relaxed visibly differ; code spans stay monospaced in every font; choices persist after restart.
+- [ ] [automated: TBD-R2] Contents flyout lists headings indented 16 epx x (level - 1); clicking scrolls to the section; a document with no headings shows a disabled Contents button.
+- [ ] [manual only] TOC indentation looks right for a document with h1-h4 headings, in all five themes.
+- [ ] [automated: TBD-R2] Find: case-insensitive, matches highlighted, Next/Previous step through them, F3 and Shift+F3 and Ctrl+G navigate, empty/no-match query shows no highlight and no error.
+- [ ] [manual only] Find highlight colour is legible in every theme, and the current match is visually distinct; a match inside a multi-byte character run is highlighted at the right characters.
+- [ ] [automated: TBD-R2] Progress bar and percentage track the scroll position; leaving and reopening (and restarting the app) restores the position with no visible jump; a corrupt or out-of-range stored value is ignored.
+- [ ] [manual only] Home/End jump to the first/last block; PgUp/PgDn move by about one viewport (not a fixed block count); arrow keys scroll; keys work after clicking into the text.
+- [ ] [manual only] Select text across paragraphs and press Ctrl+C; paste into Notepad matches the selection. Selection survives scrolling away and back reasonably (note any limitation).
+- [ ] [manual only] Images: sized to the column, alt text present, caption below; a missing/unsupported image shows a placeholder, never an error dialog. Ordered and unordered lists show correct numbers/bullets, including nested.
+- [ ] [manual only] Tables (if the document has any): rows/columns align, header row distinct, readable in every theme.
+- [ ] [manual only] Themes: Light, Dark, Sepia, OLED (exactly black) and System each give a legible reading surface, selection colour and progress bar; High contrast bypasses the palette.
+- [ ] [manual only] Narrator: reading column is navigable by paragraph/heading; headings announce their level; images announce alt text; Find and Contents are reachable and announce match count/position where available; progress is announced as a value, not spoken on every scroll.
+- [ ] [manual only] Text scaling (Settings > Accessibility > Text size, up to 225%): text and controls enlarge without clipping; the reading column stays centred.
+- [ ] [manual only] Window resize and narrow width: column reflows, command bar collapses to overflow, no horizontal scrollbar.
+- [ ] [manual only] Nothing shows a raw exception message, GUID or file path; opening an item whose document cannot be loaded shows a plain message and a way back.
+
 ## Known behaviour to be aware of
 
 - **Remove is a complete delete and always has been, in effect.** Windows briefly offered "Remove from Library" and
