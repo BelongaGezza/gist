@@ -93,6 +93,8 @@ pre-1.0 work, not a shipped release note.
 - The RSVP reader, the flow reader, an accessibility pass, and MSIX packaging are the remaining
   planned phases and are not built yet — see `docs/windows-development-plan.md`'s W4–W6.
 
+- RSVP reader (W4): play/pause, WPM slider + number box, word stepping, scrubber, progress save/restore. Pacing comes from the shared Rust engine over FFI (no second port). A 10-minute soak at 600 WPM showed no cumulative drift. Visual/Narrator passes still pending.
+
 ### Security
 
 GIST tracks security findings from internal and independent reviews in an open register rather

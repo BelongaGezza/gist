@@ -85,11 +85,11 @@ Windows one, because this session cannot run `xcodebuild`:
 
 | # | Role | Scope | Depends on | Status |
 |---|---|---|---|---|
-| R1 | Rust+FFI — expose RSVP pacing over FFI (plan §4.3 item 1) | `crates/gist-rsvp`, `crates/gist-ffi`, `PENDING_APPLE_CHANGES.md` | — | Spawned 2026-10-04 |
-| R2 | C# — RSVP reader view + playback timer (spec §7.1) | `apps/windows/GIST.Core`, `apps/windows/GIST.App`, `GIST.Core.Tests`, `GIST.App.UITests` | R1 | Blocked on R1 |
-| R3 | Windows asset verification + `F34` / `F29` hygiene | `apps/windows/GIST.App/Assets`, `PENDING_WINDOWS_CHANGES.md`, `tools/fetch-pdfium.sh`, `deny.toml` | — | Spawned 2026-10-04 |
-| R4 | Review — `F27` Windows shell security review | `docs/security-review-windows.md` | R1–R3 as landed | Blocked |
-| R5 | Review — `F30` standing security/quality pass over the W4 diff | `docs/security-quality-review-<date>.md` | R1–R3 as landed | Blocked |
+| R1 | Rust+FFI — expose RSVP pacing over FFI (plan §4.3 item 1) | `crates/gist-rsvp`, `crates/gist-ffi`, `PENDING_APPLE_CHANGES.md` | — | Done, merged 2026-10-04 |
+| R2 | C# — RSVP reader view + playback timer (spec §7.1) | `apps/windows/GIST.Core`, `apps/windows/GIST.App`, `GIST.Core.Tests`, `GIST.App.UITests` | R1 | Done, merged 2026-10-04 |
+| R3 | Windows asset verification + `F34` / `F29` hygiene | `apps/windows/GIST.App/Assets`, `PENDING_WINDOWS_CHANGES.md`, `tools/fetch-pdfium.sh`, `deny.toml` | — | Done, merged 2026-10-04 |
+| R4 | Review — `F27` Windows shell security review | `docs/security-review-windows.md` | R1–R3 as landed | Done, merged 2026-10-04 |
+| R5 | Review — `F30` standing security/quality pass over the W4 diff | `docs/security-quality-review-<date>.md` | R1–R3 as landed | Done, merged 2026-10-04 |
 
 Batches: **Batch 1:** R1, R3. **Batch 2:** R2. **Batch 3:** R4, R5 (both fresh agents; R5 must not
 be an agent that wrote any W4 code).
