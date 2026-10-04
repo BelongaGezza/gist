@@ -185,11 +185,69 @@ Goals: answer R1, make the environment reproducible.
 - Stretch: ←/→ and Ctrl+←/→ seeking, scrubber (from product spec, beyond Apple).
 - **Exit:** a 10-minute soak at 600 WPM shows no cumulative drift vs. wall clock (measured, recorded); progress restores after restart.
 
+#### W4 closeout (2026-10-04)
+
+- **Pacing:** executed §4.3 item 1 first. `FfiRsvpSession` (`gist-ffi`) exposes the Rust pacing engine; `gist-rsvp`'s `token_at_elapsed` is memoised. C# (`GIST.Core/Rsvp`) holds no pacing arithmetic.
+- **UI:** `RsvpPage` per spec §7.1 plus ←/→, Ctrl+←/→ and a scrubber. ORP, stats and rotary dial are out of scope (§11). Last-used WPM is not persisted (F56).
+- **Soak (exit criterion), measured:** 600 s at 600 WPM, real Rust engine, Stopwatch-anchored thread-pool timer: 5,371 tokens shown, 0 skipped; lateness of each token vs the engine schedule mean 8.34 ms, p50 8, p99 17, max 19; per-minute means 8.1-8.5 ms (flat, no cumulative drift). Caveat: not run through WinUI's `DispatcherQueueTimer`. The test is opt-in (`GIST_RUN_SOAK=1`, `GIST_SOAK_SECONDS`, `GIST_SOAK_REPORT`) and skipped by default (F51).
+- **Restore after restart:** verified by a FlaUI test and a core test.
+- **Tests:** `GIST.Core.Tests` 263 passed / 1 skipped; `cargo test --workspace` 313 passed; FlaUI 35/37 when R2 ran it (the known native-picker test, plus one Space test that failed once under soak load and passed alone).
+- **Reviews:** `docs/security-review-windows.md` (F27, F39-F48) and `docs/security-quality-review-2026-10-04-w4.md` (F30, F49-F56): no High/Medium defects.
+- **Still manual:** visual pass in five themes, Narrator, text scaling, Accessibility Insights, `DispatcherQueueTimer` feel.
+
 ### W5 — Flow reader (3 weeks) — largest phase
 - `get_document_json` → models (custom serde-enum converter tested against real output from fixtures); virtualised block list; `RichTextBlock` runs; images; lists.
 - Typography menu (size/font/line spacing; resolve the "Rounded" question), TOC flyout with indentation, in-document find with highlighting and F3, progress bar + persisted position with restore-before-first-render, keyboard navigation (native paging).
-- Decide **Q4 (Windows OCR: `Windows.Media.Ocr` vs Tesseract)** here as a design note only; implementation stays M3 scope on all platforms (`import_image_with_ocr` is still `todo!()`).
+- Decide **Q4 (Windows OCR: `Windows.Media.Ocr` vs Tesseract)** here as a design note only; implementation stays M3 scope on all platforms (`import_image_with_ocr` is still `todo!()`). *[2026-10-04 correction: stale. `import_image_with_ocr` has been implemented in Rust since M3 (2026-09-26, closing A7); only a Windows `OcrEngine` implementation and UI are missing. Q4 is now a Proposed design note, `docs/adr/020-windows-ocr-engine.md`: `Windows.Media.Ocr`.]*
 - **Exit:** spec §7.2 complete; tests for TOC/find/store/decoder green; large-document (≥ 100k words fixture) scroll stays smooth with bounded memory (measure and record; target UI thread never blocked > 50 ms).
+
+#### W5 closeout (2026-10-04)
+
+- **Built:** `GIST.Core/Flow` (decoder, typography, find, TOC, progress, position store; 112 tests against real fixture output) and `FlowPage` (virtualising list, Contents/Aa/Find, F3/Ctrl+G, progress + restore, keyboard), wired into Library and Collection. 10 FlaUI flow tests pass; full UI suite 46/47 at R2 time (known flaky native-picker test).
+- **Exit criterion, honestly:** spec §7.2 is implemented. The 50 ms UI-thread target is met for normal use on a 149k-word, 1,330-block epub with two edge exceptions (20,000-match find: F61). **Bounded memory is NOT demonstrated** (private memory rose ~381 -> 617 MiB over 16 reopen cycles; cause unconfirmed, F64, no control run). Frame-rate smoothness was not measurable. A single huge block (e.g. a .txt with no blank lines) is unmeasured and is a likely worst case (F60).
+- **Corrections found by review (F69):** the "no unpolled probe over 22 ms" claim below is contradicted by its own raw report (49.2 ms, `cycle 4 idle in reader`); PgUp/PgDn are hand-paged (0.9 of viewport), not "native" as the spec says; "no parser populates `Section.heading`" is false (`gist-parse-pdf` sets it; dormant on Windows).
+- **Reviews:** `docs/security-quality-review-2026-10-04-w5.md` (F58-F70): no live crash or security hole; act first on F60 and F68.
+
+#### W5 follow-up: F60 / F61 / F63 / F64 (2026-10-04)
+
+Raw reports in `docs/w5-measurement/` (same machine, release `gist_ffi.dll`, Debug WinUI app build for the UI runs; one run each, so treat small differences as noise).
+
+- **F61 (find-next stall) - fixed.** Highlight data is built once per query; find-next moves a current-match marker and refreshes only the old and new entries. 20,000-match F3 stepping: p99 68 ms -> 5 ms, probes over 50 ms 34 -> 0 (`flow-find-before.txt` / `flow-find-after.txt`).
+- **F60 (one huge block) - fixed by chunking.** `GIST.Core/Flow/FlowBlockChunker` splits a paragraph, list or table over 8,000 UTF-16 units into several virtualised entries (cuts at newline, then sentence end, then whitespace, else a hard cut that never splits a surrogate pair, combining sequence or ZWJ sequence). Chunks tile the original plain text exactly (tested as a round-trip, incl. emoji/combining marks; list numbering continues across chunks; only the first table chunk keeps the header). Section plain text, TOC entry indices, and per-chunk find offsets are preserved/tested; `FlowBlockEntry.ChunkUtf16Start` maps a chunk offset back to the block. Automation names are capped at 1,000 chars. Known limits: a single list item or table row larger than the cap stays whole; a find query spanning a chunk boundary (one whitespace position per chunk) is not matched.
+  Pathological document (`flow-pathological-before.txt` / `-after.txt`): a 1.95 MB .txt with no blank lines (one paragraph block) and an epub with a 150k-char paragraph, a 20,000-item list and a 15,200-cell table. Before: .txt open to first visible block 8.1 s, and the app stopped responding (`responding: False`) during F3 stepping, so the run could not finish. After: open 1.3 s (.txt) / 0.9 s (structure epub); Page Down, wheel, find and 20 F3 steps all complete and the app stays responsive. Worst probes after: 204 ms once while the 20,000-match find first built (.txt), 159 ms during End/Home jumps on the structure epub (up to 17 probes over 16 ms there); F3 stepping p99 about 26 ms. So the 50 ms target is **not** met in every phase on pathological input, but the hang is gone.
+- **F63 - fixed.** `RestoreAsync` no longer re-hooks `ViewChanged` or focuses the document if `Leave()` already ran. No automated regression test (needs Back pressed inside a ~100-200 ms window).
+- **F64 (memory growth across reopen cycles) - diagnosed, partly explained, NOT fixed.** `ReopenControlPerfTests` (new, opt-in) runs tiny-document control arms and reads the process private-bytes counter after leave + 4 s idle with no UIA call in flight (`reopen-control.txt`, 12 cycles/arm): library-only (context menu open/dismiss, no navigation) -0.06 MiB/cycle; Flow page 5.2; RSVP page 3.9; RSVP via context-menu item 4.1; menu shown then Enter 4.0. So the growth is **not FlowPage- or document-specific**: any page navigation grows private memory about 4-5 MiB/cycle for a tiny document, and a large document adds more (earlier ~15 MiB/cycle). Managed heap is only about 1 MiB; temporary in-app diagnostics (not committed) forced full GCs after each navigation and tracked page instances with weak references: with the GC, the RSVP-by-Enter arm stayed flat (about 130-135 MiB over 10 cycles) and old FlowPage/RsvpPage instances were collected, i.e. the growth there is native XAML state waiting for finalizers that nothing triggers (the GC does not see native pressure). **Unexplained:** every LibraryPage instance stayed alive after a full GC when a context-menu item was *activated* (via UIA Invoke), but not when the menu was only shown. Two code experiments (clearing the flyout on unload; navigating after the menu closes) did not change that. It could be an app retention bug or a UIA-client reference from the harness (forcing a GC in the test process did not release it); not resolved. A debounced forced GC after navigation (run off the UI thread) was tried and reverted: tiny-doc Flow growth fell only to about 3.3 MiB/cycle and one later arm hit a UI timeout, so it was not shipped. Bounded memory therefore stays **not demonstrated**; the open question is the LibraryPage retention after menu activation.
+- **Verification:** `GIST.sln -warnaserror` clean; `GIST.Core.Tests` 399 passed (+9 chunker tests); full FlaUI suite once: 45 passed, 2 failed (`Import_URL_is_disabled...`, `The_position_survives_an_application_restart`), both passed on immediate re-run; a later `FlowReaderTests` run had one `FlowPage_FindBox` timeout and then passed twice. Intermittent UI timeouts under load look like known harness flakiness, but it was not proven that none relates to these changes.
+
+#### W5 measurement (2026-10-04, role R4)
+
+**Setup.** Machine: ASUS ProArt13 (`PROART13`), 24 logical CPUs, Windows 11 Home 10.0.26200. Build: `GIST.sln` **Release** (WinUI app and test assemblies) with a **release** `gist_ffi.dll` (`tools/build-core-windows.sh x64 release`; the first core run used the staged *debug* DLL and was about 2.5x slower on import and about 3.7x slower on `get_document_json`, so only release numbers are quoted). Document: deterministic generated ePub (`GIST.Core.Tests/TestSupport/PerfDocumentGenerator.cs`, fixed seed, generated into a temp dir, not committed): **149,393 words**, 70 chapters, 350 headings (h1/h2/h3), 1,330 blocks incl. lists, 295 KiB. Imported through the real core. Raw reports: `docs/w5-measurement/`. Re-run: `GIST_RUN_PERF=1 dotnet test apps/windows/GIST.Core.Tests -c Release --filter FlowPerfTests` and `GIST_RUN_UI_TESTS=1 GIST_RUN_PERF=1 dotnet test apps/windows/GIST.App.UITests -c Release --filter FlowPerfTests` (the UI run needs an **unlocked** desktop and nothing else using it; `GIST_PERF_REPORT=<file>` saves the report, `GIST_PERF_CYCLES=<n>` sets reopen cycles).
+
+**Core path (opt-in `FlowPerfTests`, xunit, one machine, 3-5 runs):**
+
+| Step | Result |
+|---|---|
+| import (epub parse + store + FTS tokens) | about 1.2 s |
+| `get_document_json` | about 325 ms; **12.4 MiB** of JSON (about 13x the 295 KiB epub; 12.7 M UTF-16 chars) |
+| `FlowDocumentDecoder.Decode` | 128-140 ms (first run allocates about 66 MiB, later runs about 1.8 MiB; retained decoded model about 1.7 MiB) |
+| `FlowDocument` construction (TOC + entry flattening) | 0.2 ms (350 TOC entries) |
+| `FlowSearch.FindAll` | rare 0.2 ms; no match 0.2 ms; "the" (11,260 matches) 12-20 ms; "a" (hits the 20,000 cap) 7 ms; typing "water" five keystrokes 47 ms total |
+| repeated `get_document_json` + Decode x12 with a full GC after each | process private bytes flat (about 240 MiB from the 3rd iteration): **no leak in core/FFI/decoder** |
+
+**UI path (opt-in `GIST.App.UITests/FlowPerfTests`, real GIST.exe driven by FlaUI):**
+
+- Open to ready: **about 0.6-0.65 s** from invoking "Open in Flow View" to the progress text shown, first block visible about 30 ms later; later reopens 0.45-0.65 s. Resolution is the harness's UIA poll (about 23 ms). The JSON fetch and decode run off the UI thread (`GetDocumentJsonAsync`, `Task.Run`).
+- Jumps (time until progress/block is visible, polled): End 52-79 ms, Home 49-124 ms, Contents flyout open (350 rows) 63-93 ms, Contents row to the chapter-40 heading 115-122 ms, find typed to status "1 of N" about 300 ms (250 ms debounce included; 1,341 / 11,260 / 20,000+ matches all settle without waiting on the harness). Virtualisation holds: 3-21 block elements realised of 1,330 at any time.
+- **UI-thread stall probe.** A dedicated thread sends `WM_NULL` to the main window with `SendMessageTimeout` about every 2 ms and times the reply, i.e. how long the UI thread was away from its message loop (about 1 ms resolution, 5,015 probes). Phases in which the harness made no UIA calls ("no UIA"): idle library/reader p99 about 2.4 ms; 80 Page Downs at about 12/s max 7.7 ms; 120 mouse-wheel notches max 3.7 ms; five End/Home cycles max 21.8 ms; find "the" (11,260 matches) settling max 21 ms; find "a" (20,000+ matches) settling max **54 ms** (one probe). Opening the page and every other UIA-driven phase: max 40 ms (open flow page 26-34 ms, Contents flyout 11-30 ms). Those UIA-driven maxima include time the app's UI thread spent answering the harness's tree walks, so they are an upper bound for the user-visible cost.
+- **Defect/finding (not fixed): find-next on a very large match set stalls the UI thread about 65 ms per step.** Stepping F3 through the query "a" (20,000+ matches, roughly 130 highlight ranges per visible paragraph): 30 of 298 probes over 50 ms in the unpolled F3 phase, max 82 ms, p99 66 ms. Each `StepFind` calls `RebuildContext` (O(matches) dictionary rebuild) and `RefreshRealized` (rebuilds every realised block with all its `TextHighlighter` ranges), although only the old and new "current" blocks change. Suggested fix: on a step, re-render only those two entries and reuse the per-query highlight dictionary. Not changed here because highlight correctness cannot be verified from UIA and the cost only shows with pathological queries (single-letter terms); normal queries ("water", 1,341 matches; rare words) did not exceed 50 ms in any unpolled phase.
+- **Memory (app process, 100 ms samples).** Library idle: working set 183 MiB, private 117 MiB. Opening the large document peaks at about 430-450 MiB working set / 380-395 MiB private during load (12.4 MiB JSON as a 25 MB managed string plus FFI buffers plus decode) and settles to about 285 MiB / 235 MiB at the top of the document; scrolling, paging, wheel, jumps and find each add roughly 10-40 MiB (no-match find +36 MiB, 40 F3 steps through 20,000+ matches about +35 MiB transient). Peak overall 450 MiB working set / 395 MiB private in the single-session run. **Bounded-memory is not demonstrated:** after leaving the page and idling, private memory did not return to baseline (338 MiB after the first leave) and kept rising over repeated reopen cycles, as a sawtooth: 16 cycles went 381 -> 617 MiB private (cycle 1-8 about +27 MiB per cycle, cycle 8-16 about +9 MiB per cycle, decelerating but not plateaued; `ui-reopen-cycles-summary.txt`). Capping the managed heap (`DOTNET_GCHeapHardLimit=256 MiB`) did not change it, and the core path is flat (above), so the growth is not in `GIST.Core`/decoder and is probably native/XAML-side (rendered `RichTextBlock` trees and their native resources, or allocator behaviour) - **cause not determined**. The harness itself (UIA `FindAllDescendants` over the window creates provider objects) could contribute, which this run could not separate.
+
+**Against the W5 exit targets.**
+- "UI thread never blocked > 50 ms": **met for normal use** (scroll, page, wheel, jumps, Contents, ordinary find, open: no unpolled probe over 22 ms), with **two exceptions at the edge**: find-next stepping through a 20,000-match query stalls about 65 ms per step (82 ms max), and one 54 ms probe while a 20,000-match query first applied. Measured by message-pump latency, see limits below.
+- "Scroll stays smooth": **not measurable here as frame rate.** Only the absence of long dispatcher stalls is evidenced; compositor/GPU frame pacing needs PresentMon/WPR or a human.
+- "Bounded memory": **not met/not proven** - see above; needs a follow-up (control run with a small document, and a heap/handle snapshot in the app) before W6 sign-off.
+
+**What this could not measure.** True frame time/dropped frames (the probe sees only the UI thread's message loop, not composition); stalls under 1 ms-granularity, and any stall during which the app still pumps messages but renders slowly; the harness's own UIA load on the UI thread in "UIA" phases; thermal/background-load variance (single machine, one pass per configuration, no repeated-run statistics beyond what is shown); Debug-build numbers for the app; the effect of an actual human using touch/trackpad inertia. Input was real synthetic keyboard/mouse, so the interactive desktop must stay unlocked (an earlier attempt failed with "Access is denied" while the workstation was locked).
 
 ### W6 — Hardening, accessibility, packaging (2–3 weeks)
 - FlaUI automation of the click-through checklist (mirror of `docs/qa-manual-clickthrough-m2.md`, as `docs/qa-manual-clickthrough-windows.md`, then automate what's automatable).
@@ -212,8 +270,8 @@ Goals: answer R1, make the environment reproducible.
 | Remove (copy-on-import semantics), Encrypt, lock badge | done | W2 |
 | Sidebar, collections, tag editor | done | W3 |
 | Themes (system/light/dark/sepia/OLED) | done | W3 |
-| RSVP reader | done (drifting pacing) | W4 |
-| Flow reader (typography, TOC, find, progress) | done | W5 |
+| RSVP reader | done 2026-10-04 (engine-driven pacing; see W4 closeout) | W4 |
+| Flow reader (typography, TOC, find, progress) | built 2026-10-04; exit criterion partly met (see W5 closeout) | W5 |
 | Accessibility, packaging, CI | Apple CI green | W6 |
 | OCR, annotations, TTS, paginated, PDF, export | not built | out of scope |
 
@@ -239,8 +297,8 @@ Goals: answer R1, make the environment reproducible.
 | Q | Decide by |
 |---|---|
 | Distribution channel: Microsoft Store vs signed sideload MSIX (affects signing cost and update story) | W6 |
-| "Rounded" font option on Windows (drop vs Trebuchet MS mapping) | W5 |
-| Windows OCR engine (`Windows.Media.Ocr` vs Tesseract) — spec Q4/Q8 | W5 (design note), implement M3 |
+| "Rounded" font option on Windows (drop vs Trebuchet MS mapping) | W5 — decided 2026-10-04: not offered on Windows, see `docs/windows-ui-spec.md` §7.2 |
+| Windows OCR engine (`Windows.Media.Ocr` vs Tesseract) — spec Q4/Q8 | W5 design note written 2026-10-04 (`docs/adr/020-windows-ocr-engine.md`, Proposed); Rust side already implemented, Windows engine/UI still to build |
 | ~~.NET 8 vs .NET 10 LTS~~ resolved: .NET 10 | done W0 |
 | ~~ARM64 as a v1.0 requirement or fast-follow~~ resolved: **v1.0 requirement** (maintainer, 2026-09-20). Open sub-items: runtime-test hardware/runner by end of W1; MSIX per-arch vs bundle (ADR-017) | decided; sub-items W1 |
 | Mirror the pinned bindgen fork under a project-controlled repo (Q6) | Day 1 of W1 |

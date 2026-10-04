@@ -1,0 +1,93 @@
+import Pathological Text.txt (1953 KiB): 4429 ms
+import Pathological Structure.epub (534 KiB): 5214 ms
+epub contents: one ~150k-char paragraph, one 20000-item list, one 15200-cell table (1900 x 8)
+machine: PROART13, 24 logical CPUs, Microsoft Windows 10.0.26200
+
+== Pathological Text ==
+  open -> progress text shown: 1331 ms (ready=True)
+  open -> a block visible: 1362 ms (visible=True)
+  realised block elements at the top: 1; app responding: True
+  progress after paging + wheel: 3%
+  find 'a' settled status after 4 s: '1 of 20000+'
+  status after 20 F3 steps: '21 of 20000+'; responding: True
+
+== Pathological Structure ==
+  open -> progress text shown: 903 ms (ready=True)
+  open -> a block visible: 920 ms (visible=True)
+  realised block elements at the top: 2; app responding: True
+  progress after paging + wheel: 6%
+  find 'a' settled status after 4 s: '1 of 20000+'
+  status after 20 F3 steps: '21 of 20000+'; responding: True
+
+UI-thread message-pump latency (WM_NULL round trip, 23439 probes):
+  phase                                                     n     p50     p99     max  >16ms >50ms >100ms >500ms
+  S0 library idle (no UIA)                                559     0.1     0.4     0.7      0     0      0      0
+  S1 open menu (UIA)                                       77     0.0     5.2     5.2      0     0      0      0
+  S10 leave (UIA)                                         192     0.0    10.1    23.5      1     0      0      0
+  S11 library idle after leave (no UIA)                   717     0.0     0.7     5.3      0     0      0      0
+  S2 open flow page (UIA polling)                         288     0.0     5.6    15.5      0     0      0      0
+  S3 top idle (no UIA)                                    896     0.1     0.3     4.8      0     0      0      0
+  S4 Page Down x30 at ~6/s (no UIA)                      2012     0.0     1.1     6.8      0     0      0      0
+  S5 mouse wheel 80 notches (no UIA)                     1137     0.0     1.5     6.4      0     0      0      0
+  S5b progress read (UIA)                                   6     0.1     0.4     0.4      0     0      0      0
+  S6 End then Home x3 (no UIA)                           2616     0.0     4.7   158.6     17    11      6      0
+  S7 open find (UIA)                                       24     0.0     7.1     7.1      0     0      0      0
+  S8 find 'a' settle (no UIA)                            1418     0.0     0.3    62.3      2     1      0      0
+  S8 find 'a' typed (UIA set only)                          3     0.1     0.1     0.1      0     0      0      0
+  S8b find status read (UIA)                                2     0.0     3.8     3.8      0     0      0      0
+  S9 F3 x20 at ~6/s (no UIA)                             1242     0.0    26.8    28.5     20     0      0      0
+  S9b status read (UIA)                                     4     0.1     0.2     0.2      0     0      0      0
+  T0 library idle (no UIA)                                544     0.0     0.3     0.9      0     0      0      0
+  T1 open menu (UIA)                                       67     0.0    12.2    12.2      0     0      0      0
+  T10 leave (UIA)                                         164     0.1    32.3    40.9      4     0      0      0
+  T11 library idle after leave (no UIA)                   698     0.1     1.4    12.2      0     0      0      0
+  T2 open flow page (UIA polling)                         411     0.0     5.4    49.8      3     0      0      0
+  T3 top idle (no UIA)                                    901     0.1     0.3     6.2      0     0      0      0
+  T4 Page Down x30 at ~6/s (no UIA)                      1975     0.1     1.0     8.3      0     0      0      0
+  T5 mouse wheel 80 notches (no UIA)                     1595     0.0     1.3     5.9      0     0      0      0
+  T5b progress read (UIA)                                   6     0.0     1.0     1.0      0     0      0      0
+  T6 End then Home x3 (no UIA)                           3232     0.1     0.6    25.8      2     0      0      0
+  T7 open find (UIA)                                       23     0.0     3.2     3.2      0     0      0      0
+  T8 find 'a' settle (no UIA)                            1386     0.1     0.4   204.4      2     1      1      0
+  T8 find 'a' typed (UIA set only)                          4     0.0     2.1     2.1      0     0      0      0
+  T8b find status read (UIA)                                5     0.1     3.4     3.4      0     0      0      0
+  T9 F3 x20 at ~6/s (no UIA)                             1231     0.1    26.4    38.1     20     0      0      0
+  T9b status read (UIA)                                     4     0.0     0.2     0.2      0     0      0      0
+  worst 8 stalls (at ms, latency, phase):
+       25260     204.4 ms  T8 find 'a' settle (no UIA)
+       53643     158.6 ms  S6 End then Home x3 (no UIA)
+       56552     147.0 ms  S6 End then Home x3 (no UIA)
+       56933     135.0 ms  S6 End then Home x3 (no UIA)
+       56753     134.9 ms  S6 End then Home x3 (no UIA)
+       49753     104.8 ms  S6 End then Home x3 (no UIA)
+       53536     103.4 ms  S6 End then Home x3 (no UIA)
+       55756     100.0 ms  S6 End then Home x3 (no UIA)
+
+app process memory sampled every 100 ms (MiB):
+  phase                                                     peakWS  peakPrivate  lastWS lastPrivate
+  S0 library idle (no UIA)                                  512          462     512         462
+  S1 open menu (UIA)                                        512          462     512         462
+  S10 leave (UIA)                                           646          630     646         630
+  S11 library idle after leave (no UIA)                     647          631     646         631
+  S2 open flow page (UIA polling)                          1060         1030     558         505
+  S3 top idle (no UIA)                                      561          507     561         507
+  S4 Page Down x30 at ~6/s (no UIA)                         562          508     562         508
+  S5 mouse wheel 80 notches (no UIA)                        563          509     563         509
+  S6 End then Home x3 (no UIA)                              671          678     637         621
+  S8 find 'a' settle (no UIA)                               639          624     639         624
+  S8 find 'a' typed (UIA set only)                          637          621     637         621
+  S8b find status read (UIA)                                639          624     639         624
+  S9 F3 x20 at ~6/s (no UIA)                                645          629     645         629
+  T0 library idle (no UIA)                                  206          121     206         121
+  T1 open menu (UIA)                                        214          127     214         127
+  T10 leave (UIA)                                           534          473     513         460
+  T11 library idle after leave (no UIA)                     514          462     512         462
+  T2 open flow page (UIA polling)                           913          848     425         379
+  T3 top idle (no UIA)                                      429          381     429         381
+  T4 Page Down x30 at ~6/s (no UIA)                         431          385     431         385
+  T5 mouse wheel 80 notches (no UIA)                        435          388     435         388
+  T6 End then Home x3 (no UIA)                              455          408     455         408
+  T7 open find (UIA)                                        455          408     455         408
+  T8 find 'a' settle (no UIA)                               517          465     517         465
+  T9 F3 x20 at ~6/s (no UIA)                                547          482     536         482
+  responding at the end: True
