@@ -1,0 +1,117 @@
+W5 UI measurement: document 'Perf Large Document', 149393 words, 70 chapters, 350 headings, 1330 blocks
+machine: PROART13, 24 logical CPUs, Microsoft Windows 10.0.26200; app build under test: whichever GIST.exe the UITests project output resolves to (see LocateExe)
+import through the real core with the real DPAPI key provider: 1260 ms
+timings (driver polling granularity applies; see notes):
+  open -> flow page ready (progress text shown): 618 ms
+  open -> first block visible in the viewport: 649 ms
+  (one VisibleBlocks UIA poll costs ~25 ms: resolution of the readiness times)
+  realised block elements at the top of the document: 7 of 1330 blocks
+  progress after 80 Page Downs: 19%
+  progress after wheel scrolling: 24%
+  End key -> progress 100%: 24 ms
+  End key -> a block visible at the end: 64 ms
+  realised block elements at the end: 21
+  Home key -> progress 0% and first heading visible: 53 ms
+  Contents click -> flyout list present (350 entries): 61 ms
+  Contents row for chapter 40 found after scrolling the virtualised list via UIA ScrollPattern
+  Contents row activated -> chapter 40 heading visible: 107 ms
+  progress after the jump: 56%
+  find 'rare word' typed -> status '1 of 1': 304 ms
+  find 'water' typed -> status '1 of 1341': 294 ms
+  find 'the' settled status: '1 of 11260'
+  find 'a (hits the 20000-match cap)' settled status: '1 of 20000+'
+  status after 40 F3 steps from 1: '41 of 20000+'
+  F3 -> status changed, 25 steps: median 13 ms, max 23 ms (includes UIA poll granularity of ~25 ms)
+  find 'no match' typed -> status 'No matches': 306 ms
+  after the first leave + 5 s idle: WS 411 MiB, private 346 MiB
+  cycle 1: reopen -> ready 480 ms; after leaving + 4 s idle: WS 414 MiB, private 351 MiB
+  cycle 2: reopen -> ready 505 ms; after leaving + 4 s idle: WS 469 MiB, private 418 MiB
+
+UI-thread message-pump latency (WM_NULL round trip, 4013 probes at ~2 ms spacing):
+  phase                                                     n     p50     p99     max  >16ms >50ms >100ms
+  01 library idle (no UIA)                                267     0.2     2.0     2.4      0     0      0
+  02 open menu (UIA)                                       18     0.3     3.4     3.4      0     0      0
+  03 open flow page (UIA)                                  48     0.2    28.8    28.8      2     0      0
+  04 top idle (no UIA)                                    154     0.6     4.2    11.4      0     0      0
+  05 Page Down x80 at ~12/s (no UIA)                      527     0.4     5.0     6.8      0     0      0
+  05b after paging (UIA)                                    2     1.2     2.8     2.8      0     0      0
+  06 mouse wheel 120 notches (no UIA)                     290     0.5     3.5     4.1      0     0      0
+  06b after wheel (UIA)                                     2     0.2     0.8     0.8      0     0      0
+  07 End (UIA polling)                                      6     0.3     3.8     3.8      0     0      0
+  08 Home (UIA polling)                                     3     0.2     3.8     3.8      0     0      0
+  09 End then Home, quick, no UIA                         558     0.6     8.6    15.3      0     0      0
+  10 Contents flyout open (UIA)                             9     0.8    19.4    19.4      1     0      0
+  11 Contents jump to chapter 40 (UIA polling)             39     0.4     2.7     2.7      0     0      0
+  12 open find (UIA)                                        8     0.5     2.2     2.2      0     0      0
+  13 find 'no match' typed, UIA polling                    19     0.2    13.5    13.5      0     0      0
+  13 find 'rare word' typed, UIA polling                   19     0.2    13.5    13.5      0     0      0
+  13 find 'water' typed, UIA polling                       17     0.2    19.0    19.0      1     0      0
+  14 find 'a (hits the 20000-match cap)' settle (no UIA)    150     0.6    17.5    52.7      2     1      0
+  14 find 'a (hits the 20000-match cap)' typed (UIA set only)      1     0.3     0.3     0.3      0     0      0
+  14 find 'the' settle (no UIA)                           152     0.6    19.7    29.0      2     0      0
+  14 find 'the' typed (UIA set only)                        1     0.1     0.1     0.1      0     0      0
+  14b read status 'a (hits the 20000-match cap)' (UIA)      1     0.8     0.8     0.8      0     0      0
+  14b read status 'the' (UIA)                               1     0.6     0.6     0.6      0     0      0
+  15 F3 x40 at ~7/s (no UIA)                              431     0.6     5.3     7.4      0     0      0
+  15b read status after F3 (UIA)                            1     0.4     0.4     0.4      0     0      0
+  16 F3 -> status changed, polling (UIA)                   36     0.5     7.4     7.4      0     0      0
+  17 find closed, idle (no UIA)                           155     0.6     5.1    12.0      0     0      0
+  18 back to library (UIA)                                  5     0.4    18.3    18.3      1     0      0
+  19 library idle after first leave (no UIA)              309     0.6     1.9     5.4      0     0      0
+  20 cycle 1 idle in library (no UIA)                     247     0.6     2.5     2.8      0     0      0
+  20 cycle 1 idle in reader (no UIA)                       92     0.5    28.4    28.4      1     0      0
+  20 cycle 1 leave (UIA)                                    5     2.5    13.2    13.2      0     0      0
+  20 cycle 1 reopen (UIA)                                  47     0.2     7.9     7.9      0     0      0
+  20 cycle 2 idle in library (no UIA)                     248     0.6     2.4     3.4      0     0      0
+  20 cycle 2 idle in reader (no UIA)                       92     0.6     4.7     4.7      0     0      0
+  20 cycle 2 leave (UIA)                                    5     1.4    12.2    12.2      0     0      0
+  20 cycle 2 reopen (UIA)                                  48     0.2     8.7     8.7      0     0      0
+  ALL phases: p50 0.5 ms, p99 6.0 ms, max 52.7 ms; probes >50 ms: 1
+  '(no UIA)' phases only (no harness UIA traffic): 3114 probes, p50 0.5 ms, p99 4.2 ms, max 52.7 ms, >50 ms: 1
+  worst 12 stalls (at ms since monitor start, latency, phase):
+       32815      52.7 ms  14 find 'a (hits the 20000-match cap)' settle (no UIA)
+       30277      29.0 ms  14 find 'the' settle (no UIA)
+        3357      28.8 ms  03 open flow page (UIA)
+       51904      28.4 ms  20 cycle 1 idle in reader (no UIA)
+       30148      19.7 ms  14 find 'the' settle (no UIA)
+        2815      19.6 ms  03 open flow page (UIA)
+       28521      19.4 ms  10 Contents flyout open (UIA)
+       29956      19.0 ms  13 find 'water' typed, UIA polling
+       45502      18.3 ms  18 back to library (UIA)
+       32783      17.5 ms  14 find 'a (hits the 20000-match cap)' settle (no UIA)
+       25788      15.3 ms  09 End then Home, quick, no UIA
+       23086      13.9 ms  09 End then Home, quick, no UIA
+
+app process memory sampled every 100 ms (MiB):
+  phase                                                     peakWS  peakPrivate  lastWS lastPrivate
+  01 library idle (no UIA)                                  192          119     192         119
+  02 open menu (UIA)                                        196          125     196         125
+  03 open flow page (UIA)                                   458          397     294         238
+  04 top idle (no UIA)                                      297          241     297         241
+  05 Page Down x80 at ~12/s (no UIA)                        328          269     328         269
+  06 mouse wheel 120 notches (no UIA)                       338          278     338         278
+  06b after wheel (UIA)                                     338          278     338         278
+  07 End (UIA polling)                                      341          281     341         281
+  09 End then Home, quick, no UIA                           370          309     370         309
+  10 Contents flyout open (UIA)                             370          310     370         310
+  11 Contents jump to chapter 40 (UIA polling)              372          311     372         311
+  12 open find (UIA)                                        372          312     372         312
+  13 find 'no match' typed, UIA polling                     407          344     407         344
+  13 find 'rare word' typed, UIA polling                    374          312     374         312
+  13 find 'water' typed, UIA polling                        375          313     375         313
+  14 find 'a (hits the 20000-match cap)' settle (no UIA)      398          336     398         336
+  14 find 'the' settle (no UIA)                             385          323     385         323
+  14 find 'the' typed (UIA set only)                        376          314     376         314
+  15 F3 x40 at ~7/s (no UIA)                                403          339     403         339
+  16 F3 -> status changed, polling (UIA)                    406          342     406         342
+  17 find closed, idle (no UIA)                             408          344     408         344
+  18 back to library (UIA)                                  409          346     409         346
+  19 library idle after first leave (no UIA)                411          347     411         346
+  20 cycle 1 idle in library (no UIA)                       414          351     414         351
+  20 cycle 1 idle in reader (no UIA)                        453          397     414         351
+  20 cycle 1 reopen (UIA)                                   631          581     453         395
+  20 cycle 2 idle in library (no UIA)                       471          418     469         418
+  20 cycle 2 idle in reader (no UIA)                        468          418     468         418
+  20 cycle 2 reopen (UIA)                                   657          607     448         405
+  OVERALL peak working set 657 MiB, peak private bytes 607 MiB; baseline (library idle) WS 192 MiB, private 119 MiB
+  responding at the end: True
