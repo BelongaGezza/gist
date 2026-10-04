@@ -81,8 +81,19 @@ internal static class FlowBlockRenderer
     public static string AutomationNameFor(FlowBlock block) => block switch
     {
         ImageBlock image => string.IsNullOrWhiteSpace(image.Alt) ? "Image" : image.Alt,
-        _ => block.PlainText,
+        _ => Bounded(block.PlainText),
     };
+
+    /// <summary>Longest Narrator/UIA name given to a block (F60: a huge block's full text is not copied into its name).</summary>
+    internal const int MaxAutomationNameChars = 1_000;
+
+    internal static string Bounded(string text)
+    {
+        if (text.Length <= MaxAutomationNameChars) return text;
+        var cut = MaxAutomationNameChars;
+        if (char.IsHighSurrogate(text[cut - 1])) cut--;
+        return text[..cut] + "…";
+    }
 
     public static UIElement Build(int entryIndex, FlowBlock block, FlowRenderContext ctx)
     {
@@ -216,7 +227,7 @@ internal static class FlowBlockRenderer
 
             var prefix = new TextBlock
             {
-                Text = list.Ordered ? string.Create(CultureInfo.InvariantCulture, $"{i + 1}.") : "•",
+                Text = list.Ordered ? string.Create(CultureInfo.InvariantCulture, $"{i + list.StartNumber}.") : "•",
                 FontSize = ctx.FontSize,
                 FontFamily = ctx.BodyFont,
                 HorizontalAlignment = HorizontalAlignment.Right,
