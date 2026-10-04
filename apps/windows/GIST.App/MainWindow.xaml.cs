@@ -133,6 +133,21 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// While the reader is open, clicking the sidebar entry that is already selected (Library or
+    /// the collection the reader was opened from) is "go back to it": a selection change would not
+    /// fire, so without this the click would silently do nothing.
+    /// </summary>
+    private void OnItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
+    {
+        if (ContentFrame.Content is RsvpPage
+            && ReferenceEquals(args.InvokedItemContainer, Nav.SelectedItem)
+            && ContentFrame.CanGoBack)
+        {
+            ContentFrame.GoBack();
+        }
+    }
+
     private async void OnSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         if (_syncingSelection) return;
