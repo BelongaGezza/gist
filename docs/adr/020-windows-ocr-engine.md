@@ -3,6 +3,8 @@
 **Date:** 2026-10-04
 **Status:** Proposed (design note, W5 role R3). No code is written or changed by this ADR. It becomes Accepted when the implementation lands and is verified on Windows.
 
+> **Correction, 2026-10-04 (W5 R5, F68):** this ADR's description of the `OcrEngine` callback contract is wrong. The shipped interface is `recognize_page(page_index, image_bytes) -> Option<OcrPageResult>` (`None` = cancel) with `OcrPageResult { page_index, text, confidence }`: no blocks, no bounding boxes, no `OcrError`, no engine-side `is_cancelled`. ADR-009's older text has the same stale shape, which this ADR inherited. Items 3 and 4 below cannot be implemented as written and must be re-derived from `crates/gist-ffi` before the ADR is Accepted. The engine choice itself (Windows.Media.Ocr) is unaffected.
+
 ## Context
 
 Q4 asks which OCR engine the Windows shell uses: the OS-provided `Windows.Media.Ocr` or a bundled Tesseract.

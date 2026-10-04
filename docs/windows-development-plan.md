@@ -201,6 +201,13 @@ Goals: answer R1, make the environment reproducible.
 - Decide **Q4 (Windows OCR: `Windows.Media.Ocr` vs Tesseract)** here as a design note only; implementation stays M3 scope on all platforms (`import_image_with_ocr` is still `todo!()`). *[2026-10-04 correction: stale. `import_image_with_ocr` has been implemented in Rust since M3 (2026-09-26, closing A7); only a Windows `OcrEngine` implementation and UI are missing. Q4 is now a Proposed design note, `docs/adr/020-windows-ocr-engine.md`: `Windows.Media.Ocr`.]*
 - **Exit:** spec §7.2 complete; tests for TOC/find/store/decoder green; large-document (≥ 100k words fixture) scroll stays smooth with bounded memory (measure and record; target UI thread never blocked > 50 ms).
 
+#### W5 closeout (2026-10-04)
+
+- **Built:** `GIST.Core/Flow` (decoder, typography, find, TOC, progress, position store; 112 tests against real fixture output) and `FlowPage` (virtualising list, Contents/Aa/Find, F3/Ctrl+G, progress + restore, keyboard), wired into Library and Collection. 10 FlaUI flow tests pass; full UI suite 46/47 at R2 time (known flaky native-picker test).
+- **Exit criterion, honestly:** spec §7.2 is implemented. The 50 ms UI-thread target is met for normal use on a 149k-word, 1,330-block epub with two edge exceptions (20,000-match find: F61). **Bounded memory is NOT demonstrated** (private memory rose ~381 -> 617 MiB over 16 reopen cycles; cause unconfirmed, F64, no control run). Frame-rate smoothness was not measurable. A single huge block (e.g. a .txt with no blank lines) is unmeasured and is a likely worst case (F60).
+- **Corrections found by review (F69):** the "no unpolled probe over 22 ms" claim below is contradicted by its own raw report (49.2 ms, `cycle 4 idle in reader`); PgUp/PgDn are hand-paged (0.9 of viewport), not "native" as the spec says; "no parser populates `Section.heading`" is false (`gist-parse-pdf` sets it; dormant on Windows).
+- **Reviews:** `docs/security-quality-review-2026-10-04-w5.md` (F58-F70): no live crash or security hole; act first on F60 and F68.
+
 #### W5 measurement (2026-10-04, role R4)
 
 **Setup.** Machine: ASUS ProArt13 (`PROART13`), 24 logical CPUs, Windows 11 Home 10.0.26200. Build: `GIST.sln` **Release** (WinUI app and test assemblies) with a **release** `gist_ffi.dll` (`tools/build-core-windows.sh x64 release`; the first core run used the staged *debug* DLL and was about 2.5x slower on import and about 3.7x slower on `get_document_json`, so only release numbers are quoted). Document: deterministic generated ePub (`GIST.Core.Tests/TestSupport/PerfDocumentGenerator.cs`, fixed seed, generated into a temp dir, not committed): **149,393 words**, 70 chapters, 350 headings (h1/h2/h3), 1,330 blocks incl. lists, 295 KiB. Imported through the real core. Raw reports: `docs/w5-measurement/`. Re-run: `GIST_RUN_PERF=1 dotnet test apps/windows/GIST.Core.Tests -c Release --filter FlowPerfTests` and `GIST_RUN_UI_TESTS=1 GIST_RUN_PERF=1 dotnet test apps/windows/GIST.App.UITests -c Release --filter FlowPerfTests` (the UI run needs an **unlocked** desktop and nothing else using it; `GIST_PERF_REPORT=<file>` saves the report, `GIST_PERF_CYCLES=<n>` sets reopen cycles).
@@ -253,7 +260,7 @@ Goals: answer R1, make the environment reproducible.
 | Sidebar, collections, tag editor | done | W3 |
 | Themes (system/light/dark/sepia/OLED) | done | W3 |
 | RSVP reader | done 2026-10-04 (engine-driven pacing; see W4 closeout) | W4 |
-| Flow reader (typography, TOC, find, progress) | done | W5 |
+| Flow reader (typography, TOC, find, progress) | built 2026-10-04; exit criterion partly met (see W5 closeout) | W5 |
 | Accessibility, packaging, CI | Apple CI green | W6 |
 | OCR, annotations, TTS, paginated, PDF, export | not built | out of scope |
 

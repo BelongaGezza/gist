@@ -25,11 +25,11 @@ in M3) — the Q4 note below must say so.
 
 | # | Role | Scope | Depends on | Status |
 |---|---|---|---|---|
-| R1 | C# logic — document model + decoder, typography, find, TOC, progress/position store (UI-free, in `GIST.Core`) | `apps/windows/GIST.Core/Flow/`, `GIST.Core.Tests/Flow/` | — | Ready |
-| R2 | WinUI — `FlowPage`: virtualised block list, per-block templates, typography menu, TOC flyout, find box, progress bar, keyboard, entry wiring | `apps/windows/GIST.App`, `GIST.App.UITests` | R1 | Blocked on R1 |
-| R3 | Docs — Q4 design note (Windows OCR), "Rounded" font decision, W5 QA checklist section | `docs/`, `docs/qa-manual-clickthrough-windows.md` | — | Ready |
-| R4 | Measurement — ≥100k-word fixture: scroll smoothness / UI-thread stall / memory, recorded | `GIST.Core.Tests`, harness, `docs/windows-development-plan.md` | R2 | Blocked on R2 |
-| R5 | Review — F30 independent security/quality pass over the whole W5 diff | `docs/security-quality-review-<date>-w5.md` | R1–R4 | Blocked |
+| R1 | C# logic — document model + decoder, typography, find, TOC, progress/position store (UI-free, in `GIST.Core`) | `apps/windows/GIST.Core/Flow/`, `GIST.Core.Tests/Flow/` | — | Done, merged 2026-10-04 |
+| R2 | WinUI — `FlowPage`: virtualised block list, per-block templates, typography menu, TOC flyout, find box, progress bar, keyboard, entry wiring | `apps/windows/GIST.App`, `GIST.App.UITests` | R1 | Done, merged 2026-10-04 |
+| R3 | Docs — Q4 design note (Windows OCR), "Rounded" font decision, W5 QA checklist section | `docs/`, `docs/qa-manual-clickthrough-windows.md` | — | Done, merged 2026-10-04 |
+| R4 | Measurement — ≥100k-word fixture: scroll smoothness / UI-thread stall / memory, recorded | `GIST.Core.Tests`, harness, `docs/windows-development-plan.md` | R2 | Done, merged 2026-10-04 |
+| R5 | Review — F30 independent security/quality pass over the whole W5 diff | `docs/security-quality-review-<date>-w5.md` | R1–R4 | Done, merged 2026-10-04 |
 
 Batches: **1:** R1, R3. **2:** R2. **3:** R4. **4:** R5 (a fresh agent that wrote none of W5).
 
