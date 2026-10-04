@@ -185,6 +185,16 @@ Goals: answer R1, make the environment reproducible.
 - Stretch: ←/→ and Ctrl+←/→ seeking, scrubber (from product spec, beyond Apple).
 - **Exit:** a 10-minute soak at 600 WPM shows no cumulative drift vs. wall clock (measured, recorded); progress restores after restart.
 
+#### W4 closeout (2026-10-04)
+
+- **Pacing:** executed §4.3 item 1 first. `FfiRsvpSession` (`gist-ffi`) exposes the Rust pacing engine; `gist-rsvp`'s `token_at_elapsed` is memoised. C# (`GIST.Core/Rsvp`) holds no pacing arithmetic.
+- **UI:** `RsvpPage` per spec §7.1 plus ←/→, Ctrl+←/→ and a scrubber. ORP, stats and rotary dial are out of scope (§11). Last-used WPM is not persisted (F56).
+- **Soak (exit criterion), measured:** 600 s at 600 WPM, real Rust engine, Stopwatch-anchored thread-pool timer: 5,371 tokens shown, 0 skipped; lateness of each token vs the engine schedule mean 8.34 ms, p50 8, p99 17, max 19; per-minute means 8.1-8.5 ms (flat, no cumulative drift). Caveat: not run through WinUI's `DispatcherQueueTimer`. The test is opt-in (`GIST_RUN_SOAK=1`, `GIST_SOAK_SECONDS`, `GIST_SOAK_REPORT`) and skipped by default (F51).
+- **Restore after restart:** verified by a FlaUI test and a core test.
+- **Tests:** `GIST.Core.Tests` 263 passed / 1 skipped; `cargo test --workspace` 313 passed; FlaUI 35/37 when R2 ran it (the known native-picker test, plus one Space test that failed once under soak load and passed alone).
+- **Reviews:** `docs/security-review-windows.md` (F27, F39-F48) and `docs/security-quality-review-2026-10-04-w4.md` (F30, F49-F56): no High/Medium defects.
+- **Still manual:** visual pass in five themes, Narrator, text scaling, Accessibility Insights, `DispatcherQueueTimer` feel.
+
 ### W5 — Flow reader (3 weeks) — largest phase
 - `get_document_json` → models (custom serde-enum converter tested against real output from fixtures); virtualised block list; `RichTextBlock` runs; images; lists.
 - Typography menu (size/font/line spacing; resolve the "Rounded" question), TOC flyout with indentation, in-document find with highlighting and F3, progress bar + persisted position with restore-before-first-render, keyboard navigation (native paging).
@@ -212,7 +222,7 @@ Goals: answer R1, make the environment reproducible.
 | Remove (copy-on-import semantics), Encrypt, lock badge | done | W2 |
 | Sidebar, collections, tag editor | done | W3 |
 | Themes (system/light/dark/sepia/OLED) | done | W3 |
-| RSVP reader | done (drifting pacing) | W4 |
+| RSVP reader | done 2026-10-04 (engine-driven pacing; see W4 closeout) | W4 |
 | Flow reader (typography, TOC, find, progress) | done | W5 |
 | Accessibility, packaging, CI | Apple CI green | W6 |
 | OCR, annotations, TTS, paginated, PDF, export | not built | out of scope |
