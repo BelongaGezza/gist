@@ -1,0 +1,12 @@
+import Pathological Text.txt (1953 KiB): 4827 ms
+import Pathological Structure.epub (534 KiB): 3275 ms
+epub contents: one ~150k-char paragraph, one 20000-item list, one 15200-cell table (1900 x 8)
+machine: PROART13, 24 logical CPUs, Microsoft Windows 10.0.26200
+
+== Pathological Text ==
+  open -> progress text shown: 8103 ms (ready=True)
+  open -> a block visible: 8142 ms (visible=True)
+  realised block elements at the top: 1; app responding: True
+  progress after paging + wheel: 0%
+  find 'a' settled status after 4 s: '1 of 20000+'
+  status after 20 F3 steps: ''; responding: False

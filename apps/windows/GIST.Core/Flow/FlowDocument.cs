@@ -100,7 +100,11 @@ public sealed class FlowDocument
         {
             for (var b = 0; b < sections[s].Blocks.Count; b++)
             {
-                entries.Add(new FlowBlockEntry(s, sections[s].Id, b, sections[s].Blocks[b]));
+                var chunks = FlowBlockChunker.Split(sections[s].Blocks[b]);
+                for (var c = 0; c < chunks.Count; c++)
+                {
+                    entries.Add(new FlowBlockEntry(s, sections[s].Id, b, chunks[c].Block, c, chunks[c].Utf16Start));
+                }
             }
         }
         return entries;
@@ -119,8 +123,12 @@ public sealed record TocEntry(int SectionIndex, string SectionId, int Level, str
     public int IndentLevel => Math.Max(Level - 1, 0);
 }
 
-/// <summary>A block with its position, the flattened shape a virtualised list renders and scrolls by.</summary>
-public sealed record FlowBlockEntry(int SectionIndex, string SectionId, int BlockIndexInSection, FlowBlock Block);
+/// <summary>
+/// A block with its position, the flattened shape a virtualised list renders and scrolls by. A very large block
+/// is split by <see cref="FlowBlockChunker"/> into several entries sharing <see cref="BlockIndexInSection"/>;
+/// <see cref="ChunkUtf16Start"/> is where this chunk starts in the original block's plain text.
+/// </summary>
+public sealed record FlowBlockEntry(int SectionIndex, string SectionId, int BlockIndexInSection, FlowBlock Block, int ChunkIndex = 0, int ChunkUtf16Start = 0);
 
 public sealed class FlowSection
 {
@@ -186,6 +194,9 @@ public sealed record ImageBlock(string Src, string? Alt, string? Caption) : Flow
 
 public sealed record ListBlock(bool Ordered, IReadOnlyList<string> Items) : FlowBlock
 {
+    /// <summary>Number shown for the first item of an ordered list; a chunk of a split list continues the count (F60).</summary>
+    public int StartNumber { get; init; } = 1;
+
     public override string PlainText => string.Join(' ', Items);
 }
 
