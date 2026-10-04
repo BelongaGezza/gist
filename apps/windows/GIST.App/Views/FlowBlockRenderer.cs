@@ -13,7 +13,7 @@ using Windows.Storage.Streams;
 namespace Gist.App.Views;
 
 /// <summary>One find hit inside one block, in that block's <see cref="FlowBlock.PlainText"/> UTF-16 offsets.</summary>
-internal readonly record struct BlockHighlight(int Start, int Length, bool IsCurrent);
+internal readonly record struct BlockHighlight(int Start, int Length);
 
 /// <summary>
 /// Everything a block needs to render that is not the block itself. Rebuilt by <see cref="FlowPage"/> whenever
@@ -46,8 +46,17 @@ internal sealed class FlowRenderContext
 
     public required Brush MatchForeground { get; init; }
 
-    /// <summary>Highlights per flat entry index; absent means none.</summary>
+    /// <summary>
+    /// Highlights per flat entry index; absent means none. Built once per query and shared by every re-render,
+    /// including find-next, which only moves <see cref="CurrentEntryIndex"/>/<see cref="CurrentStart"/> (F61).
+    /// </summary>
     public IReadOnlyDictionary<int, List<BlockHighlight>> Highlights { get; init; } = new Dictionary<int, List<BlockHighlight>>();
+
+    /// <summary>Entry index of the current find match, or -1.</summary>
+    public int CurrentEntryIndex { get; set; } = -1;
+
+    /// <summary>UTF-16 start (within that entry's PlainText) of the current find match.</summary>
+    public int CurrentStart { get; set; } = -1;
 
     public double FontSize => Typography.FontSize;
 
@@ -72,19 +81,31 @@ internal static class FlowBlockRenderer
     public static string AutomationNameFor(FlowBlock block) => block switch
     {
         ImageBlock image => string.IsNullOrWhiteSpace(image.Alt) ? "Image" : image.Alt,
-        _ => block.PlainText,
+        _ => Bounded(block.PlainText),
     };
+
+    /// <summary>Longest Narrator/UIA name given to a block (F60: a huge block's full text is not copied into its name).</summary>
+    internal const int MaxAutomationNameChars = 1_000;
+
+    internal static string Bounded(string text)
+    {
+        if (text.Length <= MaxAutomationNameChars) return text;
+        var cut = MaxAutomationNameChars;
+        if (char.IsHighSurrogate(text[cut - 1])) cut--;
+        return text[..cut] + "…";
+    }
 
     public static UIElement Build(int entryIndex, FlowBlock block, FlowRenderContext ctx)
     {
         ctx.Highlights.TryGetValue(entryIndex, out var highlights);
+        var cur = ctx.CurrentEntryIndex == entryIndex ? ctx.CurrentStart : -1;
         UIElement content = block switch
         {
-            HeadingBlock h => BuildHeading(h, highlights, ctx),
-            ParagraphBlock p => BuildParagraph(p, highlights, ctx),
+            HeadingBlock h => BuildHeading(h, highlights, ctx, cur),
+            ParagraphBlock p => BuildParagraph(p, highlights, ctx, cur),
             ImageBlock i => BuildImage(i, ctx),
-            ListBlock l => BuildList(l, highlights, ctx),
-            TableBlock t => BuildTable(t, highlights, ctx),
+            ListBlock l => BuildList(l, highlights, ctx, cur),
+            TableBlock t => BuildTable(t, highlights, ctx, cur),
             _ => new Border(),
         };
 
@@ -116,7 +137,7 @@ internal static class FlowBlockRenderer
         return rtb;
     }
 
-    private static List<TextHighlighter> BuildHighlighters(IEnumerable<BlockHighlight>? highlights, FlowRenderContext ctx, int offset, int limit)
+    private static List<TextHighlighter> BuildHighlighters(IEnumerable<BlockHighlight>? highlights, FlowRenderContext ctx, int offset, int limit, int currentStart)
     {
         var result = new List<TextHighlighter>(2);
         if (highlights is null) return result;
@@ -126,7 +147,7 @@ internal static class FlowBlockRenderer
             var start = h.Start - offset;
             if (start < 0 || start + h.Length > limit) continue;
             var range = new TextRange { StartIndex = start, Length = h.Length };
-            if (h.IsCurrent)
+            if (h.Start == currentStart)
             {
                 current ??= new TextHighlighter { Background = ctx.CurrentMatchBackground, Foreground = ctx.MatchForeground };
                 current.Ranges.Add(range);
@@ -142,17 +163,17 @@ internal static class FlowBlockRenderer
         return result;
     }
 
-    private static void ApplyHighlights(RichTextBlock rtb, IEnumerable<BlockHighlight>? highlights, FlowRenderContext ctx, int offset = 0, int limit = int.MaxValue)
+    private static void ApplyHighlights(RichTextBlock rtb, IEnumerable<BlockHighlight>? highlights, FlowRenderContext ctx, int currentStart, int offset = 0, int limit = int.MaxValue)
     {
-        foreach (var h in BuildHighlighters(highlights, ctx, offset, limit)) rtb.TextHighlighters.Add(h);
+        foreach (var h in BuildHighlighters(highlights, ctx, offset, limit, currentStart)) rtb.TextHighlighters.Add(h);
     }
 
-    private static void ApplyHighlights(TextBlock tb, IEnumerable<BlockHighlight>? highlights, FlowRenderContext ctx, int offset, int limit)
+    private static void ApplyHighlights(TextBlock tb, IEnumerable<BlockHighlight>? highlights, FlowRenderContext ctx, int offset, int limit, int currentStart)
     {
-        foreach (var h in BuildHighlighters(highlights, ctx, offset, limit)) tb.TextHighlighters.Add(h);
+        foreach (var h in BuildHighlighters(highlights, ctx, offset, limit, currentStart)) tb.TextHighlighters.Add(h);
     }
 
-    private static UIElement BuildHeading(HeadingBlock h, List<BlockHighlight>? highlights, FlowRenderContext ctx)
+    private static UIElement BuildHeading(HeadingBlock h, List<BlockHighlight>? highlights, FlowRenderContext ctx, int cur)
     {
         var scale = h.Level switch { 1 => 1.8, 2 => 1.5, 3 => 1.25, _ => 1.1 };
         var rtb = NewText(ctx, ctx.FontSize * scale, FontWeights.SemiBold);
@@ -160,7 +181,7 @@ internal static class FlowBlockRenderer
         p.Inlines.Add(new Run { Text = h.Text });
         rtb.Blocks.Add(p);
         rtb.Margin = new Thickness(0, ctx.FontSize * 0.8, 0, 0);
-        ApplyHighlights(rtb, highlights, ctx);
+        ApplyHighlights(rtb, highlights, ctx, cur);
         AutomationProperties.SetHeadingLevel(rtb, h.Level switch
         {
             1 => AutomationHeadingLevel.Level1,
@@ -173,7 +194,7 @@ internal static class FlowBlockRenderer
         return rtb;
     }
 
-    private static UIElement BuildParagraph(ParagraphBlock block, List<BlockHighlight>? highlights, FlowRenderContext ctx)
+    private static UIElement BuildParagraph(ParagraphBlock block, List<BlockHighlight>? highlights, FlowRenderContext ctx, int cur)
     {
         var rtb = NewText(ctx, ctx.FontSize, FontWeights.Normal);
         var p = new Paragraph();
@@ -187,13 +208,13 @@ internal static class FlowBlockRenderer
             p.Inlines.Add(r);
         }
         rtb.Blocks.Add(p);
-        ApplyHighlights(rtb, highlights, ctx);
+        ApplyHighlights(rtb, highlights, ctx, cur);
         return rtb;
     }
 
     // ── List ───────────────────────────────────────────────────────────────
 
-    private static UIElement BuildList(ListBlock list, List<BlockHighlight>? highlights, FlowRenderContext ctx)
+    private static UIElement BuildList(ListBlock list, List<BlockHighlight>? highlights, FlowRenderContext ctx, int cur)
     {
         var stack = new StackPanel { Spacing = ctx.FontSize * 0.3 };
         var offset = 0; // PlainText joins items with one space.
@@ -206,7 +227,7 @@ internal static class FlowBlockRenderer
 
             var prefix = new TextBlock
             {
-                Text = list.Ordered ? string.Create(CultureInfo.InvariantCulture, $"{i + 1}.") : "•",
+                Text = list.Ordered ? string.Create(CultureInfo.InvariantCulture, $"{i + list.StartNumber}.") : "•",
                 FontSize = ctx.FontSize,
                 FontFamily = ctx.BodyFont,
                 HorizontalAlignment = HorizontalAlignment.Right,
@@ -220,7 +241,7 @@ internal static class FlowBlockRenderer
             var p = new Paragraph();
             p.Inlines.Add(new Run { Text = item });
             text.Blocks.Add(p);
-            ApplyHighlights(text, highlights, ctx, offset, item.Length);
+            ApplyHighlights(text, highlights, ctx, cur, offset, item.Length);
             Grid.SetColumn(text, 1);
 
             row.Children.Add(prefix);
@@ -233,7 +254,7 @@ internal static class FlowBlockRenderer
 
     // ── Table ──────────────────────────────────────────────────────────────
 
-    private static UIElement BuildTable(TableBlock table, List<BlockHighlight>? highlights, FlowRenderContext ctx)
+    private static UIElement BuildTable(TableBlock table, List<BlockHighlight>? highlights, FlowRenderContext ctx, int cur)
     {
         var columns = table.Rows.Count == 0 ? 0 : table.Rows.Max(r => r.Count);
         var grid = new Grid();
@@ -261,7 +282,7 @@ internal static class FlowBlockRenderer
                     FontWeight = isHeader ? FontWeights.SemiBold : FontWeights.Normal,
                 };
                 if (!ctx.HighContrast && ctx.Foreground is not null) tb.Foreground = ctx.Foreground;
-                ApplyHighlights(tb, highlights, ctx, offset, cellText.Length);
+                ApplyHighlights(tb, highlights, ctx, offset, cellText.Length, cur);
                 var cell = new Border
                 {
                     BorderThickness = new Thickness(1),

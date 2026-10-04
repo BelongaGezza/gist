@@ -60,11 +60,11 @@ public sealed class FlowPerfTests
 
     public FlowPerfTests(ITestOutputHelper output) => _output = output;
 
-    private sealed record Probe(double AtMs, double LatencyMs, string Phase);
+    internal sealed record Probe(double AtMs, double LatencyMs, string Phase);
 
-    private sealed record Mem(double AtMs, double WorkingSetMiB, double PrivateMiB, string Phase);
+    internal sealed record Mem(double AtMs, double WorkingSetMiB, double PrivateMiB, string Phase);
 
-    private sealed class Monitor : IDisposable
+    internal sealed class Monitor : IDisposable
     {
         private readonly IntPtr _hwnd;
         private readonly int _pid;
@@ -137,9 +137,9 @@ public sealed class FlowPerfTests
         }
     }
 
-    private static double Pct(double[] sorted, double p) => sorted.Length == 0 ? 0 : sorted[Math.Min(sorted.Length - 1, (int)Math.Ceiling(p / 100.0 * sorted.Length) - 1)];
+    internal static double Pct(double[] sorted, double p) => sorted.Length == 0 ? 0 : sorted[Math.Min(sorted.Length - 1, (int)Math.Ceiling(p / 100.0 * sorted.Length) - 1)];
 
-    private static string F(double v, string fmt = "F1") => v.ToString(fmt, CultureInfo.InvariantCulture);
+    internal static string F(double v, string fmt = "F1") => v.ToString(fmt, CultureInfo.InvariantCulture);
 
     [PerfUiFact]
     public async Task Large_document_flow_reader_is_measured()
@@ -472,7 +472,7 @@ public sealed class FlowPerfTests
         }
     }
 
-    private static bool Poll(Func<bool> probe, TimeSpan timeout)
+    internal static bool Poll(Func<bool> probe, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)

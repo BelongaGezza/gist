@@ -202,12 +202,17 @@ public sealed partial class FlowPage : Page, IReadingLayout
         finally
         {
             _restoring = false;
-            FlowList.Opacity = 1;
-            ProgressRow.Visibility = Visibility.Visible;
-            if (_scroll is not null) _scroll.ViewChanged += OnViewChanged;
-            UpdateProgressFromScroll();
-            UpdateProgressUi();
-            FocusDocument();
+            // F63: Back during the restore already ran Leave(); do not re-hook handlers or steal focus on a page
+            // whose frame is navigating away.
+            if (!_left)
+            {
+                FlowList.Opacity = 1;
+                ProgressRow.Visibility = Visibility.Visible;
+                if (_scroll is not null) _scroll.ViewChanged += OnViewChanged;
+                UpdateProgressFromScroll();
+                UpdateProgressUi();
+                FocusDocument();
+            }
         }
     }
 
@@ -303,13 +308,12 @@ public sealed partial class FlowPage : Page, IReadingLayout
         }
 
         var highlights = new Dictionary<int, List<BlockHighlight>>();
-        var current = _search.CurrentMatchIndex;
         var matches = _search.Matches;
         for (var i = 0; i < matches.Count; i++)
         {
             var m = matches[i];
             if (!highlights.TryGetValue(m.EntryIndex, out var list)) highlights[m.EntryIndex] = list = [];
-            list.Add(new BlockHighlight(m.Utf16Start, m.Utf16Length, i == current));
+            list.Add(new BlockHighlight(m.Utf16Start, m.Utf16Length));
         }
 
         _ctx = new FlowRenderContext
@@ -325,6 +329,29 @@ public sealed partial class FlowPage : Page, IReadingLayout
             MatchForeground = matchFg,
             Highlights = highlights,
         };
+        SetCurrentMatchOnContext();
+    }
+
+    private void SetCurrentMatchOnContext()
+    {
+        if (_ctx is null) return;
+        if (_search.CurrentMatch is { } m)
+        {
+            _ctx.CurrentEntryIndex = m.EntryIndex;
+            _ctx.CurrentStart = m.Utf16Start;
+        }
+        else
+        {
+            _ctx.CurrentEntryIndex = -1;
+            _ctx.CurrentStart = -1;
+        }
+    }
+
+    /// <summary>Re-renders one entry if it currently has a container (F61: find-next touches two blocks, not all).</summary>
+    private void RefreshEntry(int index)
+    {
+        if (index < 0 || index >= _items.Count) return;
+        if (FlowList.ContainerFromIndex(index) is ListViewItem container) RenderContainer(container, index);
     }
 
     private static Color SystemColor(string key, Color fallback)
@@ -503,7 +530,20 @@ public sealed partial class FlowPage : Page, IReadingLayout
         if (_findTimer is { IsRunning: true }) ApplyQuery(scroll: false);
         if (_search.MatchCount == 0) return;
         if (forward) _search.FindNext(); else _search.FindPrevious();
-        AfterSearchChanged(scroll: true);
+
+        // Only the previous and the new current match change appearance: reuse the per-query highlight data
+        // and re-render just those two entries instead of rebuilding the context and every realised block (F61).
+        if (_ctx is null)
+        {
+            AfterSearchChanged(scroll: true);
+            return;
+        }
+        var oldEntry = _ctx.CurrentEntryIndex;
+        SetCurrentMatchOnContext();
+        UpdateFindStatus();
+        RefreshEntry(oldEntry);
+        if (_ctx.CurrentEntryIndex != oldEntry) RefreshEntry(_ctx.CurrentEntryIndex);
+        if (_search.CurrentMatch is { } match) _ = ScrollToEntryAsync(match.EntryIndex);
     }
 
     private void OnFindNextClick(object sender, RoutedEventArgs e) => StepFind(forward: true);
