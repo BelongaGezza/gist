@@ -50,7 +50,7 @@ public class FlowReaderTests
     // ── Helpers ────────────────────────────────────────────────────────────
 
     /// <summary>Selects the row and opens its context menu from the keyboard, then picks "Open in Flow View".</summary>
-    private static void OpenFlowFromRow(LibraryDriver d, string title)
+    internal static void OpenFlowFromRow(LibraryDriver d, string title)
     {
         // A synthetic Menu key can land before the row has focus (or be swallowed while another popup closes):
         // like LibraryDriver.OpenDialog, re-issue it until the menu is actually up. Re-opening is harmless.
@@ -74,13 +74,13 @@ public class FlowReaderTests
         WaitFlowReady(d);
     }
 
-    private static void WaitFlowReady(LibraryDriver d)
+    internal static void WaitFlowReady(LibraryDriver d)
     {
         d.Need("FlowPage_Root");
         LibraryDriver.PollUntil(() => d.ById("FlowPage_ProgressText") is { } p && Percent.IsMatch(p.Name), "flow reader ready (progress shown)");
     }
 
-    private static int ProgressPercent(LibraryDriver d)
+    internal static int ProgressPercent(LibraryDriver d)
     {
         var m = Percent.Match(d.Need("FlowPage_ProgressText").Name);
         Assert.True(m.Success, "progress text '" + d.Need("FlowPage_ProgressText").Name + "'");
@@ -88,15 +88,15 @@ public class FlowReaderTests
     }
 
     /// <summary>An empty TextBlock exposes no UIA Name at all, which is how "no status" reads.</summary>
-    private static string FindStatus(LibraryDriver d) => Safe(() => d.Need("FlowPage_FindStatus").Name) ?? "";
+    internal static string FindStatus(LibraryDriver d) => Safe(() => d.Need("FlowPage_FindStatus").Name) ?? "";
 
-    private static AutomationElement[] RealizedBlocks(LibraryDriver d) =>
+    internal static AutomationElement[] RealizedBlocks(LibraryDriver d) =>
         d.Window.FindAllDescendants()
             .Where(e => (Safe(() => e.AutomationId) ?? "").StartsWith("FlowBlock_", StringComparison.Ordinal))
             .ToArray();
 
     /// <summary>Realised blocks whose rectangle intersects the document viewport, top to bottom.</summary>
-    private static AutomationElement[] VisibleBlocks(LibraryDriver d)
+    internal static AutomationElement[] VisibleBlocks(LibraryDriver d)
     {
         var view = d.Need("FlowPage_List").BoundingRectangle;
         return RealizedBlocks(d)
@@ -109,10 +109,10 @@ public class FlowReaderTests
             .ToArray();
     }
 
-    private static bool BlockVisible(LibraryDriver d, string name) => VisibleBlocks(d).Any(b => b.Name == name);
+    internal static bool BlockVisible(LibraryDriver d, string name) => VisibleBlocks(d).Any(b => b.Name == name);
 
     /// <summary>Scrolls a flyout row into view (the list virtualises and caps its height), then clicks it.</summary>
-    private static void ActivateRow(LibraryDriver d, AutomationElement row)
+    internal static void ActivateRow(LibraryDriver d, AutomationElement row)
     {
         // Focus scrolls the row into view; Enter is the keyboard equivalent of clicking an item-click row.
         row.Focus();
@@ -127,7 +127,7 @@ public class FlowReaderTests
         else LibraryDriver.Activate(e);
     }
 
-    private static void OpenFlyout(LibraryDriver d, string buttonId, string waitForId)
+    internal static void OpenFlyout(LibraryDriver d, string buttonId, string waitForId)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -144,19 +144,19 @@ public class FlowReaderTests
         }
     }
 
-    private static void CloseFlyout(LibraryDriver d)
+    internal static void CloseFlyout(LibraryDriver d)
     {
         d.Press(VirtualKeyShort.ESCAPE);
         LibraryDriver.PollUntil(() => d.ById("FlowPage_TocList") is null && d.ById("FlowPage_FontLarger") is null, "flyout closed");
     }
 
-    private static void ShowFind(LibraryDriver d)
+    internal static void ShowFind(LibraryDriver d)
     {
         d.Chord(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_F);
         d.Need("FlowPage_FindBox");
     }
 
-    private static void SetFind(LibraryDriver d, string text)
+    internal static void SetFind(LibraryDriver d, string text)
     {
         var box = d.Need("FlowPage_FindBox");
         box.Focus();
