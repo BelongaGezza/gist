@@ -1,0 +1,36 @@
+F64 control runs: 12 cycles per arm on a tiny 3-sentence document; private bytes read from the process counter after leave + 4 s idle, with no UIA call in flight.
+(growth/cycle = least-squares slope over cycles 4..N, so warm-up allocations are excluded)
+
+== arm LibraryOnly == start: private 117 MiB
+  cycle 1: private 123.4 MiB
+  cycle 2: private 124.5 MiB
+  cycle 3: private 124.2 MiB
+  cycle 4: private 120.9 MiB
+  cycle 5: private 121.2 MiB
+  cycle 6: private 124.8 MiB
+  cycle 7: private 130.0 MiB
+  cycle 8: private 129.8 MiB
+  cycle 9: private 129.8 MiB
+  cycle 10: private 129.7 MiB
+  cycle 11: private 129.7 MiB
+  cycle 12: private 129.7 MiB
+  arm LibraryOnly: growth/cycle (cycles 4..12) = 1.17 MiB; total first->last = 6.2 MiB
+
+== arm FlowTiny == start: private 118 MiB
+  cycle 1: private 130.2 MiB
+  cycle 2: private 134.7 MiB
+  cycle 3: private 139.8 MiB
+  cycle 4: private 141.0 MiB
+  cycle 5: private 144.1 MiB
+  cycle 6: private 148.1 MiB
+  cycle 7: private 151.1 MiB
+  cycle 8: private 153.9 MiB
+  cycle 9: private 158.2 MiB
+  cycle 10: private 161.6 MiB
+  cycle 11: private 163.3 MiB
+  cycle 12: private 167.5 MiB
+  arm FlowTiny: growth/cycle (cycles 4..12) = 3.29 MiB; total first->last = 37.3 MiB
+
+== arm RsvpTiny == start: private 117 MiB
+  cycle 1: private 122.4 MiB
+  cycle 2: private 124.6 MiB
