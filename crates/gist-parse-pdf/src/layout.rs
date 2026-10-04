@@ -570,7 +570,9 @@ pub fn build_document(
     let level_of = |size: f32| -> u8 {
         let k = size_key(size);
         let rank = heading_sizes.iter().position(|s| *s == k).unwrap_or(0);
-        ((rank + 1) as u8).min(MAX_HEADING_LEVEL)
+        // Clamp in usize *before* narrowing: a hostile PDF can present >255
+        // distinct heading sizes, and `(rank + 1) as u8` would wrap to 0.
+        (rank + 1).min(MAX_HEADING_LEVEL as usize) as u8
     };
     let is_heading =
         |l: &Line| l.size >= body * HEADING_RATIO && l.text.chars().count() <= MAX_HEADING_CHARS;
@@ -917,5 +919,34 @@ mod tests {
             build_document(pl, Metadata::minimal("t"), &lim),
             Err(PdfError::ResourceLimitExceeded { .. })
         ));
+    }
+
+    /// Review finding (M6 R7): `level_of` narrowed `rank + 1` to u8 before
+    /// clamping, so the 256th-largest distinct heading size wrapped to level 0.
+    #[test]
+    fn many_distinct_heading_sizes_never_yield_level_zero() {
+        let mut pages = Vec::new();
+        let mut size = 14.0f32;
+        for _ in 0..320 {
+            let mut g = Vec::new();
+            put(&mut g, "Body text of the document goes right here.", 72.0, 300.0, 12.0);
+            put(&mut g, "H", 72.0, 500.0, size);
+            size += 0.5; // 320 distinct half-point sizes in total
+            pages.push(page(g));
+        }
+        let d = doc_of(pages).unwrap();
+        let mut seen = 0;
+        for b in d.sections.iter().flat_map(|s| &s.blocks) {
+            if let Block::Heading { level, .. } = b {
+                assert!((1..=4).contains(level), "level {level}");
+                seen += 1;
+            }
+        }
+        for s in &d.sections {
+            if let Some((l, _)) = &s.heading {
+                assert!((1..=4).contains(l), "section level {l}");
+            }
+        }
+        assert!(seen >= 256, "only {seen} headings");
     }
 }
