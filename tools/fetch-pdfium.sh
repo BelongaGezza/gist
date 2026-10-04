@@ -5,53 +5,37 @@
 #   "latest"), verifies its pinned SHA-256, and FAILS CLOSED on any mismatch.
 # - Extracts into artifacts/pdfium/ (gitignored): lib/libpdfium.dylib,
 #   licenses/, LICENSE, VERSION. No binary is ever committed.
-# - Idempotent: a stamp hit RE-HASHES the extracted dylib before trusting it.
+# - Idempotent: if the extracted libpdfium.dylib still hashes to the pinned
+#   PDFIUM_DYLIB_SHA256 (re-computed on every run, not just trusted from a stamp
+#   file), does nothing; otherwise it re-fetches and re-verifies.
+# - The archive listing is validated before extraction (validate_archive): only
+#   regular files and directories; no absolute, ".." or control-character paths,
+#   no symlinks/hardlinks/devices, bounded entry count. Self-test:
+#   tools/test-fetch-pdfium-guard.sh (drives --check-archive; no network/macOS).
 #
-# To bump: change PDFIUM_TAG + PDFIUM_SHA256 together in a reviewed PR, using a
-# hash you computed yourself from the downloaded asset (shasum -a 256), and
+# To bump: change PDFIUM_TAG, PDFIUM_SHA256 and PDFIUM_DYLIB_SHA256 together in
+# a reviewed PR, using hashes you computed yourself (shasum -a 256) from the
+# downloaded asset and from the lib/libpdfium.dylib extracted out of it, and
 # re-run the pdfium-render compatibility check described in ADR-002.
-#
-# Hardened 2026-10-04 for security review finding F34
-# (docs/security-quality-review-2026-10-04.md). Three sub-findings, all fixed:
-#
-#   (a) The idempotence stamp used to short-circuit on "stamp matches the pinned
-#       archive hash AND the dylib exists", without ever re-hashing the dylib, so
-#       a locally replaced artifacts/pdfium/lib/libpdfium.dylib was embedded in a
-#       build unchecked. The stamp now also records the extracted dylib's own
-#       SHA-256, and a stamp hit re-hashes the file on disk and re-downloads on
-#       any mismatch. NOTE the scope: that second hash is self-recorded at
-#       extraction time, not independently pinned, so it detects tampering or
-#       corruption AFTER a verified extraction. The pinned PDFIUM_SHA256 on the
-#       archive is what establishes the binary's provenance in the first place;
-#       this does not weaken or replace it.
-#   (b) curl's --proto restricts only the INITIAL scheme; redirect hops were
-#       unrestricted (the GitHub URL does 302 to release-assets.githubusercontent.com).
-#       --proto-redir '=https' now constrains every hop, so a redirect cannot
-#       downgrade to http/file/ftp mid-fetch.
-#   (c) The archive was extracted with a plain `tar -xzf` and no pre-listing.
-#       It is now listed and validated BEFORE anything is written to disk:
-#       absolute paths, `..` components, symlinks, hardlinks, device/fifo/socket
-#       entries, control characters in names, and an unreasonable entry count are
-#       all rejected with a message naming the offending entry.
-#
-# Self-test: tools/test-fetch-pdfium-guard.sh (drives --check-archive against
-# hand-built fixture tarballs; needs no network and no macOS).
 set -euo pipefail
 
 PDFIUM_TAG="chromium/8076"
 PDFIUM_ASSET="pdfium-mac-univ.tgz"   # universal2 (arm64 + x86_64) dylib
 PDFIUM_SHA256="3bdb93e229298dfdf083dc8ccc7d1a8cf87790b6917e5073335504fe2ff0bdc1"
+# SHA-256 of lib/libpdfium.dylib inside that (already verified) archive. Pinned
+# here, in git, so a tampered on-disk copy cannot vouch for itself via a stamp.
+PDFIUM_DYLIB_SHA256="3ed692213ade3cdab960198466adf1534d68632a4bfc1756f288b056939af1f4"
+
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else sha256sum "$1" | awk '{print $1}'; fi
+}
 
 # Upper bound on archive members. The pinned asset has 45; this is a sanity
 # ceiling against a pathological archive, not a tight fit. Overridable only so
 # tools/test-fetch-pdfium-guard.sh can exercise the cap with a handful of
 # fixture entries instead of building 500; the real fetch never sets it.
 PDFIUM_MAX_ENTRIES="${PDFIUM_MAX_ENTRIES:-500}"
-
-sha256_of() {
-    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
-    else sha256sum "$1" | awk '{print $1}'; fi
-}
 
 # Validate a .tar.gz BEFORE extracting it. Fails closed, naming the bad entry.
 #
@@ -144,26 +128,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="$REPO_ROOT/artifacts/pdfium"
 STAMP="$OUT_DIR/.pinned-sha256"
-DYLIB="$OUT_DIR/lib/libpdfium.dylib"
 
-# Stamp format (two lines): the pinned archive hash, then the extracted dylib's
-# hash recorded at extraction time. A one-line stamp is a pre-F34 stamp and is
-# treated as a miss, so an existing checkout re-verifies once rather than
-# trusting a stamp written before the dylib was ever hashed.
-if [ -f "$STAMP" ] && [ -f "$DYLIB" ]; then
-    STAMPED_ARCHIVE="$(sed -n '1p' "$STAMP")"
-    STAMPED_DYLIB="$(sed -n '2p' "$STAMP")"
-    if [ "$STAMPED_ARCHIVE" = "$PDFIUM_SHA256" ] && [ -n "$STAMPED_DYLIB" ]; then
-        CURRENT_DYLIB="$(sha256_of "$DYLIB")"
-        if [ "$CURRENT_DYLIB" = "$STAMPED_DYLIB" ]; then
-            echo "✓ pdfium $PDFIUM_TAG already present, dylib re-hashed and verified ($OUT_DIR)"
-            exit 0
-        fi
-        echo "warning: $DYLIB does not match the hash recorded at extraction time." >&2
-        echo "  recorded: $STAMPED_DYLIB" >&2
-        echo "  on disk:  $CURRENT_DYLIB" >&2
-        echo "Discarding it and re-fetching the pinned archive." >&2
+# Re-hash the real on-disk dylib every time (cheap: ~15 MB) rather than trusting
+# the stamp alone, so a modified or truncated artifacts/pdfium is never reused.
+if [ -f "$OUT_DIR/lib/libpdfium.dylib" ]; then
+    if [ "$(sha256_of "$OUT_DIR/lib/libpdfium.dylib")" = "$PDFIUM_DYLIB_SHA256" ]; then
+        echo "$PDFIUM_SHA256" > "$STAMP"
+        echo "✓ pdfium $PDFIUM_TAG already present and verified ($OUT_DIR)"
+        exit 0
     fi
+    echo "! existing $OUT_DIR/lib/libpdfium.dylib does not match the pinned hash; re-fetching" >&2
 fi
 
 TMP="$(mktemp -d)"
@@ -171,10 +145,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 URL="https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG//\//%2F}/$PDFIUM_ASSET"
 echo "→ Downloading $PDFIUM_ASSET ($PDFIUM_TAG)..."
-# --proto gates the initial request; --proto-redir gates every redirect hop.
-curl --fail --silent --show-error --location \
-     --proto '=https' --proto-redir '=https' --tlsv1.2 \
-     -o "$TMP/$PDFIUM_ASSET" "$URL"
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$TMP/$PDFIUM_ASSET" "$URL"
 
 ACTUAL="$(sha256_of "$TMP/$PDFIUM_ASSET")"
 if [ "$ACTUAL" != "$PDFIUM_SHA256" ]; then
@@ -192,6 +163,11 @@ validate_archive "$TMP/$PDFIUM_ASSET"
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 tar -xzf "$TMP/$PDFIUM_ASSET" -C "$OUT_DIR"
-[ -f "$DYLIB" ] || { echo "error: archive has no lib/libpdfium.dylib" >&2; rm -rf "$OUT_DIR"; exit 1; }
-{ echo "$PDFIUM_SHA256"; sha256_of "$DYLIB"; } > "$STAMP"
+[ -f "$OUT_DIR/lib/libpdfium.dylib" ] || { echo "error: archive has no lib/libpdfium.dylib" >&2; rm -rf "$OUT_DIR"; exit 1; }
+if [ "$(sha256_of "$OUT_DIR/lib/libpdfium.dylib")" != "$PDFIUM_DYLIB_SHA256" ]; then
+    echo "error: extracted libpdfium.dylib does not match the pinned PDFIUM_DYLIB_SHA256" >&2
+    rm -rf "$OUT_DIR"
+    exit 1
+fi
+echo "$PDFIUM_SHA256" > "$STAMP"
 echo "✓ pdfium $PDFIUM_TAG verified and extracted to $OUT_DIR"

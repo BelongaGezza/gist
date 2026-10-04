@@ -189,13 +189,25 @@ final class OcrImportState: ObservableObject {
 
     // MARK: - PDF source (M6 R2)
 
+    /// Signature of the page renderer `beginPdf` drives: `(pdf, progress,
+    /// isCancelled) throws -> rendered pages`. A test seam (same idiom as
+    /// `beginScan`'s `maxBytes`): production uses `defaultPdfRenderer`
+    /// (`PdfPageRenderer.render`); tests inject a controllable one to prove
+    /// cancellation actually reaches the render (F35).
+    typealias PdfRenderFunction =
+        @Sendable (URL, @escaping (Int, Int) -> Void, @escaping () -> Bool) throws -> RenderedPdfPages
+
+    static let defaultPdfRenderer: PdfRenderFunction = { url, progress, isCancelled in
+        try PdfPageRenderer.render(url: url, progress: progress, isCancelled: isCancelled)
+    }
+
     /// Entry point for an image-only PDF: renders its pages to a per-import
     /// temp directory one at a time (`PdfPageRenderer` -- page cap checked
     /// before any render, memory bounded), then hands the page images to the
     /// normal `beginScan` flow, so the existing Vision scan + review screen +
     /// `importImageWithOcr` commit are reused unchanged (ADR-009). Never logs
     /// the source path.
-    func beginPdf(url: URL) {
+    func beginPdf(url: URL, renderer: @escaping PdfRenderFunction = OcrImportState.defaultPdfRenderer) {
         scanTask?.cancel()
         cleanupPdfTemp()
         pages = []
@@ -203,20 +215,33 @@ final class OcrImportState: ObservableObject {
         // The picker's sandbox access may have been released since the first
         // import attempt; take our own for the render's duration.
         if url.startAccessingSecurityScopedResource() { pdfAccessURL = url }
+        // Best-effort sweep of render dirs a previous crash/force-quit left
+        // behind (F35). Off the main thread; time-guarded so it can never touch
+        // a render that is still running.
+        Task.detached(priority: .utility) { PdfPageRenderer.sweepStaleTempDirectories() }
         scanTask = Task {
             do {
-                let rendered = try await Task.detached(priority: .userInitiated) {
-                    try PdfPageRenderer.render(
-                        url: url,
-                        progress: { done, total in
+                // The render runs in a *detached* task so it stays off the
+                // main actor, but a detached task is not a child of `scanTask`,
+                // so cancelling `scanTask` would not reach its `isCancelled`
+                // poll. Forward cancellation explicitly (F35).
+                let renderTask = Task.detached(priority: .userInitiated) {
+                    try renderer(
+                        url,
+                        { done, total in
                             Task { @MainActor [weak self] in
                                 guard let self, case .rendering = self.phase else { return }
                                 self.phase = .rendering(completed: done, total: total)
                             }
                         },
-                        isCancelled: { Task.isCancelled }
+                        { Task.isCancelled }
                     )
-                }.value
+                }
+                let rendered = try await withTaskCancellationHandler {
+                    try await renderTask.value
+                } onCancel: {
+                    renderTask.cancel()
+                }
                 releasePdfAccess()
                 if Task.isCancelled {
                     rendered.cleanup()
