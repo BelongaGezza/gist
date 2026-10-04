@@ -202,6 +202,94 @@ final class PdfUiTests: XCTestCase {
         XCTAssertTrue(entries(in: root).isEmpty, "failure path removes already-written pages")
     }
 
+    // MARK: - F35: cancellation reaches the render; stale temp dirs are swept
+
+    /// Thread-safe flags the injected renderer sets from its detached task.
+    private final class CancelProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _started = false
+        private var _sawCancel = false
+        var started: Bool { lock.lock(); defer { lock.unlock() }; return _started }
+        var sawCancel: Bool { lock.lock(); defer { lock.unlock() }; return _sawCancel }
+        func markStarted() { lock.lock(); _started = true; lock.unlock() }
+        func markCancelSeen() { lock.lock(); _sawCancel = true; lock.unlock() }
+    }
+
+    /// Before the fix, `beginPdf`'s render ran in a `Task.detached` whose
+    /// `isCancelled` polled the *detached* task, so cancelling the outer scan
+    /// task never reached it and rendering ran to completion. This injects a
+    /// renderer that only stops when it observes cancellation (or gives up
+    /// after 20 s with a distinct failure), then cancels the scan.
+    func testCancelScanReachesTheDetachedRender() async throws {
+        let probe = CancelProbe()
+        let state = OcrImportState()
+        state.beginPdf(
+            url: tempDir.appendingPathComponent("not-read-by-the-fake.pdf"),
+            renderer: { _, _, isCancelled in
+                probe.markStarted()
+                let giveUp = Date().addingTimeInterval(20)
+                while Date() < giveUp {
+                    if isCancelled() {
+                        probe.markCancelSeen()
+                        throw PdfRenderError.cancelled
+                    }
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+                throw PdfRenderError.pageRenderFailed(pageIndex: 0)
+            }
+        )
+        let startDeadline = Date().addingTimeInterval(5)
+        while !probe.started, Date() < startDeadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(probe.started, "render never started")
+
+        state.cancelScan()
+
+        let doneDeadline = Date().addingTimeInterval(5)
+        while Date() < doneDeadline {
+            if case .rendering = state.phase { try await Task.sleep(nanoseconds: 10_000_000) } else { break }
+        }
+        XCTAssertTrue(probe.sawCancel, "cancelling the scan must reach the render's isCancelled")
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertFalse(state.holdsPdfTempFiles)
+    }
+
+    func testSweepRemovesOnlyStaleRenderDirectories() throws {
+        let root = try makeRenderRoot()
+        let fm = FileManager.default
+        let now = Date()
+        func makeDir(_ name: String, age: TimeInterval) throws -> URL {
+            let url = root.appendingPathComponent(name, isDirectory: true)
+            try fm.createDirectory(at: url, withIntermediateDirectories: true)
+            try fm.setAttributes([.modificationDate: now.addingTimeInterval(-age)], ofItemAtPath: url.path)
+            return url
+        }
+        let prefix = PdfPageRenderer.tempDirectoryPrefix
+        let stale = try makeDir("\(prefix)\(UUID().uuidString)", age: 2 * 3600)
+        let fresh = try makeDir("\(prefix)\(UUID().uuidString)", age: 10)  // an in-flight render
+        let unrelated = try makeDir("unrelated-\(UUID().uuidString)", age: 2 * 3600)
+        // Prefix-named but not a real directory: a plain file and a symlink to
+        // an unrelated directory must never be deleted or followed.
+        let staleFile = root.appendingPathComponent("\(prefix)file")
+        try Data("x".utf8).write(to: staleFile)
+        try fm.setAttributes([.modificationDate: now.addingTimeInterval(-2 * 3600)], ofItemAtPath: staleFile.path)
+        let link = root.appendingPathComponent("\(prefix)link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: unrelated)
+
+        let removed = PdfPageRenderer.sweepStaleTempDirectories(in: root, olderThan: 3600, now: now)
+
+        XCTAssertEqual(removed, 1)
+        XCTAssertFalse(fm.fileExists(atPath: stale.path), "stale render dir is swept")
+        XCTAssertTrue(fm.fileExists(atPath: fresh.path), "a recent (possibly in-flight) dir is kept")
+        XCTAssertTrue(fm.fileExists(atPath: unrelated.path), "non-prefixed dirs are never touched")
+        XCTAssertTrue(fm.fileExists(atPath: staleFile.path), "a prefixed plain file is not a render dir")
+        XCTAssertNotNil(try? fm.destinationOfSymbolicLink(atPath: link.path), "symlink left alone")
+    }
+
+    func testSweepOfMissingRootIsANoOp() {
+        let missing = tempDir.appendingPathComponent("does-not-exist", isDirectory: true)
+        XCTAssertEqual(PdfPageRenderer.sweepStaleTempDirectories(in: missing), 0)
+    }
+
     func testPerPageByteCapFailureCleansUp() throws {
         let root = try makeRenderRoot()
         XCTAssertThrowsError(
