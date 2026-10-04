@@ -228,6 +228,22 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    /// Re-reads the already-loaded pages of `items` in place (same count, no
+    /// paging reset, `error` untouched) so reading-state fields that a
+    /// reader changed while the Library was off-screen -- `lastOpenedAt`,
+    /// `progressFraction` (ADR-021) -- show their current values on return.
+    func refreshLoadedItems() async {
+        guard let core, !items.isEmpty else { return }
+        do {
+            let count = max(UInt64(items.count), pageSize)
+            items = mapItems(try core.listItems(offset: 0, limit: count))
+        } catch {
+            #if DEBUG
+            print("refreshLoadedItems failed: \(type(of: error))")
+            #endif
+        }
+    }
+
     private func mapItems(_ ffiItems: [FfiLibraryItem]) -> [LibraryItemVM] {
         ffiItems.map { item in
             LibraryItemVM(
@@ -239,7 +255,10 @@ final class CoreClient: ObservableObject {
                 title: item.title ?? String(localized: "Untitled"),
                 authors: item.authors,
                 sourcePath: item.sourcePath,
-                contentEncrypted: item.contentEncrypted
+                contentEncrypted: item.contentEncrypted,
+                sourceType: item.sourceType,
+                lastOpenedAt: item.lastOpenedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
+                progressFraction: item.progressFraction
             )
         }
     }
@@ -803,6 +822,39 @@ final class CoreClient: ObservableObject {
             self.error = "\(error)"
         }
     }
+
+    /// What the flow reader does on open: load the document and, only if
+    /// that succeeded, stamp "last read" (ADR-021). Flow position stays in
+    /// `FlowScrollPositionStore`; this records only *when*, so flow-only
+    /// items still sort by last read (their progress stays 0 -- see ADR-021).
+    /// The stamp is fire-and-forget off the load's return path.
+    func openFlowDocument(itemId: String) async -> FlowDocumentVM? {
+        let doc = await loadDocument(itemId: itemId)
+        if doc != nil {
+            Task { await self.markItemOpened(itemId: itemId) }
+        }
+        return doc
+    }
+
+    /// Records that a reader (RSVP or flow) opened `itemId` just now, for
+    /// the library's "date last read" sort (ADR-021). Fire-and-forget by
+    /// design: a failure here must never interrupt reading or raise an
+    /// alert, so it does not set `error` -- the error type is logged in
+    /// debug builds only (never a path or item content). Returns the
+    /// timestamp written, or `nil` if the call failed (used by tests).
+    @discardableResult
+    func markItemOpened(itemId: String) async -> Date? {
+        guard let core else { return nil }
+        do {
+            let ms = try core.markItemOpened(itemId: itemId)
+            return Date(timeIntervalSince1970: Double(ms) / 1000)
+        } catch {
+            #if DEBUG
+            print("markItemOpened failed: \(type(of: error))")
+            #endif
+            return nil
+        }
+    }
 }
 
 struct LibraryItemVM: Identifiable {
@@ -816,13 +868,33 @@ struct LibraryItemVM: Identifiable {
     /// many hand-built `LibraryItemVM(...)` literals in tests) keeps
     /// compiling unchanged.
     let contentEncrypted: Bool
+    /// Reading-state fields (ADR-021), all defaulted for the same reason.
+    /// `sourceType` is "txt"/"epub"/"docx"/"web"/"pdf"/"ocr" ("" unknown);
+    /// `lastOpenedAt` is nil until either reader first opens the item;
+    /// `progressFraction` is the *RSVP* position over the item's length
+    /// (0...1) -- an item read only in the flow view reads 0 here.
+    let sourceType: String
+    let lastOpenedAt: Date?
+    let progressFraction: Double
 
-    init(id: String, title: String, authors: [String], sourcePath: String?, contentEncrypted: Bool = false) {
+    init(
+        id: String,
+        title: String,
+        authors: [String],
+        sourcePath: String?,
+        contentEncrypted: Bool = false,
+        sourceType: String = "",
+        lastOpenedAt: Date? = nil,
+        progressFraction: Double = 0
+    ) {
         self.id = id
         self.title = title
         self.authors = authors
         self.sourcePath = sourcePath
         self.contentEncrypted = contentEncrypted
+        self.sourceType = sourceType
+        self.lastOpenedAt = lastOpenedAt
+        self.progressFraction = progressFraction
     }
 }
 

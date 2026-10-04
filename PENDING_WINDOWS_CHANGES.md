@@ -52,3 +52,10 @@ This entry is **not** deleted, because its ask was a *visual* confirmation and p
 
 **Delete this entry** once 1 is glanced at and 2 is either done or moved to the packaging milestone.
 
+## Pending Windows Change — 2026-10-04 (M7 R1, ADR-021 reading-state model)
+**File:** `apps/windows/GIST.Core/Client/CoreClient.cs` (`Map(FfiLibraryItem[])`), `apps/windows/GIST.Core/Models/LibraryItemVM.cs`, the Windows Library sort code, the RSVP and flow reader open paths.
+**Change required:** (1) Regenerate the C# bindings; `FfiLibraryItem` gained `source_type` (string, normalised: txt/epub/docx/web/pdf/ocr or ""), `last_opened_at` (nullable Unix ms) and `progress_fraction` (double 0..1). `Map` uses an object initialiser so existing code should still compile — confirm. (2) Add `GistCore.MarkItemOpened(itemId)` (new export, returns Unix ms, idempotent, unknown id is a no-op) calls when the RSVP reader and the flow reader open an item (once per open, fire-and-forget, failures logged without paths, never shown to the user). (3) Optional parity: add sort keys Type / Last read (newest, oldest) / Progress (highest, lowest) with the same rules as Apple's `LibraryFiltering.sorted` (never-opened items always last for last-read; ties keep date-added order; unknown type last), and a progress bar + "Last read" line on rows. (4) If progress is shown, state the accepted limitation: progress counts RSVP reading only; flow-view-only items show a last-read date but 0%.
+**Reason:** v1.0 spec promises sort by type / date last read / progress. The SQLite schema is now v7 (an older Windows build opening a v7 database gets `SchemaTooNew`, so Windows and macOS builds sharing one data dir must be updated together).
+**Related commit/PR:** M7 R1 (branch `worktree-agent-a4e1f0fab1d2327a3`), `docs/adr/021-reading-state-model.md`.
+**Action:** Windows session: regenerate bindings, `dotnet build GIST.sln -warnaserror`, `dotnet test GIST.Core.Tests`; check the generated `FfiLibraryItem` and any test that constructs one positionally (none known); run the Windows `old_db`/migration paths against a v6 database to confirm it migrates to v7; then wire (2) and optionally (3)/(4).
+

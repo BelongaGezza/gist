@@ -233,6 +233,31 @@ pub struct FfiLibraryItem {
     /// whose actual content this `GistCore` instance can no longer decrypt
     /// (see `GistCore::encrypt_items`'s doc comment).
     pub content_encrypted: bool,
+    /// Normalised source format: "txt" / "epub" / "docx" / "web" / "pdf" /
+    /// "ocr", or "" if unknown (ADR-021).
+    pub source_type: String,
+    /// Unix milliseconds of the last time either reader opened the item;
+    /// `None` = never opened (ADR-021).
+    pub last_opened_at: Option<i64>,
+    /// Derived RSVP progress in `0.0..=1.0` (ADR-021). Flow-view-only items
+    /// report 0.0 — accepted limitation.
+    pub progress_fraction: f64,
+}
+
+impl From<gist_store::LibraryItem> for FfiLibraryItem {
+    fn from(i: gist_store::LibraryItem) -> Self {
+        FfiLibraryItem {
+            id: i.id,
+            title: i.title,
+            authors: i.authors,
+            source_path: i.source_path,
+            cover_path: i.cover_path,
+            content_encrypted: i.content_encrypted,
+            source_type: i.source_type,
+            last_opened_at: i.last_opened_at,
+            progress_fraction: i.progress_fraction,
+        }
+    }
 }
 
 #[derive(uniffi::Record)]
@@ -1139,17 +1164,7 @@ impl GistCore {
                 .inner
                 .list_items(offset as usize, limit as usize)
                 .map_err(GistError::from)?;
-            Ok(items
-                .into_iter()
-                .map(|i| FfiLibraryItem {
-                    id: i.id,
-                    title: i.title,
-                    authors: i.authors,
-                    source_path: i.source_path,
-                    cover_path: i.cover_path,
-                    content_encrypted: i.content_encrypted,
-                })
-                .collect())
+            Ok(items.into_iter().map(FfiLibraryItem::from).collect())
         })
     }
 
@@ -1165,17 +1180,7 @@ impl GistCore {
                 .inner
                 .search_items(&query, limit as usize)
                 .map_err(GistError::from)?;
-            Ok(items
-                .into_iter()
-                .map(|i| FfiLibraryItem {
-                    id: i.id,
-                    title: i.title,
-                    authors: i.authors,
-                    source_path: i.source_path,
-                    cover_path: i.cover_path,
-                    content_encrypted: i.content_encrypted,
-                })
-                .collect())
+            Ok(items.into_iter().map(FfiLibraryItem::from).collect())
         })
     }
 
@@ -1237,6 +1242,17 @@ impl GistCore {
         ffi_catch!({
             self.inner
                 .save_progress(&item_id, token_index as usize)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Record that a reader (RSVP or flow) opened `item_id` just now — feeds
+    /// the library's "date last read" sort (ADR-021). Idempotent; an unknown
+    /// id is a no-op. Returns the Unix-millisecond timestamp written.
+    pub fn mark_item_opened(&self, item_id: String) -> Result<i64, GistError> {
+        ffi_catch!({
+            self.inner
+                .mark_item_opened(&item_id)
                 .map_err(GistError::from)
         })
     }
@@ -1372,17 +1388,7 @@ impl GistCore {
                 .inner
                 .list_items_in_collection(&collection_id)
                 .map_err(GistError::from)?;
-            Ok(items
-                .into_iter()
-                .map(|i| FfiLibraryItem {
-                    id: i.id,
-                    title: i.title,
-                    authors: i.authors,
-                    source_path: i.source_path,
-                    cover_path: i.cover_path,
-                    content_encrypted: i.content_encrypted,
-                })
-                .collect())
+            Ok(items.into_iter().map(FfiLibraryItem::from).collect())
         })
     }
 
@@ -1431,17 +1437,7 @@ impl GistCore {
                 .inner
                 .list_items_by_tag(&tag_name)
                 .map_err(GistError::from)?;
-            Ok(items
-                .into_iter()
-                .map(|i| FfiLibraryItem {
-                    id: i.id,
-                    title: i.title,
-                    authors: i.authors,
-                    source_path: i.source_path,
-                    cover_path: i.cover_path,
-                    content_encrypted: i.content_encrypted,
-                })
-                .collect())
+            Ok(items.into_iter().map(FfiLibraryItem::from).collect())
         })
     }
 
@@ -2287,5 +2283,42 @@ pub mod test_support {
     #[uniffi::export]
     pub fn ffi_panic_probe_uniffi() -> Result<(), GistError> {
         ffi_panic_probe()
+    }
+}
+
+#[cfg(test)]
+mod reading_state_tests {
+    use super::*;
+
+    /// ADR-021: the new DTO fields cross the FFI boundary, and
+    /// `mark_item_opened` is callable and idempotent.
+    #[test]
+    fn reading_state_fields_and_mark_item_opened_cross_the_ffi() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = GistCore::new(
+            db.to_string_lossy().into_owned(),
+            storage.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let txt = dir.path().join("book.txt");
+        std::fs::write(&txt, b"alpha beta gamma delta epsilon zeta eta theta").unwrap();
+        let id = core
+            .import_file(txt.to_string_lossy().into_owned())
+            .unwrap();
+
+        let item = core.list_items(0, 10).unwrap().remove(0);
+        assert_eq!(item.source_type, "txt");
+        assert_eq!(item.last_opened_at, None);
+        assert_eq!(item.progress_fraction, 0.0);
+
+        let ts = core.mark_item_opened(id.clone()).unwrap();
+        core.mark_item_opened("missing".to_string()).unwrap();
+        core.save_progress(id, 3).unwrap();
+        let item = core.list_items(0, 10).unwrap().remove(0);
+        assert!(item.last_opened_at.is_some_and(|t| t >= ts));
+        assert!(item.progress_fraction > 0.0 && item.progress_fraction <= 1.0);
     }
 }
