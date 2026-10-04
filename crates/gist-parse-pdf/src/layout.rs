@@ -238,6 +238,16 @@ fn find_gutters(frags: &[Frag], page_w: f32) -> Vec<f32> {
     let median = sizes[sizes.len() / 2].max(1.0);
     let min_width = (1.2 * median).max(8.0);
 
+    // Sorted extents, so the per-candidate "fragments entirely left / right
+    // of this gutter" counts below are two binary searches instead of a scan
+    // of every fragment (F36: was O(fragments x gutters)). All values are
+    // finite (`glyphs_to_frags` drops non-finite glyphs), so the partitions
+    // are well defined and the counts are identical to the old scans.
+    let mut x1s: Vec<f32> = frags.iter().map(|f| f.x1).collect();
+    x1s.sort_by(|a, b| a.total_cmp(b));
+    let mut x0s: Vec<f32> = frags.iter().map(|f| f.x0).collect();
+    x0s.sort_by(|a, b| a.total_cmp(b));
+
     let lo = xmin + 0.15 * span;
     let hi = xmax - 0.15 * span;
     let mut gutters = Vec::new();
@@ -252,8 +262,8 @@ fn find_gutters(frags: &[Frag], page_w: f32) -> Vec<f32> {
             let gx1 = xmin + i as f32 * bw;
             let center = (gx0 + gx1) / 2.0;
             if gx1 - gx0 >= min_width && center > lo && center < hi {
-                let left = frags.iter().filter(|f| f.x1 <= gx0 + bw).count();
-                let right = frags.iter().filter(|f| f.x0 >= gx1 - bw).count();
+                let left = x1s.partition_point(|v| *v <= gx0 + bw);
+                let right = n - x0s.partition_point(|v| *v < gx1 - bw);
                 if left >= 3 && right >= 3 {
                     gutters.push(center);
                 }
@@ -601,16 +611,19 @@ pub fn build_document(
         };
     }
 
-    for (pi, (p, m)) in pages.iter().zip(&mask).enumerate() {
-        for (l, strip) in p.lines.iter().zip(m) {
-            if *strip {
+    // Consume `pages` so each page's line text is freed as soon as it has been
+    // folded into `events` (F36: otherwise lines and events both hold the whole
+    // document text at the same time). Output is unchanged.
+    for (pi, (p, m)) in pages.into_iter().zip(mask).enumerate() {
+        for (l, strip) in p.lines.into_iter().zip(m) {
+            if strip {
                 continue;
             }
             let text = l.text.trim();
             if text.is_empty() {
                 continue;
             }
-            if is_heading(l) {
+            if is_heading(&l) {
                 flush_para!();
                 match heading.as_mut() {
                     Some((_, htext, hsize, hgroup, hy))
@@ -673,9 +686,9 @@ pub fn build_document(
             Event::Heading(_, t) | Event::Para(t) => t.len(),
         })
         .sum();
-    if total > limits.max_expanded_bytes {
+    if total > crate::text_budget(limits) {
         return Err(PdfError::ResourceLimitExceeded {
-            limit: format!("max_expanded_bytes={}", limits.max_expanded_bytes),
+            limit: format!("pdf_text_bytes={}", crate::text_budget(limits)),
             kind: gist_model::LimitKind::ExpandedTooLarge,
             attempted: total,
         });
@@ -837,6 +850,111 @@ mod tests {
         let l7 = t.find("left col line 7").unwrap();
         let r0 = t.find("right col line 0").unwrap();
         assert!(l7 < r0, "left column must be fully read before right: {t}");
+    }
+
+    /// The pre-F36 `find_gutters` (linear scan of every fragment per
+    /// candidate gutter), kept verbatim as the reference the binary-search
+    /// version must match exactly.
+    fn find_gutters_reference(frags: &[Frag], page_w: f32) -> Vec<f32> {
+        let n = frags.len();
+        if n < 8 || !finite(page_w) || page_w <= 0.0 {
+            return Vec::new();
+        }
+        let xmin = frags.iter().map(|f| f.x0).fold(f32::INFINITY, f32::min);
+        let xmax = frags.iter().map(|f| f.x1).fold(f32::NEG_INFINITY, f32::max);
+        let span = xmax - xmin;
+        if !finite(span) || span < 50.0 {
+            return Vec::new();
+        }
+        let bw = (span / 1000.0).max(1.0);
+        let nbins = ((span / bw).ceil() as usize + 1).min(4000);
+        let mut counts = vec![0usize; nbins];
+        for f in frags {
+            let a = (((f.x0 - xmin) / bw).floor().max(0.0) as usize).min(nbins - 1);
+            let b = (((f.x1 - xmin) / bw).ceil().max(0.0) as usize).min(nbins - 1);
+            for c in &mut counts[a..=b] {
+                *c += 1;
+            }
+        }
+        let threshold = if n >= 12 { (n / 20).max(1) } else { 0 };
+        let mut sizes: Vec<f32> = frags.iter().map(|f| f.size).collect();
+        sizes.sort_by(|a, b| a.total_cmp(b));
+        let median = sizes[sizes.len() / 2].max(1.0);
+        let min_width = (1.2 * median).max(8.0);
+        let lo = xmin + 0.15 * span;
+        let hi = xmax - 0.15 * span;
+        let mut gutters = Vec::new();
+        let mut i = 0;
+        while i < nbins {
+            if counts[i] <= threshold {
+                let start = i;
+                while i < nbins && counts[i] <= threshold {
+                    i += 1;
+                }
+                let gx0 = xmin + start as f32 * bw;
+                let gx1 = xmin + i as f32 * bw;
+                let center = (gx0 + gx1) / 2.0;
+                if gx1 - gx0 >= min_width && center > lo && center < hi {
+                    let left = frags.iter().filter(|f| f.x1 <= gx0 + bw).count();
+                    let right = frags.iter().filter(|f| f.x0 >= gx1 - bw).count();
+                    if left >= 3 && right >= 3 {
+                        gutters.push(center);
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        gutters
+    }
+
+    #[test]
+    fn find_gutters_matches_the_linear_scan_reference() {
+        // Deterministic pseudo-random fragment layouts with 1-4 column
+        // bands plus a few stray full-width fragments.
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32
+        };
+        let mut nonempty = 0;
+        for case in 0..60 {
+            let cols = 1 + case % 4;
+            let col_w = 540.0 / cols as f32;
+            let mut frags = Vec::new();
+            for _ in 0..(20 + case * 3) {
+                let c = (next() * cols as f32) as usize % cols;
+                let x0 = 36.0 + c as f32 * col_w + next() * 6.0;
+                let w = col_w * (0.4 + 0.5 * next()) - 18.0;
+                frags.push(Frag {
+                    text: "x".into(),
+                    x0,
+                    x1: x0 + w.max(4.0),
+                    ymid: 100.0 + next() * 600.0,
+                    size: 9.0 + next() * 4.0,
+                    chars: 5,
+                });
+            }
+            if case % 5 == 0 {
+                frags.push(Frag {
+                    text: "wide".into(),
+                    x0: 36.0,
+                    x1: 576.0,
+                    ymid: 750.0,
+                    size: 14.0,
+                    chars: 4,
+                });
+            }
+            let got = find_gutters(&frags, 612.0);
+            let want = find_gutters_reference(&frags, 612.0);
+            assert_eq!(got, want, "case {case}");
+            if !want.is_empty() {
+                nonempty += 1;
+            }
+        }
+        assert!(nonempty > 5, "test layouts never produced a gutter");
     }
 
     #[test]

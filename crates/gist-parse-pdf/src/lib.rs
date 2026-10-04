@@ -11,7 +11,7 @@
 //! Security posture (mirrors `gist-parse-epub`):
 //! - `max_bytes` is checked before anything else; `max_pages` is checked as
 //!   soon as the page count is known and **before any page is loaded**.
-//! - Extracted text is bounded by `max_expanded_bytes` incrementally, and a
+//! - Extracted text is bounded by `min(max_expanded_bytes, MAX_PDF_TEXT_BYTES)` incrementally, and a
 //!   per-page glyph ceiling is checked against pdfium's reported character
 //!   count *before* any per-character allocation.
 //! - Password-protected / permission-restricted PDFs are rejected with
@@ -37,6 +37,26 @@ pub use pdfium_backend::{set_library_path, PdfiumParser};
 /// Hard ceiling on glyphs read from a single page, independent of
 /// `ParseLimits` (a legitimate page holds at most tens of thousands).
 pub const MAX_GLYPHS_PER_PAGE: usize = 2_000_000;
+
+/// PDF-specific ceiling on total extracted text, in bytes (F36), applied as
+/// `min(limits.max_expanded_bytes, MAX_PDF_TEXT_BYTES)`.
+///
+/// Why a PDF-specific number: the global `max_expanded_bytes` (512 MiB) is
+/// sized for zip expansion, but for a PDF the text is not the only cost -- it
+/// is amplified into the `Document`'s word-token stream (~12-14 bytes of
+/// resident memory per extracted byte) before anything is stored. Measured on
+/// hostile text-dense synthetic PDFs (no real-document corpus exists, decision
+/// D6): 48 M chars -> ~800 MiB peak, 242 M chars -> ~3.5 GiB, from inputs of
+/// 30-160 KiB (a flate-compressed content stream shared by every page, so the
+/// 256 MiB input cap gives no protection). 64 MiB bounds the parse itself to
+/// roughly 1 GiB and still leaves ~5x headroom over a very text-dense
+/// 2000-page book (~6000 chars/page = ~12 MB).
+pub const MAX_PDF_TEXT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Effective total-text budget for one PDF import.
+pub fn text_budget(limits: &ParseLimits) -> usize {
+    limits.max_expanded_bytes.min(MAX_PDF_TEXT_BYTES)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PdfError {
@@ -110,9 +130,9 @@ pub fn parse_pdf_with(
         for l in &lines.lines {
             text_bytes = text_bytes.saturating_add(l.text.len());
         }
-        if text_bytes > limits.max_expanded_bytes {
+        if text_bytes > text_budget(limits) {
             return Err(PdfError::ResourceLimitExceeded {
-                limit: format!("max_expanded_bytes={}", limits.max_expanded_bytes),
+                limit: format!("pdf_text_bytes={}", text_budget(limits)),
                 kind: gist_model::LimitKind::ExpandedTooLarge,
                 attempted: text_bytes,
             });
