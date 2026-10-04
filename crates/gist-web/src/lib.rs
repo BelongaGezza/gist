@@ -33,7 +33,7 @@ pub enum ParseError {
 
     /// Response body exceeded the 50 MB cap, or more than 5 redirects were followed.
     #[error("resource limit exceeded")]
-    ResourceLimitExceeded,
+    ResourceLimitExceeded(gist_model::LimitKind),
 
     /// robots.txt disallows the requested URL for user-agent `*` or `GIST`.
     #[error("robots.txt disallows this URL")]
@@ -85,7 +85,7 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
         .map_err(|e| match &e {
             ureq::Error::Status(code, _) if (300..400).contains(code) => {
                 // Redirect limit exceeded — ureq surfaces it as a 3xx status error.
-                ParseError::ResourceLimitExceeded
+                ParseError::ResourceLimitExceeded(gist_model::LimitKind::Other)
             }
             ureq::Error::Status(code, _) => ParseError::InvalidInput(format!("HTTP {code}")),
             _ => ParseError::InvalidInput(e.to_string()),
@@ -94,7 +94,9 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
     // Double-check for an unconsumed redirect response (ureq may vary by build).
     let status = response.status();
     if (300..400).contains(&status) {
-        return Err(ParseError::ResourceLimitExceeded);
+        return Err(ParseError::ResourceLimitExceeded(
+            gist_model::LimitKind::Other,
+        ));
     }
 
     // 6. Stream body, capped at min(limits.max_bytes, WEB_MAX_BYTES).
@@ -199,7 +201,9 @@ pub(crate) fn read_limited(
             Ok(0) => break,
             Ok(n) => {
                 if buf.len() + n > max_bytes {
-                    return Err(ParseError::ResourceLimitExceeded);
+                    return Err(ParseError::ResourceLimitExceeded(
+                        gist_model::LimitKind::TooLarge,
+                    ));
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }
@@ -459,7 +463,9 @@ fn collect_text(
 
     let max_depth = limits.max_nesting_depth;
     if depth > max_depth {
-        return Err(ParseError::ResourceLimitExceeded);
+        return Err(ParseError::ResourceLimitExceeded(
+            gist_model::LimitKind::TooDeeplyNested,
+        ));
     }
 
     for child in el.children() {
@@ -542,7 +548,9 @@ fn collect_table_rows(
     header_row: &mut bool,
 ) -> Result<(), ParseError> {
     if depth > limits.max_nesting_depth {
-        return Err(ParseError::ResourceLimitExceeded);
+        return Err(ParseError::ResourceLimitExceeded(
+            gist_model::LimitKind::TooDeeplyNested,
+        ));
     }
     for child in el.children() {
         let Some(child_el) = scraper::ElementRef::wrap(child) else {
@@ -555,7 +563,9 @@ fn collect_table_rows(
             }
             "tr" => {
                 if rows.len() >= limits.max_table_rows {
-                    return Err(ParseError::ResourceLimitExceeded);
+                    return Err(ParseError::ResourceLimitExceeded(
+                        gist_model::LimitKind::TableTooLarge,
+                    ));
                 }
                 let mut row: Vec<String> = Vec::new();
                 let mut has_th = false;
@@ -568,7 +578,9 @@ fn collect_table_rows(
                         continue;
                     }
                     if row.len() >= limits.max_table_cols {
-                        return Err(ParseError::ResourceLimitExceeded);
+                        return Err(ParseError::ResourceLimitExceeded(
+                            gist_model::LimitKind::TableTooLarge,
+                        ));
                     }
                     has_th |= name == "th";
                     let mut text = String::new();
@@ -598,7 +610,9 @@ fn cell_text(
 ) -> Result<(), ParseError> {
     use scraper::node::Node;
     if depth > max_depth {
-        return Err(ParseError::ResourceLimitExceeded);
+        return Err(ParseError::ResourceLimitExceeded(
+            gist_model::LimitKind::TooDeeplyNested,
+        ));
     }
     for child in el.children() {
         match child.value() {
@@ -785,7 +799,7 @@ mod tests {
         let source = std::io::repeat(b'x').take(fifty_one_mb as u64);
         let result = read_limited(source, WEB_MAX_BYTES);
         assert!(
-            matches!(result, Err(ParseError::ResourceLimitExceeded)),
+            matches!(result, Err(ParseError::ResourceLimitExceeded(_))),
             "expected ResourceLimitExceeded for 51 MB body"
         );
     }
@@ -928,7 +942,7 @@ mod tests {
 
         let result = build_document(&html, "https://example.com/deep", 200);
         assert!(
-            matches!(result, Err(ParseError::ResourceLimitExceeded)),
+            matches!(result, Err(ParseError::ResourceLimitExceeded(_))),
             "expected ResourceLimitExceeded for 300-deep nesting capped at 200"
         );
     }
@@ -1006,7 +1020,7 @@ mod tests {
         };
         assert!(matches!(
             extract_content_limited(&html, &limits),
-            Err(ParseError::ResourceLimitExceeded)
+            Err(ParseError::ResourceLimitExceeded(_))
         ));
         let cells: String = (0..5).map(|i| format!("<td>{i}</td>")).collect();
         let html = format!("<body><table><tr>{cells}</tr></table></body>");
@@ -1016,7 +1030,7 @@ mod tests {
         };
         assert!(matches!(
             extract_content_limited(&html, &limits),
-            Err(ParseError::ResourceLimitExceeded)
+            Err(ParseError::ResourceLimitExceeded(_))
         ));
     }
 
@@ -1030,7 +1044,7 @@ mod tests {
         );
         assert!(matches!(
             extract_content(&html, 200),
-            Err(ParseError::ResourceLimitExceeded)
+            Err(ParseError::ResourceLimitExceeded(_))
         ));
     }
 }

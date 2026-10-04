@@ -47,7 +47,11 @@ pub enum PdfError {
     #[error("PDF support is unavailable: {0}")]
     LibraryUnavailable(String),
     #[error("resource limit exceeded: {limit} ({attempted} attempted)")]
-    ResourceLimitExceeded { limit: String, attempted: usize },
+    ResourceLimitExceeded {
+        limit: String,
+        attempted: usize,
+        kind: gist_model::LimitKind,
+    },
     #[error("malformed PDF: {0}")]
     Malformed(String),
 }
@@ -88,6 +92,7 @@ pub fn parse_pdf_with(
     if bytes.len() > limits.max_bytes {
         return Err(PdfError::ResourceLimitExceeded {
             limit: format!("max_bytes={}", limits.max_bytes),
+            kind: gist_model::LimitKind::TooLarge,
             attempted: bytes.len(),
         });
     }
@@ -108,6 +113,7 @@ pub fn parse_pdf_with(
         if text_bytes > limits.max_expanded_bytes {
             return Err(PdfError::ResourceLimitExceeded {
                 limit: format!("max_expanded_bytes={}", limits.max_expanded_bytes),
+                kind: gist_model::LimitKind::ExpandedTooLarge,
                 attempted: text_bytes,
             });
         }
@@ -149,6 +155,7 @@ mod tests {
             if self.pages > limits.max_pages {
                 return Err(PdfError::ResourceLimitExceeded {
                     limit: format!("max_pages={}", limits.max_pages),
+                    kind: gist_model::LimitKind::TooManyPages,
                     attempted: self.pages,
                 });
             }

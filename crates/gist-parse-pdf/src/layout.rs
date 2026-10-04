@@ -676,6 +676,7 @@ pub fn build_document(
     if total > limits.max_expanded_bytes {
         return Err(PdfError::ResourceLimitExceeded {
             limit: format!("max_expanded_bytes={}", limits.max_expanded_bytes),
+            kind: gist_model::LimitKind::ExpandedTooLarge,
             attempted: total,
         });
     }

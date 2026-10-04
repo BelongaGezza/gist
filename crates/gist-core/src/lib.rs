@@ -429,7 +429,11 @@ pub enum ImportError {
     #[error("import cancelled by observer")]
     Cancelled,
     #[error("resource limit exceeded: {limit} ({attempted} bytes attempted)")]
-    ResourceLimitExceeded { limit: String, attempted: usize },
+    ResourceLimitExceeded {
+        limit: String,
+        attempted: usize,
+        kind: gist_model::LimitKind,
+    },
     /// Kept as a distinct variant (not folded into `Epub(String)`) so callers
     /// across the FFI boundary can present DRM as its own UX case instead of
     /// a generic import-failure toast, without string-matching error text.
@@ -851,6 +855,56 @@ pub enum CoreError {
     NotFound(String),
 }
 
+impl CoreError {
+    /// The typed resource-limit kind, if this error is a parser limit
+    /// rejection (currently only plain-text import returns one through
+    /// `CoreError`). Never derived from message text.
+    pub fn limit_kind(&self) -> Option<gist_model::LimitKind> {
+        match self {
+            CoreError::Parse(gist_parse_txt::ParseError::ResourceLimitExceeded {
+                kind, ..
+            }) => Some(*kind),
+            _ => None,
+        }
+    }
+}
+
+/// Maps a `gist-web` fetch/extract error, keeping a limit rejection typed
+/// (never string-matched) and everything else as the generic `Web` case.
+fn map_web_error(e: gist_web::ParseError) -> ImportError {
+    match e {
+        gist_web::ParseError::ResourceLimitExceeded(kind) => ImportError::ResourceLimitExceeded {
+            limit: "web fetch limit".to_string(),
+            attempted: 0,
+            kind,
+        },
+        other => ImportError::Web(other.to_string()),
+    }
+}
+
+/// Maps a `gist-imageprep` error; its only limit is the decoded pixel-count
+/// ceiling, so it classifies as `ExpandedTooLarge`.
+fn map_imageprep_error(e: gist_model::ParseError, raw_len: usize) -> ImportError {
+    match e {
+        gist_model::ParseError::ResourceLimitExceeded => ImportError::ResourceLimitExceeded {
+            limit: "image dimensions".to_string(),
+            attempted: raw_len,
+            kind: gist_model::LimitKind::ExpandedTooLarge,
+        },
+        other => ImportError::ImagePrep(other.to_string()),
+    }
+}
+
+impl ImportError {
+    /// The typed resource-limit kind, if this error is a limit rejection.
+    pub fn limit_kind(&self) -> Option<gist_model::LimitKind> {
+        match self {
+            ImportError::ResourceLimitExceeded { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+}
+
 // ── Core facade ────────────────────────────────────────────────────────────
 
 pub struct Core {
@@ -889,6 +943,7 @@ impl Core {
             return Err(CoreError::Parse(
                 gist_parse_txt::ParseError::ResourceLimitExceeded {
                     limit: format!("max_bytes={}", limits.max_bytes),
+                    kind: gist_model::LimitKind::TooLarge,
                     attempted: declared_len,
                 },
             ));
@@ -1043,6 +1098,7 @@ impl Core {
         if declared_len > limits.max_bytes {
             return Err(ImportError::ResourceLimitExceeded {
                 limit: format!("max_bytes={}", limits.max_bytes),
+                kind: gist_model::LimitKind::TooLarge,
                 attempted: declared_len,
             });
         }
@@ -1066,13 +1122,32 @@ impl Core {
         let mut doc = if mime == "application/epub+zip" || ext == "epub" {
             gist_parse_epub::parse(&bytes, stem, &limits).map_err(|e| match e {
                 gist_parse_epub::ParseError::DrmProtected => ImportError::DrmProtected,
+                gist_parse_epub::ParseError::ResourceLimitExceeded {
+                    limit,
+                    attempted,
+                    kind,
+                } => ImportError::ResourceLimitExceeded {
+                    limit,
+                    attempted,
+                    kind,
+                },
                 other => ImportError::Epub(other.to_string()),
             })?
         } else if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             || ext == "docx"
         {
-            gist_parse_docx::parse(&bytes, stem, &limits)
-                .map_err(|e| ImportError::Docx(e.to_string()))?
+            gist_parse_docx::parse(&bytes, stem, &limits).map_err(|e| match e {
+                gist_parse_docx::ParseError::ResourceLimitExceeded {
+                    limit,
+                    attempted,
+                    kind,
+                } => ImportError::ResourceLimitExceeded {
+                    limit,
+                    attempted,
+                    kind,
+                },
+                other => ImportError::Docx(other.to_string()),
+            })?
         } else if mime == "application/pdf" || ext == "pdf" {
             gist_parse_pdf::parse_pdf(&bytes, stem, &limits).map_err(|e| match e {
                 gist_parse_pdf::PdfError::Encrypted => ImportError::PdfEncrypted,
@@ -1080,14 +1155,30 @@ impl Core {
                 gist_parse_pdf::PdfError::LibraryUnavailable(why) => {
                     ImportError::PdfUnavailable(why)
                 }
-                gist_parse_pdf::PdfError::ResourceLimitExceeded { limit, attempted } => {
-                    ImportError::ResourceLimitExceeded { limit, attempted }
-                }
+                gist_parse_pdf::PdfError::ResourceLimitExceeded {
+                    limit,
+                    attempted,
+                    kind,
+                } => ImportError::ResourceLimitExceeded {
+                    limit,
+                    attempted,
+                    kind,
+                },
                 other => ImportError::Pdf(other.to_string()),
             })?
         } else if mime.starts_with("text/") || ext == "txt" || ext == "md" || ext == "text" {
-            gist_parse_txt::parse(&bytes, stem, &limits)
-                .map_err(|e| ImportError::Txt(e.to_string()))?
+            gist_parse_txt::parse(&bytes, stem, &limits).map_err(|e| match e {
+                gist_parse_txt::ParseError::ResourceLimitExceeded {
+                    limit,
+                    attempted,
+                    kind,
+                } => ImportError::ResourceLimitExceeded {
+                    limit,
+                    attempted,
+                    kind,
+                },
+                other => ImportError::Txt(other.to_string()),
+            })?
         } else {
             return Err(ImportError::UnsupportedType(ext));
         };
@@ -1143,8 +1234,7 @@ impl Core {
             return Err(ImportError::Cancelled);
         }
 
-        let mut doc = gist_web::fetch_url(url, &ParseLimits::default())
-            .map_err(|e| ImportError::Web(e.to_string()))?;
+        let mut doc = gist_web::fetch_url(url, &ParseLimits::default()).map_err(map_web_error)?;
 
         if observer.is_cancelled() {
             return Err(ImportError::Cancelled);
@@ -1763,6 +1853,7 @@ impl Core {
         if paths.len() > limits.max_pages {
             return Err(ImportError::ResourceLimitExceeded {
                 limit: format!("max_pages={}", limits.max_pages),
+                kind: gist_model::LimitKind::TooManyPages,
                 attempted: paths.len(),
             });
         }
@@ -1775,6 +1866,7 @@ impl Core {
             if declared_len > limits.max_bytes {
                 return Err(ImportError::ResourceLimitExceeded {
                     limit: format!("max_bytes={}", limits.max_bytes),
+                    kind: gist_model::LimitKind::TooLarge,
                     attempted: declared_len,
                 });
             }
@@ -1788,7 +1880,7 @@ impl Core {
             let page_index = i as u32;
 
             let prepared = gist_imageprep::prepare_image(page_index, raw, &limits)
-                .map_err(|e| ImportError::ImagePrep(e.to_string()))?;
+                .map_err(|e| map_imageprep_error(e, raw.len()))?;
 
             let Some(result) = engine.recognize_page(page_index, prepared.png_bytes) else {
                 return Err(ImportError::Cancelled);
@@ -4202,7 +4294,13 @@ mod tests {
             .import_image_with_ocr(&[oversized], &PanicIfCalledEngine)
             .unwrap_err();
         assert!(
-            matches!(err, ImportError::ResourceLimitExceeded { .. }),
+            matches!(
+                err,
+                ImportError::ResourceLimitExceeded {
+                    kind: gist_model::LimitKind::TooLarge,
+                    ..
+                }
+            ),
             "expected ResourceLimitExceeded, got {err:?}"
         );
     }
@@ -4406,9 +4504,159 @@ mod tests {
             .import_image_with_ocr(&paths, &PanicIfCalledEngine)
             .unwrap_err();
         assert!(
-            matches!(err, ImportError::ResourceLimitExceeded { .. }),
+            matches!(
+                err,
+                ImportError::ResourceLimitExceeded {
+                    kind: gist_model::LimitKind::TooManyPages,
+                    ..
+                }
+            ),
             "expected ResourceLimitExceeded, got {err:?}"
         );
+    }
+
+    // ── Typed resource-limit errors (M7 R3) ──────────────────────────────
+
+    /// Builds a structurally valid zip of `n` empty stored entries (no
+    /// compression, zero CRC — the entry-count gate fires before any entry is
+    /// read, so content validity is irrelevant).
+    fn zip_with_n_empty_entries(n: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for i in 0..n {
+            let name = format!("e{i}");
+            let offset = out.len() as u32;
+            // Local file header.
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            out.extend_from_slice(&[0; 8]); // flags, method, time, date
+            out.extend_from_slice(&[0; 12]); // crc, csize, usize
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            out.extend_from_slice(name.as_bytes());
+            // Central directory header.
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            central.extend_from_slice(&[0; 8]); // flags, method, time, date
+            central.extend_from_slice(&[0; 12]); // crc, csize, usize
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0; 2]); // extra len
+            central.extend_from_slice(&[0; 2]); // comment len
+            central.extend_from_slice(&[0; 2]); // disk number
+            central.extend_from_slice(&[0; 2]); // internal attrs
+            central.extend_from_slice(&[0; 4]); // external attrs
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0; 4]); // disk numbers
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        out
+    }
+
+    fn import_hostile(file_name: &str, bytes: &[u8]) -> ImportError {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::init(&dir.path().join("t.db"), dir.path()).unwrap();
+        let p = dir.path().join(file_name);
+        std::fs::write(&p, bytes).unwrap();
+        core.import_file(&p, &NullObserver).unwrap_err()
+    }
+
+    #[test]
+    fn import_txt_over_max_bytes_is_typed_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::init(&dir.path().join("t.db"), dir.path()).unwrap();
+        let p = dir.path().join("big.txt");
+        std::fs::File::create(&p)
+            .unwrap()
+            .set_len(ParseLimits::default().max_bytes as u64 + 1)
+            .unwrap();
+        let err = core.import_txt(&p).unwrap_err();
+        assert_eq!(err.limit_kind(), Some(gist_model::LimitKind::TooLarge));
+    }
+
+    #[test]
+    fn import_file_epub_with_too_many_entries_is_typed() {
+        let zip = zip_with_n_empty_entries((ParseLimits::default().max_zip_entries + 1) as u16);
+        let err = import_hostile("hostile.epub", &zip);
+        assert_eq!(
+            err.limit_kind(),
+            Some(gist_model::LimitKind::TooManyEntries),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn import_file_docx_with_too_many_entries_is_typed() {
+        let zip = zip_with_n_empty_entries((ParseLimits::default().max_zip_entries + 1) as u16);
+        let err = import_hostile("hostile.docx", &zip);
+        assert_eq!(
+            err.limit_kind(),
+            Some(gist_model::LimitKind::TooManyEntries),
+            "{err:?}"
+        );
+    }
+
+    /// PDF page-count bomb: typed `TooManyPages`. Skips where pdfium isn't
+    /// loadable unless `GIST_REQUIRE_PDFIUM=1`.
+    #[test]
+    fn import_file_pdf_page_count_bomb_is_typed_too_many_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::init(&dir.path().join("t.db"), dir.path()).unwrap();
+        let src = pdf_fixture("adversarial/page_count_bomb.pdf");
+        match core.import_file(&src, &NullObserver) {
+            Err(ImportError::PdfUnavailable(why)) => {
+                assert_ne!(
+                    std::env::var("GIST_REQUIRE_PDFIUM").as_deref(),
+                    Ok("1"),
+                    "pdfium required but unavailable: {why}"
+                );
+                eprintln!("SKIP: pdfium unavailable ({why})");
+            }
+            Err(e) => assert_eq!(
+                e.limit_kind(),
+                Some(gist_model::LimitKind::TooManyPages),
+                "{e:?}"
+            ),
+            Ok(_) => panic!("page-count bomb must not import"),
+        }
+    }
+
+    #[test]
+    fn web_limit_errors_map_to_typed_import_error() {
+        use gist_model::LimitKind as K;
+        for kind in [K::TooLarge, K::TooDeeplyNested, K::TableTooLarge, K::Other] {
+            let e = map_web_error(gist_web::ParseError::ResourceLimitExceeded(kind));
+            assert_eq!(e.limit_kind(), Some(kind));
+        }
+        let e = map_web_error(gist_web::ParseError::InvalidInput("x".into()));
+        assert!(matches!(e, ImportError::Web(_)));
+    }
+
+    #[test]
+    fn imageprep_limit_error_maps_to_typed_import_error() {
+        let e = map_imageprep_error(gist_model::ParseError::ResourceLimitExceeded, 10);
+        assert_eq!(
+            e.limit_kind(),
+            Some(gist_model::LimitKind::ExpandedTooLarge)
+        );
+        let e = map_imageprep_error(gist_model::ParseError::InvalidInput("x".into()), 10);
+        assert!(matches!(e, ImportError::ImagePrep(_)));
+    }
+
+    /// The limit error's Display text must never carry a source path.
+    #[test]
+    fn limit_error_text_has_no_source_path() {
+        let zip = zip_with_n_empty_entries((ParseLimits::default().max_zip_entries + 1) as u16);
+        let err = import_hostile("SECRET-NAME.epub", &zip);
+        assert!(!err.to_string().contains("SECRET-NAME"), "{err}");
     }
 
     // ── At-rest integrity verification (ADR-013 / `A4`, `R3`) ────────────

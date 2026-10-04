@@ -174,6 +174,7 @@ impl PdfParser for PdfiumParser {
         if page_count > limits.max_pages {
             return Err(PdfError::ResourceLimitExceeded {
                 limit: format!("max_pages={}", limits.max_pages),
+                kind: gist_model::LimitKind::TooManyPages,
                 attempted: page_count,
             });
         }
@@ -203,6 +204,7 @@ impl PdfParser for PdfiumParser {
                 if n > MAX_GLYPHS_PER_PAGE || n > remaining_chars {
                     return Err(PdfError::ResourceLimitExceeded {
                         limit: format!("glyphs_per_page={MAX_GLYPHS_PER_PAGE}"),
+                        kind: gist_model::LimitKind::ExpandedTooLarge,
                         attempted: n,
                     });
                 }

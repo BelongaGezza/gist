@@ -2,6 +2,28 @@ use serde::{Deserialize, Serialize};
 
 // ── Resource limits ────────────────────────────────────────────────────────
 
+/// Coarse, path-free classification of which resource limit an importer hit.
+/// Carried alongside the free-form `limit` text by every importer's
+/// `ResourceLimitExceeded` so callers (and the FFI boundary) can present a
+/// specific message without ever parsing strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitKind {
+    /// Input file/body larger than `max_bytes` (or the web 50 MB cap).
+    TooLarge,
+    /// More pages / spine items than `max_pages`.
+    TooManyPages,
+    /// More archive entries than `max_zip_entries`.
+    TooManyEntries,
+    /// Structure nested deeper than `max_nesting_depth`.
+    TooDeeplyNested,
+    /// Extracted/decompressed content larger than the expanded-size budget.
+    ExpandedTooLarge,
+    /// A table with too many rows or columns.
+    TableTooLarge,
+    /// Any other limit (e.g. redirect cap).
+    Other,
+}
+
 /// Shared resource-limit policy enforced by all parsers before allocation.
 /// Parsers receive this struct at entry and must check each limit before the
 /// corresponding allocation. Exceeding any limit returns
