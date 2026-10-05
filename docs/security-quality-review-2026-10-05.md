@@ -76,7 +76,10 @@ TOCTOU: validation and extraction both read the same file in a private `mktemp -
 
 ## 9. Item 7 — Localisation guard
 
-(to be filled)
+- Ran `bash tools/check-localisation.sh`: `358 literals checked, 0 missing`, exit 0. File mode is 100755 in git.
+- Workflow (`apple-build.yml`): the new step is `run: ./tools/check-localisation.sh` with no `${{ }}` expressions or event data, so no shell-injection surface. Action pins unchanged (checkout, setup-xcode, rust-toolchain, cache are all 40-hex SHAs with version comments); `permissions: contents: read` intact.
+- Negative test: I added a temporary Swift file with `Text("...")`, `Button("... \(1)")`, `.help("...")`, `Label("...")` strings absent from the catalog: all were reported (exit 1, 5 missing, 363 checked); the file was deleted.
+- False negatives (F75): a triple-quoted `Text("""...""")` and a literal held in a `String` variable are not reported (the second is documented in the script header, the first is not). `Text(verbatim: "ok")` is reported as missing (false positive, fails closed). The catalog is parsed with a regex tied to Xcode's 4-space layout and dies if no keys parse, so format drift fails loudly.
 
 ## 10. Item 8 — Paginated view
 
