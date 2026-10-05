@@ -1208,4 +1208,118 @@ mod tests {
             let _ = parse(&docx_with_body(body), "t", &ParseLimits::default());
         }
     }
+
+    // ── Merged cells (M7/R7) ─────────────────────────────────────────────
+
+    fn merged_tc(text: &str, props: &str) -> String {
+        format!(
+            r#"<w:tc><w:tcPr>{props}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"#
+        )
+    }
+
+    fn spans_of(doc: &gist_model::Document) -> Vec<gist_model::CellSpan> {
+        doc.sections[0]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                gist_model::Block::Table { spans, .. } => Some(spans.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_merged_fixture_has_aligned_grid_and_spans() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/docx/with_merged_cells.docx"
+        ))
+        .unwrap();
+        let doc = parse(&bytes, "t", &ParseLimits::default()).unwrap();
+        let tables = tables_of(&doc);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(
+            tables[0].0,
+            &vec![
+                vec!["Sales", "", "Notes"],
+                vec!["North", "100", "Strong"],
+                vec!["South", "80", ""],
+                vec!["Grand total", "", "180"],
+            ]
+        );
+        let sp = |row, col, rowspan, colspan| gist_model::CellSpan {
+            row,
+            col,
+            rowspan,
+            colspan,
+        };
+        assert_eq!(
+            spans_of(&doc),
+            vec![sp(0, 0, 1, 2), sp(1, 2, 2, 1), sp(3, 0, 1, 2)]
+        );
+    }
+
+    #[test]
+    fn test_hostile_grid_span_is_rejected_with_table_too_large() {
+        for val in ["4294967295", "99999999999999999999", "65"] {
+            let body = format!(
+                "<w:tbl><w:tr>{}</w:tr></w:tbl>",
+                merged_tc("x", &format!(r#"<w:gridSpan w:val="{val}"/>"#))
+            );
+            let r = parse(&docx_with_body(&body), "t", &ParseLimits::default());
+            assert!(
+                matches!(
+                    r,
+                    Err(ParseError::ResourceLimitExceeded {
+                        kind: gist_model::LimitKind::TableTooLarge,
+                        ..
+                    })
+                ),
+                "gridSpan={val}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_garbage_grid_span_and_orphan_vmerge_do_not_panic_or_merge() {
+        for props in [
+            r#"<w:gridSpan w:val="-3"/>"#,
+            r#"<w:gridSpan w:val="abc"/>"#,
+            r#"<w:gridSpan/>"#,
+            r#"<w:vMerge/>"#, // orphan continuation in the first row
+        ] {
+            let body = format!(
+                "<w:tbl><w:tr>{}{}</w:tr></w:tbl>",
+                merged_tc("a", props),
+                merged_tc("b", "")
+            );
+            let doc = parse(&docx_with_body(&body), "t", &ParseLimits::default()).unwrap();
+            let t = tables_of(&doc);
+            assert_eq!(t[0].0, &vec![vec!["a", "b"]], "{props}");
+            assert!(spans_of(&doc).is_empty(), "{props}");
+        }
+    }
+
+    #[test]
+    fn test_vmerge_chain_and_overlong_chain_are_bounded() {
+        let first = format!(
+            "<w:tr>{}</w:tr>",
+            merged_tc("top", r#"<w:vMerge w:val="restart"/>"#)
+        );
+        let cont = format!("<w:tr>{}</w:tr>", merged_tc("", "<w:vMerge/>"));
+        let body = format!("<w:tbl>{first}{cont}{cont}</w:tbl>");
+        let doc = parse(&docx_with_body(&body), "t", &ParseLimits::default()).unwrap();
+        assert_eq!(tables_of(&doc)[0].0, &vec![vec!["top"], vec![""], vec![""]]);
+        assert_eq!(spans_of(&doc)[0].rowspan, 3);
+
+        let limits = ParseLimits {
+            max_table_rows: 3,
+            ..ParseLimits::default()
+        };
+        let long = format!("<w:tbl>{first}{}</w:tbl>", cont.repeat(5));
+        assert!(matches!(
+            parse(&docx_with_body(&long), "t", &limits),
+            Err(ParseError::ResourceLimitExceeded { .. })
+        ));
+    }
 }
