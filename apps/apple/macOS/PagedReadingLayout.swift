@@ -223,7 +223,7 @@ struct PagedReadingLayout: ReadingLayout {
                 Image(systemName: "chevron.left")
             }
             .disabled(currentPage <= 0)
-            .accessibilityLabel("Previous page")
+            .accessibilityLabel("Previous Page")
             Spacer()
             Text("Page \(pages.isEmpty ? 0 : currentPage + 1) of \(pages.count)")
                 .font(.caption)
@@ -234,7 +234,7 @@ struct PagedReadingLayout: ReadingLayout {
                 Image(systemName: "chevron.right")
             }
             .disabled(currentPage >= pages.count - 1)
-            .accessibilityLabel("Next page")
+            .accessibilityLabel("Next Page")
         }
         .padding(.horizontal, Self.horizontalPadding)
         .frame(height: Self.controlsHeight)
