@@ -178,11 +178,201 @@ pub enum Block {
     /// [`TABLE_CELL_SEPARATOR`] or [`TABLE_ROW_SEPARATOR`]. Rows may be
     /// ragged (a row may have fewer cells than the widest); an empty cell
     /// is an empty string, never omitted, so column positions are preserved.
+    ///
+    /// **Merged cells (ADR-019 addendum 2, M7/R7).** `rows` stays the plain
+    /// grid; a merged region keeps its text in its top-left slot and every
+    /// other slot it covers holds `""`, so column positions are always
+    /// aligned and [`Block::plain_text`] is unchanged. [`CellSpan`]s in
+    /// `spans` record only the cells that merge (`colspan > 1` or
+    /// `rowspan > 1`); an unmerged table has an empty `spans`, which is not
+    /// serialised at all (byte-identical to the M6 shape).
     Table {
         rows: Vec<Vec<String>>,
         /// `true` if the first row is a header row (`<th>`/`w:tblHeader`).
         header_row: bool,
+        /// Merged cells only. `#[serde(default)]` so blobs written before
+        /// this field existed (every M6 table) still load.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        spans: Vec<CellSpan>,
     },
+}
+
+/// A merged table cell: the slot `(row, col)` holds the text and the cell
+/// covers `rowspan` rows by `colspan` columns starting there. Always
+/// `rowspan >= 1`, `colspan >= 1`, and at least one of them `> 1` (a 1x1
+/// cell is never recorded). Consumers must tolerate out-of-range values from
+/// hand-edited blobs (clamp to the grid; ignore what does not fit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellSpan {
+    pub row: u32,
+    pub col: u32,
+    pub rowspan: u32,
+    pub colspan: u32,
+}
+
+// ── Table layout (shared by the DOCX / ePub / web parsers) ───────────────────
+
+/// One source cell before layout. `colspan`/`rowspan` are the *declared*
+/// values (already parsed by [`parse_span_attr`]); `0` is treated as `1`.
+/// `v_merge_continue` is DOCX's `w:vMerge` continuation cell (present in the
+/// row as a real, empty cell): it extends the cell above in the same grid
+/// column instead of standing alone.
+#[derive(Debug, Clone)]
+pub struct RawCell {
+    pub text: String,
+    pub colspan: u32,
+    pub rowspan: u32,
+    pub v_merge_continue: bool,
+}
+
+impl RawCell {
+    /// An unmerged cell.
+    pub fn plain(text: impl Into<String>) -> Self {
+        RawCell {
+            text: text.into(),
+            colspan: 1,
+            rowspan: 1,
+            v_merge_continue: false,
+        }
+    }
+}
+
+/// The table would exceed `max_table_rows` / `max_table_cols`. Parsers map
+/// this to their own `ResourceLimitExceeded { kind: LimitKind::TableTooLarge }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableLayoutError {
+    pub limit: String,
+    pub attempted: usize,
+}
+
+/// Parse a `colspan` / `rowspan` / `w:gridSpan` attribute value. Only a run
+/// of ASCII digits is a number; anything else (empty, negative, `+2`, `1.5`,
+/// `abc`) is `1`. `0` is `1` too (HTML's "rowspan=0 = to the end of the row
+/// group" is not supported). Overflow saturates to `u32::MAX` so a hostile
+/// value is *large* (and then rejected/clamped by [`layout_table`]) rather
+/// than silently treated as `1`.
+pub fn parse_span_attr(s: &str) -> u32 {
+    let s = s.trim();
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return 1;
+    }
+    match s.parse::<u64>() {
+        Ok(0) => 1,
+        Ok(n) => u32::try_from(n).unwrap_or(u32::MAX),
+        Err(_) => u32::MAX,
+    }
+}
+
+/// Lay raw source rows out into the IR grid plus the merged-cell spans.
+///
+/// Rules (documented in ADR-019 addendum 2):
+/// - A cell occupies the next free column of its row; slots already covered
+///   by a `rowspan` from an earlier row are skipped (HTML table model).
+/// - Its text lives in its top-left slot; every other slot it covers is `""`.
+///   Every row is padded with `""` out to the last slot any cell covers, so
+///   columns stay aligned.
+/// - **Columns:** a cell that would reach past `max_table_cols` is rejected
+///   (`TableTooLarge`), not clamped, before anything is allocated for it. A
+///   `colspan` that would run into a slot already covered from above is
+///   truncated at that slot (spans never overlap).
+/// - **Rows:** `rowspan` is clamped to the rows that exist (a span past the
+///   last row ends at the last row), and the row count is checked against
+///   `max_table_rows` first.
+/// - A `v_merge_continue` cell extends the cell directly above when that cell
+///   starts in the same column with the same width and ends on the previous
+///   row; otherwise it is an ordinary empty cell (orphan continuation).
+///
+/// Memory is bounded by `max_table_rows * max_table_cols` slots because spans
+/// never overlap.
+pub fn layout_table(
+    raw: Vec<Vec<RawCell>>,
+    limits: &ParseLimits,
+) -> Result<(Vec<Vec<String>>, Vec<CellSpan>), TableLayoutError> {
+    let nrows = raw.len();
+    if nrows > limits.max_table_rows {
+        return Err(TableLayoutError {
+            limit: format!("max_table_rows={}", limits.max_table_rows),
+            attempted: nrows,
+        });
+    }
+    let max_cols = limits.max_table_cols;
+    let cols_err = |attempted: usize| TableLayoutError {
+        limit: format!("max_table_cols={max_cols}"),
+        attempted,
+    };
+
+    let mut grid: Vec<Vec<String>> = vec![Vec::new(); nrows];
+    // owner[r][c] = index into `placed` of the cell covering that slot.
+    let mut owner: Vec<Vec<Option<usize>>> = vec![Vec::new(); nrows];
+    let mut placed: Vec<CellSpan> = Vec::new();
+
+    fn ensure(grid: &mut [Vec<String>], owner: &mut [Vec<Option<usize>>], r: usize, w: usize) {
+        if grid[r].len() < w {
+            grid[r].resize(w, String::new());
+        }
+        if owner[r].len() < w {
+            owner[r].resize(w, None);
+        }
+    }
+
+    for (r, row) in raw.into_iter().enumerate() {
+        let mut c = 0usize;
+        for cell in row {
+            while owner[r].get(c).copied().flatten().is_some() {
+                c += 1;
+            }
+            let want = cell.colspan.max(1) as usize;
+            // `want` may be hostile (u32::MAX); compare without overflow.
+            if c >= max_cols || want > max_cols - c {
+                return Err(cols_err(c.saturating_add(want)));
+            }
+            let mut cs = 1usize;
+            while cs < want && owner[r].get(c + cs).copied().flatten().is_none() {
+                cs += 1;
+            }
+
+            if cell.v_merge_continue && r > 0 {
+                if let Some(Some(oid)) = owner[r - 1].get(c).copied() {
+                    let o = placed[oid];
+                    if o.col as usize == c
+                        && o.colspan as usize == cs
+                        && (o.row + o.rowspan) as usize == r
+                    {
+                        placed[oid].rowspan += 1;
+                        ensure(&mut grid, &mut owner, r, c + cs);
+                        for slot in &mut owner[r][c..c + cs] {
+                            *slot = Some(oid);
+                        }
+                        c += cs;
+                        continue;
+                    }
+                }
+            }
+
+            let rs = (cell.rowspan.max(1) as usize).min(nrows - r);
+            let id = placed.len();
+            placed.push(CellSpan {
+                row: r as u32,
+                col: c as u32,
+                rowspan: rs as u32,
+                colspan: cs as u32,
+            });
+            for rr in r..r + rs {
+                ensure(&mut grid, &mut owner, rr, c + cs);
+                for slot in &mut owner[rr][c..c + cs] {
+                    *slot = Some(id);
+                }
+            }
+            grid[r][c] = cell.text;
+            c += cs;
+        }
+    }
+
+    let spans = placed
+        .into_iter()
+        .filter(|s| s.rowspan > 1 || s.colspan > 1)
+        .collect();
+    Ok((grid, spans))
 }
 
 /// Separator between the cells of one table row in [`Block::plain_text`].
@@ -488,6 +678,7 @@ mod tests {
                 vec!["Banana".into(), String::new(), "12".into()],
             ],
             header_row: true,
+            spans: vec![],
         }
     }
 
@@ -551,6 +742,7 @@ mod tests {
             blocks: vec![Block::Table {
                 rows: vec![vec![String::new(), String::new()], vec![String::new()]],
                 header_row: false,
+                spans: vec![],
             }],
         };
         let doc = Document::new(Metadata::minimal("T"), vec![section]);
@@ -576,5 +768,189 @@ mod tests {
         assert_eq!(img(Some("a dog"), Some("Figure 1")).plain_text(), "a dog");
         assert_eq!(img(None, Some("Figure 1")).plain_text(), "");
         assert_eq!(img(None, None).plain_text(), "");
+    }
+
+    // ── Merged cells (ADR-019 addendum 2, M7/R7) ─────────────────────────
+
+    fn rc(text: &str, cs: u32, rs: u32) -> RawCell {
+        RawCell {
+            text: text.into(),
+            colspan: cs,
+            rowspan: rs,
+            v_merge_continue: false,
+        }
+    }
+
+    /// The merged fixture table as the HTML parsers see it.
+    fn merged_raw() -> Vec<Vec<RawCell>> {
+        vec![
+            vec![rc("Sales", 2, 1), rc("Notes", 1, 1)],
+            vec![rc("North", 1, 1), rc("100", 1, 1), rc("Strong", 1, 2)],
+            vec![rc("South", 1, 1), rc("80", 1, 1)],
+            vec![rc("Grand total", 2, 1), rc("180", 1, 1)],
+        ]
+    }
+
+    #[test]
+    fn layout_places_merged_cells_top_left_and_pads_covered_slots() {
+        let (rows, spans) = layout_table(merged_raw(), &ParseLimits::default()).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec!["Sales", "", "Notes"],
+                vec!["North", "100", "Strong"],
+                vec!["South", "80", ""],
+                vec!["Grand total", "", "180"],
+            ]
+        );
+        let sp = |row, col, rowspan, colspan| CellSpan {
+            row,
+            col,
+            rowspan,
+            colspan,
+        };
+        assert_eq!(spans, vec![sp(0, 0, 1, 2), sp(1, 2, 2, 1), sp(3, 0, 1, 2)]);
+    }
+
+    /// SECOND shared golden (the Swift `FlowTableTests` pins the identical
+    /// literal): a merged region flattens with covered slots empty, so the
+    /// tab/newline structure keeps columns aligned.
+    #[test]
+    fn merged_table_golden_plain_text_matches_swift() {
+        let (rows, spans) = layout_table(merged_raw(), &ParseLimits::default()).unwrap();
+        let t = Block::Table {
+            rows,
+            header_row: true,
+            spans,
+        };
+        assert_eq!(
+            t.plain_text(),
+            "Sales\t\tNotes\nNorth\t100\tStrong\nSouth\t80\t\nGrand total\t\t180"
+        );
+    }
+
+    #[test]
+    fn unmerged_layout_has_no_spans_and_matches_input() {
+        let raw = vec![
+            vec![RawCell::plain("a"), RawCell::plain("b")],
+            vec![RawCell::plain("c")],
+        ];
+        let (rows, spans) = layout_table(raw, &ParseLimits::default()).unwrap();
+        assert_eq!(rows, vec![vec!["a", "b"], vec!["c"]]);
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn v_merge_continue_extends_the_cell_above() {
+        let cont = |cs| RawCell {
+            text: String::new(),
+            colspan: cs,
+            rowspan: 1,
+            v_merge_continue: true,
+        };
+        let raw = vec![
+            vec![rc("A", 1, 1), rc("S", 1, 1)],
+            vec![rc("B", 1, 1), cont(1)],
+            vec![rc("C", 1, 1), cont(1)],
+        ];
+        let (rows, spans) = layout_table(raw, &ParseLimits::default()).unwrap();
+        assert_eq!(rows[2], vec!["C", ""]);
+        assert_eq!(
+            spans,
+            vec![CellSpan {
+                row: 0,
+                col: 1,
+                rowspan: 3,
+                colspan: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn orphan_v_merge_continue_is_an_ordinary_empty_cell() {
+        let raw = vec![vec![RawCell {
+            text: String::new(),
+            colspan: 1,
+            rowspan: 1,
+            v_merge_continue: true,
+        }]];
+        let (rows, spans) = layout_table(raw, &ParseLimits::default()).unwrap();
+        assert_eq!(rows, vec![vec![""]]);
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn hostile_colspan_is_rejected_before_allocating() {
+        let raw = vec![vec![rc("x", u32::MAX, 1)]];
+        let err = layout_table(raw, &ParseLimits::default()).unwrap_err();
+        assert!(err.limit.contains("max_table_cols"));
+    }
+
+    #[test]
+    fn hostile_rowspan_is_clamped_to_the_rows_that_exist() {
+        let raw = vec![vec![rc("x", 1, u32::MAX)], vec![RawCell::plain("y")]];
+        let (rows, spans) = layout_table(raw, &ParseLimits::default()).unwrap();
+        assert_eq!(rows, vec![vec!["x"], vec!["", "y"]]);
+        assert_eq!(spans[0].rowspan, 2);
+    }
+
+    #[test]
+    fn overlapping_colspan_is_truncated_never_overlaps() {
+        // Row 0's rowspan=2 cell covers col 1 of row 1; row 1's colspan=3
+        // cell at col 0 must stop before it.
+        let raw = vec![
+            vec![rc("a", 1, 1), rc("b", 1, 2)],
+            vec![rc("c", 3, 1)],
+        ];
+        let (rows, spans) = layout_table(raw, &ParseLimits::default()).unwrap();
+        assert_eq!(rows[1], vec!["c", ""]);
+        assert!(spans.iter().all(|s| s.col != 0 || s.row != 1));
+    }
+
+    #[test]
+    fn layout_enforces_row_and_column_caps() {
+        let l = ParseLimits {
+            max_table_rows: 2,
+            max_table_cols: 3,
+            ..ParseLimits::default()
+        };
+        let three_rows = vec![vec![RawCell::plain("x")]; 3];
+        assert!(layout_table(three_rows, &l).is_err());
+        let wide = vec![vec![RawCell::plain("x"); 4]];
+        assert!(layout_table(wide, &l).is_err());
+        // A rowspan that pushes a later row's cell past the cap is rejected.
+        let pushed = vec![vec![rc("a", 3, 2)], vec![RawCell::plain("b")]];
+        assert!(layout_table(pushed, &l).is_err());
+    }
+
+    #[test]
+    fn parse_span_attr_handles_hostile_values() {
+        assert_eq!(parse_span_attr("2"), 2);
+        assert_eq!(parse_span_attr(" 3 "), 3);
+        assert_eq!(parse_span_attr("0"), 1);
+        assert_eq!(parse_span_attr(""), 1);
+        assert_eq!(parse_span_attr("-2"), 1);
+        assert_eq!(parse_span_attr("+2"), 1);
+        assert_eq!(parse_span_attr("1.5"), 1);
+        assert_eq!(parse_span_attr("abc"), 1);
+        assert_eq!(parse_span_attr("4294967295"), u32::MAX);
+        assert_eq!(parse_span_attr("99999999999999999999999"), u32::MAX);
+    }
+
+    #[test]
+    fn spans_are_omitted_when_empty_and_default_when_absent() {
+        let json = serde_json::to_string(&sample_table()).unwrap();
+        assert!(!json.contains("spans"), "{json}");
+        let old = r#"{"Table":{"rows":[["a"]],"header_row":false}}"#;
+        let b: Block = serde_json::from_str(old).unwrap();
+        assert!(matches!(b, Block::Table { ref spans, .. } if spans.is_empty()));
+        let (rows, spans) = layout_table(merged_raw(), &ParseLimits::default()).unwrap();
+        let t = Block::Table {
+            rows,
+            header_row: true,
+            spans,
+        };
+        let back: Block = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back.plain_text(), t.plain_text());
     }
 }
