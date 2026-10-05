@@ -98,7 +98,17 @@ TOCTOU: validation and extraction both read the same file in a private `mktemp -
 
 ## 12. Items 10, 11, 13 — Windows handoffs, claim check, hygiene
 
-(to be filled)
+**Item 10 (read-only on `apps/windows`).** `PENDING_WINDOWS_CHANGES.md` gained three entries (R1 reading state, R3 typed errors, R7 spans). They name the right files and the right new surface: three new `FfiLibraryItem` fields, `mark_item_opened`, seven new `GistError` variants, the additive `spans` key. Breakage check: `CoreClient.MapGistException` ends with a `_ => new CoreError(CoreErrorKind.Core, e.Message)` arm, so new variants do not throw on an exhaustive switch (they surface as the fixed Rust text); `Map(FfiLibraryItem[])` uses an object initialiser; the Block::Table decoder reads named keys and ignores unknown ones (stated in the R7 entry; I did not execute C#). Entries are accurate and sufficient; the risk is a Windows build of the regenerated bindings, which cannot be run on macOS (not verified). Note a v7 database makes an older Windows build fail with `SchemaTooNew`, which the R1 entry states.
+
+**Item 11 (claims vs source).**
+- "No `ir_version` bump for spans": verified (section 6).
+- "Highest minos 14.0": verified for both static slices and the Debug app (section 7). "0 newer-OS warnings": verified in the Xcode log.
+- "Schema v7, plan says v6": source is `SCHEMA_VERSION = 7`; ADR-021 notes the plan wording is stale.
+- ADR-021 query-cost claim: index-seek for the progress subquery is asserted by an `EXPLAIN QUERY PLAN` test; the "not benchmarked on a large library" caveat is accurate. The "evaluated only for rows with a position" claim matches the `CASE` guard.
+- "366 tests passed": reproduced (`GIST_REQUIRE_PDFIUM=1 cargo test --workspace`: 366 passed, 0 failed). "271 Xcode tests": reproduced, 0 failures.
+- `CLAUDE.md` still says `rust-toolchain.toml` is "pinned to 1.99.0" in the layout block and "1.99.0" in the build section; not re-checked here beyond the build succeeding on the pinned toolchain.
+
+**Item 13 (hygiene).** `Cargo.lock` changed by one dev-dependency edge only (`serde_json` under `gist-parse-pdf`), no crate added or bumped, so `docs/THIRD-PARTY.md`'s crate table did not drift and was not regenerated. `cargo deny check bans licenses sources`: `bans ok, licenses ok, sources ok`. Duplicate-crate warnings (F29) remain the same five. `cargo check -p gist-model --target wasm32-unknown-unknown`: exit 0. F27: the Windows review (`docs/security-review-windows.md`) exists per `CLAUDE.md`; I did not re-review Windows.
 
 ## 13. Item 12 — Fuzzing
 
