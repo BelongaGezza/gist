@@ -898,10 +898,7 @@ mod tests {
     fn overlapping_colspan_is_truncated_never_overlaps() {
         // Row 0's rowspan=2 cell covers col 1 of row 1; row 1's colspan=3
         // cell at col 0 must stop before it.
-        let raw = vec![
-            vec![rc("a", 1, 1), rc("b", 1, 2)],
-            vec![rc("c", 3, 1)],
-        ];
+        let raw = vec![vec![rc("a", 1, 1), rc("b", 1, 2)], vec![rc("c", 3, 1)]];
         let (rows, spans) = layout_table(raw, &ParseLimits::default()).unwrap();
         assert_eq!(rows[1], vec!["c", ""]);
         assert!(spans.iter().all(|s| s.col != 0 || s.row != 1));

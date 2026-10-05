@@ -876,7 +876,9 @@ mod tests {
         blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Table { rows, header_row, .. } => Some((rows, *header_row)),
+                Block::Table {
+                    rows, header_row, ..
+                } => Some((rows, *header_row)),
                 _ => None,
             })
             .collect()

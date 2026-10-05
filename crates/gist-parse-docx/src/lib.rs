@@ -476,7 +476,12 @@ fn parse_document(
                         row_is_header = true;
                     }
                     "gridSpan" | "vMerge" if tbl_depth == 1 && in_cell => {
-                        apply_merge_prop(e, tag_local, &mut cell_colspan, &mut cell_vmerge_continue);
+                        apply_merge_prop(
+                            e,
+                            tag_local,
+                            &mut cell_colspan,
+                            &mut cell_vmerge_continue,
+                        );
                     }
                     _ => {}
                 }
@@ -495,7 +500,12 @@ fn parse_document(
                         push_cell(&mut current_row, gist_model::RawCell::plain(""), limits)?;
                     }
                     "gridSpan" | "vMerge" if tbl_depth == 1 && in_cell => {
-                        apply_merge_prop(e, tag_local, &mut cell_colspan, &mut cell_vmerge_continue);
+                        apply_merge_prop(
+                            e,
+                            tag_local,
+                            &mut cell_colspan,
+                            &mut cell_vmerge_continue,
+                        );
                     }
                     "pStyle" => {
                         for attr in e.attributes().flatten() {
@@ -615,13 +625,15 @@ fn parse_document(
                             // otherwise so columns stay aligned.
                             let any_text = table_rows.iter().flatten().any(|c| !c.text.is_empty());
                             if any_text {
-                                let (rows, spans) =
-                                    gist_model::layout_table(std::mem::take(&mut table_rows), limits)
-                                        .map_err(|e| ParseError::ResourceLimitExceeded {
-                                            limit: e.limit,
-                                            kind: gist_model::LimitKind::TableTooLarge,
-                                            attempted: e.attempted,
-                                        })?;
+                                let (rows, spans) = gist_model::layout_table(
+                                    std::mem::take(&mut table_rows),
+                                    limits,
+                                )
+                                .map_err(|e| ParseError::ResourceLimitExceeded {
+                                    limit: e.limit,
+                                    kind: gist_model::LimitKind::TableTooLarge,
+                                    attempted: e.attempted,
+                                })?;
                                 blocks.push(gist_model::Block::Table {
                                     rows,
                                     header_row: table_header,
@@ -1091,7 +1103,9 @@ mod tests {
             .blocks
             .iter()
             .filter_map(|b| match b {
-                gist_model::Block::Table { rows, header_row, .. } => Some((rows, *header_row)),
+                gist_model::Block::Table {
+                    rows, header_row, ..
+                } => Some((rows, *header_row)),
                 _ => None,
             })
             .collect()
@@ -1212,9 +1226,7 @@ mod tests {
     // ── Merged cells (M7/R7) ─────────────────────────────────────────────
 
     fn merged_tc(text: &str, props: &str) -> String {
-        format!(
-            r#"<w:tc><w:tcPr>{props}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"#
-        )
+        format!(r#"<w:tc><w:tcPr>{props}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"#)
     }
 
     fn spans_of(doc: &gist_model::Document) -> Vec<gist_model::CellSpan> {
