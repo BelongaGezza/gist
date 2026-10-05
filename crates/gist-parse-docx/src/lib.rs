@@ -16,7 +16,11 @@ pub enum ParseError {
     #[error("xml: {0}")]
     Xml(String),
     #[error("resource limit exceeded: {limit} ({attempted} bytes attempted)")]
-    ResourceLimitExceeded { limit: String, attempted: usize },
+    ResourceLimitExceeded {
+        limit: String,
+        attempted: usize,
+        kind: gist_model::LimitKind,
+    },
     #[error("malformed DOCX: {0}")]
     Malformed(String),
 }
@@ -35,6 +39,7 @@ pub fn parse(
     if bytes.len() > limits.max_bytes {
         return Err(ParseError::ResourceLimitExceeded {
             limit: format!("max_bytes={}", limits.max_bytes),
+            kind: gist_model::LimitKind::TooLarge,
             attempted: bytes.len(),
         });
     }
@@ -49,6 +54,7 @@ pub fn parse(
     if archive.len() > limits.max_zip_entries {
         return Err(ParseError::ResourceLimitExceeded {
             limit: format!("max_zip_entries={}", limits.max_zip_entries),
+            kind: gist_model::LimitKind::TooManyEntries,
             attempted: archive.len(),
         });
     }
@@ -392,6 +398,7 @@ fn parse_document(
                 if nesting_depth > limits.max_nesting_depth {
                     return Err(ParseError::ResourceLimitExceeded {
                         limit: format!("max_nesting_depth={}", limits.max_nesting_depth),
+                        kind: gist_model::LimitKind::TooDeeplyNested,
                         attempted: nesting_depth,
                     });
                 }
@@ -448,6 +455,7 @@ fn parse_document(
                         if table_rows.len() >= limits.max_table_rows {
                             return Err(ParseError::ResourceLimitExceeded {
                                 limit: format!("max_table_rows={}", limits.max_table_rows),
+                                kind: gist_model::LimitKind::TableTooLarge,
                                 attempted: table_rows.len() + 1,
                             });
                         }
@@ -664,6 +672,7 @@ fn push_cell(
     if row.len() >= limits.max_table_cols {
         return Err(ParseError::ResourceLimitExceeded {
             limit: format!("max_table_cols={}", limits.max_table_cols),
+            kind: gist_model::LimitKind::TableTooLarge,
             attempted: row.len() + 1,
         });
     }
@@ -787,6 +796,7 @@ fn read_zip_entry_limited(
         if *total_expanded > limits.max_expanded_bytes {
             return Err(ParseError::ResourceLimitExceeded {
                 limit: format!("max_expanded_bytes={}", limits.max_expanded_bytes),
+                kind: gist_model::LimitKind::ExpandedTooLarge,
                 attempted: *total_expanded,
             });
         }

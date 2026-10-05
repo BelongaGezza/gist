@@ -20,7 +20,11 @@ pub enum ParseError {
     #[error("this ePub is DRM-protected and cannot be imported")]
     DrmProtected,
     #[error("resource limit exceeded: {limit} ({attempted} bytes attempted)")]
-    ResourceLimitExceeded { limit: String, attempted: usize },
+    ResourceLimitExceeded {
+        limit: String,
+        attempted: usize,
+        kind: gist_model::LimitKind,
+    },
     #[error("malformed ePub: {0}")]
     Malformed(String),
 }
@@ -80,6 +84,7 @@ pub fn parse(
     if bytes.len() > limits.max_bytes {
         return Err(ParseError::ResourceLimitExceeded {
             limit: format!("max_bytes={}", limits.max_bytes),
+            kind: gist_model::LimitKind::TooLarge,
             attempted: bytes.len(),
         });
     }
@@ -94,6 +99,7 @@ pub fn parse(
     if archive.len() > limits.max_zip_entries {
         return Err(ParseError::ResourceLimitExceeded {
             limit: format!("max_zip_entries={}", limits.max_zip_entries),
+            kind: gist_model::LimitKind::TooManyEntries,
             attempted: archive.len(),
         });
     }
@@ -109,6 +115,7 @@ pub fn parse(
     if spine_items.len() > limits.max_pages {
         return Err(ParseError::ResourceLimitExceeded {
             limit: format!("max_pages={}", limits.max_pages),
+            kind: gist_model::LimitKind::TooManyPages,
             attempted: spine_items.len(),
         });
     }
@@ -255,6 +262,7 @@ fn read_capped(
         if *accumulated > max_bytes {
             return Err(ParseError::ResourceLimitExceeded {
                 limit: format!("max_expanded_bytes={max_bytes}"),
+                kind: gist_model::LimitKind::ExpandedTooLarge,
                 attempted: *accumulated,
             });
         }
@@ -332,6 +340,7 @@ fn xhtml_to_blocks(xhtml: &str, limits: &ParseLimits) -> Result<Vec<Block>, Pars
                 if depth > max_depth {
                     return Err(ParseError::ResourceLimitExceeded {
                         limit: format!("max_nesting_depth={max_depth}"),
+                        kind: gist_model::LimitKind::TooDeeplyNested,
                         attempted: depth,
                     });
                 }
@@ -356,6 +365,7 @@ fn xhtml_to_blocks(xhtml: &str, limits: &ParseLimits) -> Result<Vec<Block>, Pars
                             if table_rows.len() >= limits.max_table_rows {
                                 return Err(ParseError::ResourceLimitExceeded {
                                     limit: format!("max_table_rows={}", limits.max_table_rows),
+                                    kind: gist_model::LimitKind::TableTooLarge,
                                     attempted: table_rows.len() + 1,
                                 });
                             }
@@ -598,6 +608,7 @@ fn push_table_cell(
     if row.len() >= limits.max_table_cols {
         return Err(ParseError::ResourceLimitExceeded {
             limit: format!("max_table_cols={}", limits.max_table_cols),
+            kind: gist_model::LimitKind::TableTooLarge,
             attempted: row.len() + 1,
         });
     }

@@ -22,6 +22,11 @@ final class CoreClient: ObservableObject {
     /// start of every `importFile`.
     @Published var pdfEncryptedFile: URL?
     @Published var pdfUnavailableFile: URL?
+    /// Set (instead of `error`) when an import is rejected by one of GIST's
+    /// resource limits (M7 R3): a specific, honest message built from the typed
+    /// `GistError.ResourceLimit*` case by `ImportLimitMessage` -- never from
+    /// message text. Cleared at the start of every `importFile`/`importUrl`.
+    @Published var importLimitMessage: String?
     /// An image-only (scanned) PDF: the Library presents the existing OCR
     /// import sheet pre-loaded with this file instead of showing an error.
     @Published var pdfOcrCandidate: URL?
@@ -344,6 +349,7 @@ final class CoreClient: ObservableObject {
     func importUrl(urlString: String) async {
         guard let core else { return }
         drmProtectedFile = nil
+        importLimitMessage = nil
         do {
             let id = try core.importUrl(url: urlString)
             error = nil
@@ -356,6 +362,11 @@ final class CoreClient: ObservableObject {
                 // PDF cases are only produced by `importFile`; unreachable here.
                 .PdfEncrypted, .PdfNoTextLayer, .PdfUnavailable:
                 error = "\(gistError)"
+            case .ResourceLimitTooLarge, .ResourceLimitTooManyPages, .ResourceLimitTooManyEntries,
+                .ResourceLimitTooDeeplyNested, .ResourceLimitContentTooLarge,
+                .ResourceLimitTableTooLarge, .ResourceLimitOther:
+                importLimitMessage = ImportLimitMessage.message(
+                    for: gistError, name: URL(string: urlString)?.host)
             }
         } catch {
             self.error = "\(error)"
@@ -494,6 +505,7 @@ final class CoreClient: ObservableObject {
         pdfEncryptedFile = nil
         pdfUnavailableFile = nil
         pdfOcrCandidate = nil
+        importLimitMessage = nil
         do {
             let id = try core.importFile(path: url.path)
             error = nil
@@ -511,6 +523,11 @@ final class CoreClient: ObservableObject {
                 pdfOcrCandidate = url
             case .Core, .ChecksumMismatch, .InternalPanic:
                 error = "\(gistError)"
+            case .ResourceLimitTooLarge, .ResourceLimitTooManyPages, .ResourceLimitTooManyEntries,
+                .ResourceLimitTooDeeplyNested, .ResourceLimitContentTooLarge,
+                .ResourceLimitTableTooLarge, .ResourceLimitOther:
+                importLimitMessage = ImportLimitMessage.message(
+                    for: gistError, name: url.lastPathComponent)
             }
         } catch {
             self.error = "\(error)"
@@ -804,7 +821,9 @@ final class CoreClient: ObservableObject {
             await reloadItems(clearErrorOnSuccess: false)
             return .success(itemId: result.itemId, pageConfidences: result.pageConfidences)
         } catch let gistError as GistError {
-            let message = "\(gistError)"
+            let message =
+                ImportLimitMessage.message(for: gistError, name: String(localized: "This scan"))
+                ?? "\(gistError)"
             self.error = message
             return .failure(message)
         } catch {

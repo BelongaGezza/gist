@@ -476,6 +476,17 @@ struct LibraryView: View {
                 Text("PDF support is unavailable in this build of GIST, so this file couldn't be imported. Other formats still work.")
             }
             .alert(
+                "Can't Import This File",
+                isPresented: Binding(
+                    get: { core.importLimitMessage != nil },
+                    set: { if !$0 { core.importLimitMessage = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { core.importLimitMessage = nil }
+            } message: {
+                Text(core.importLimitMessage ?? "")
+            }
+            .alert(
                 "Error",
                 isPresented: Binding(
                     get: { core.error != nil },

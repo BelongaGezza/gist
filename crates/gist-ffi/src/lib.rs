@@ -43,12 +43,57 @@ pub enum GistError {
     /// pdfium could not be loaded in this build/bundle.
     #[error("PDF support is unavailable in this build")]
     PdfUnavailable,
+    // ── Typed resource-limit errors (M7 R3) ────────────────────────────────
+    // One flat variant per `gist_model::LimitKind` (uniffi `flat_error`
+    // cannot carry a payload enum), so Swift/C# switch on the case and show
+    // an honest, specific message. Messages are fixed text: no paths, no
+    // limit numbers, no panic payloads.
+    /// The input is larger than GIST's per-file size limit.
+    #[error("this file is too large for GIST's import limits")]
+    ResourceLimitTooLarge,
+    /// More pages (or chapters) than GIST's page limit.
+    #[error("this document has too many pages for GIST's import limits")]
+    ResourceLimitTooManyPages,
+    /// More internal archive entries than GIST's limit (epub/docx).
+    #[error("this file contains too many internal parts for GIST's import limits")]
+    ResourceLimitTooManyEntries,
+    /// Structure nested deeper than GIST's limit.
+    #[error("this document is nested too deeply for GIST's import limits")]
+    ResourceLimitTooDeeplyNested,
+    /// Extracted/decompressed content exceeds GIST's size budget.
+    #[error("this document's content is too large for GIST's import limits")]
+    ResourceLimitContentTooLarge,
+    /// A table with too many rows or columns.
+    #[error("this document contains a table that is too large for GIST's import limits")]
+    ResourceLimitTableTooLarge,
+    /// Any other limit.
+    #[error("this document exceeds GIST's import limits")]
+    ResourceLimitOther,
     #[error("internal error")]
     InternalPanic,
 }
 
+/// Maps the importers' typed [`gist_model::LimitKind`] to the matching flat
+/// `GistError` case. Exhaustive on purpose: adding a `LimitKind` forces a
+/// decision here.
+fn limit_kind_to_error(kind: gist_model::LimitKind) -> GistError {
+    use gist_model::LimitKind as K;
+    match kind {
+        K::TooLarge => GistError::ResourceLimitTooLarge,
+        K::TooManyPages => GistError::ResourceLimitTooManyPages,
+        K::TooManyEntries => GistError::ResourceLimitTooManyEntries,
+        K::TooDeeplyNested => GistError::ResourceLimitTooDeeplyNested,
+        K::ExpandedTooLarge => GistError::ResourceLimitContentTooLarge,
+        K::TableTooLarge => GistError::ResourceLimitTableTooLarge,
+        K::Other => GistError::ResourceLimitOther,
+    }
+}
+
 impl From<gist_core::CoreError> for GistError {
     fn from(e: gist_core::CoreError) -> Self {
+        if let Some(kind) = e.limit_kind() {
+            return limit_kind_to_error(kind);
+        }
         match e {
             gist_core::CoreError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
                 GistError::ChecksumMismatch { path }
@@ -65,6 +110,7 @@ impl From<gist_core::ImportError> for GistError {
             gist_core::ImportError::PdfEncrypted => GistError::PdfEncrypted,
             gist_core::ImportError::PdfNoTextLayer => GistError::PdfNoTextLayer,
             gist_core::ImportError::PdfUnavailable(_) => GistError::PdfUnavailable,
+            gist_core::ImportError::ResourceLimitExceeded { kind, .. } => limit_kind_to_error(kind),
             gist_core::ImportError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
                 GistError::ChecksumMismatch { path }
             }
@@ -1698,6 +1744,58 @@ mod tests {
         let core_err = gist_core::CoreError::NotFound("missing-id".to_string());
         let ffi_err = GistError::from(core_err);
         assert!(matches!(ffi_err, GistError::Core(_)));
+    }
+
+    // ── Typed resource-limit errors (M7 R3) ──────────────────────────────
+
+    /// Every `LimitKind` must reach its own flat `GistError` case, and the
+    /// message must be fixed text (no limit numbers, no paths).
+    #[test]
+    fn every_limit_kind_maps_to_a_distinct_path_free_gist_error() {
+        use gist_model::LimitKind as K;
+        let cases = [
+            (K::TooLarge, "ResourceLimitTooLarge"),
+            (K::TooManyPages, "ResourceLimitTooManyPages"),
+            (K::TooManyEntries, "ResourceLimitTooManyEntries"),
+            (K::TooDeeplyNested, "ResourceLimitTooDeeplyNested"),
+            (K::ExpandedTooLarge, "ResourceLimitContentTooLarge"),
+            (K::TableTooLarge, "ResourceLimitTableTooLarge"),
+            (K::Other, "ResourceLimitOther"),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for (kind, name) in cases {
+            let ffi_err = GistError::from(gist_core::ImportError::ResourceLimitExceeded {
+                limit: "max_pages=2000 /Users/someone/secret.pdf".to_string(),
+                attempted: 123_456,
+                kind,
+            });
+            let dbg = format!("{ffi_err:?}");
+            assert_eq!(dbg, name);
+            let msg = ffi_err.to_string();
+            assert!(!msg.contains("/Users") && !msg.contains("123456"), "{msg}");
+            assert!(seen.insert(dbg));
+        }
+    }
+
+    /// End to end through `GistCore`: an oversized plain-text file is
+    /// rejected with the typed variant, not `Core(String)`.
+    #[test]
+    fn import_txt_oversized_file_surfaces_typed_limit_error_over_ffi() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let big = dir.join("big.txt");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(gist_model::ParseLimits::default().max_bytes as u64 + 1)
+            .unwrap();
+        let core = GistCore::new(
+            dir.join("db.sqlite").to_string_lossy().into_owned(),
+            dir.join("store").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let err = core
+            .import_file(big.to_string_lossy().into_owned())
+            .unwrap_err();
+        assert!(matches!(err, GistError::ResourceLimitTooLarge), "{err:?}");
     }
 
     fn corrupt_file(path: &std::path::Path) {

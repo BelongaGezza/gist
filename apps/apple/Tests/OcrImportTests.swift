@@ -292,8 +292,7 @@ final class OcrImportTests: XCTestCase {
             return
         }
         XCTAssertTrue(
-            message.localizedCaseInsensitiveContains("resource limit")
-                || message.localizedCaseInsensitiveContains("limit exceeded"),
+            message.localizedCaseInsensitiveContains("too large for GIST's import limits"),
             "expected a resource-limit error, got: \(message)"
         )
     }
