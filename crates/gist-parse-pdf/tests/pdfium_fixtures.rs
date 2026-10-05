@@ -284,7 +284,7 @@ fn pdf_text_budget_is_pdf_specific_and_never_exceeds_the_global_limit() {
     assert_eq!(text_budget(&small), 1000);
     // Headroom: a very text-dense 2000-page book (6000 chars/page, even at
     // 4 bytes per char) is far below the budget.
-    assert!(2000 * 6000 * 4 < MAX_PDF_TEXT_BYTES);
+    const { assert!(2000 * 6000 * 4 < MAX_PDF_TEXT_BYTES) };
 }
 
 #[test]
