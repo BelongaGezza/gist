@@ -958,4 +958,84 @@ mod tests {
             let _ = xhtml_to_blocks(x, &ParseLimits::default());
         }
     }
+
+    // ── Merged cells (M7/R7) ─────────────────────────────────────────────
+
+    fn merged_table(blocks: &[Block]) -> (Vec<Vec<String>>, Vec<gist_model::CellSpan>) {
+        blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table { rows, spans, .. } => Some((rows.clone(), spans.clone())),
+                _ => None,
+            })
+            .expect("a table")
+    }
+
+    #[test]
+    fn test_merged_fixture_has_aligned_grid_and_spans() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/epub/with_merged_cells.epub"
+        ))
+        .unwrap();
+        let doc = parse(&bytes, "t", &ParseLimits::default()).unwrap();
+        let (rows, spans) = merged_table(&doc.sections[0].blocks);
+        assert_eq!(
+            rows,
+            vec![
+                vec!["Sales", "", "Notes"],
+                vec!["North", "100", "Strong"],
+                vec!["South", "80", ""],
+                vec!["Grand total", "", "180"],
+            ]
+        );
+        assert_eq!(spans.len(), 3);
+        assert_eq!((spans[1].row, spans[1].col, spans[1].rowspan), (1, 2, 2));
+    }
+
+    #[test]
+    fn test_hostile_colspan_is_rejected_and_garbage_values_are_one() {
+        for v in ["4294967295", "99999999999999999999", "65"] {
+            let x = format!("<body><table><tr><td colspan=\"{v}\">x</td></tr></table></body>");
+            assert!(
+                matches!(
+                    xhtml_to_blocks(&x, &ParseLimits::default()),
+                    Err(ParseError::ResourceLimitExceeded {
+                        kind: gist_model::LimitKind::TableTooLarge,
+                        ..
+                    })
+                ),
+                "colspan={v}"
+            );
+        }
+        for v in ["-1", "abc", "0", "", "1.5"] {
+            let x = format!(
+                "<body><table><tr><td colspan=\"{v}\" rowspan=\"{v}\">a</td><td>b</td></tr></table></body>"
+            );
+            let blocks = xhtml_to_blocks(&x, &ParseLimits::default()).unwrap();
+            let (rows, spans) = merged_table(&blocks);
+            assert_eq!(rows, vec![vec!["a", "b"]], "value {v:?}");
+            assert!(spans.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_rowspan_past_last_row_is_clamped_and_overlap_is_truncated() {
+        let x = "<body><table><tr><td rowspan=\"4294967295\">a</td><td>b</td></tr>\
+                 <tr><td>c</td></tr></table></body>";
+        let blocks = xhtml_to_blocks(x, &ParseLimits::default()).unwrap();
+        let (rows, spans) = merged_table(&blocks);
+        // `a` is clamped to the 2 rows that exist; row 1's `c` skips col 0.
+        assert_eq!(rows, vec![vec!["a", "b"], vec!["", "c"]]);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].rowspan, 2);
+
+        // A colspan running into a slot covered from above is truncated.
+        let x = "<body><table><tr><td>a</td><td rowspan=\"2\">b</td></tr>\
+                 <tr><td colspan=\"3\">c</td></tr></table></body>";
+        let blocks = xhtml_to_blocks(x, &ParseLimits::default()).unwrap();
+        let (rows, spans) = merged_table(&blocks);
+        assert_eq!(rows, vec![vec!["a", "b"], vec!["c", ""]]);
+        assert_eq!(spans.len(), 1, "c truncated to 1 column: {spans:?}");
+    }
 }
