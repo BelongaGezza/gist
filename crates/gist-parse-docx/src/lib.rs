@@ -383,9 +383,12 @@ fn parse_document(
     // `Block::Table`; a table nested inside a cell is flattened into that
     // cell's text (its paragraphs append to the enclosing cell).
     let mut tbl_depth = 0usize;
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut table_rows: Vec<Vec<gist_model::RawCell>> = Vec::new();
     let mut table_header = false;
-    let mut current_row: Vec<String> = Vec::new();
+    let mut current_row: Vec<gist_model::RawCell> = Vec::new();
+    // Merge properties of the cell being read (w:gridSpan / w:vMerge).
+    let mut cell_colspan: u32 = 1;
+    let mut cell_vmerge_continue = false;
     let mut row_is_header = false;
     let mut in_row = false;
     let mut in_cell = false;
@@ -466,9 +469,14 @@ fn parse_document(
                     "tc" if tbl_depth == 1 && in_row => {
                         cell_parts.clear();
                         in_cell = true;
+                        cell_colspan = 1;
+                        cell_vmerge_continue = false;
                     }
                     "tblHeader" if tbl_depth == 1 && in_row => {
                         row_is_header = true;
+                    }
+                    "gridSpan" | "vMerge" if tbl_depth == 1 && in_cell => {
+                        apply_merge_prop(e, tag_local, &mut cell_colspan, &mut cell_vmerge_continue);
                     }
                     _ => {}
                 }
@@ -484,7 +492,10 @@ fn parse_document(
                         row_is_header = true;
                     }
                     "tc" if tbl_depth == 1 && in_row && !in_cell => {
-                        push_cell(&mut current_row, String::new(), limits)?;
+                        push_cell(&mut current_row, gist_model::RawCell::plain(""), limits)?;
+                    }
+                    "gridSpan" | "vMerge" if tbl_depth == 1 && in_cell => {
+                        apply_merge_prop(e, tag_local, &mut cell_colspan, &mut cell_vmerge_continue);
                     }
                     "pStyle" => {
                         for attr in e.attributes().flatten() {
@@ -574,7 +585,15 @@ fn parse_document(
                         let cell = normalize_cell_text(&cell_parts.join(" "));
                         cell_parts.clear();
                         in_cell = false;
-                        push_cell(&mut current_row, cell, limits)?;
+                        let raw = gist_model::RawCell {
+                            text: cell,
+                            colspan: cell_colspan,
+                            rowspan: 1,
+                            v_merge_continue: cell_vmerge_continue,
+                        };
+                        cell_colspan = 1;
+                        cell_vmerge_continue = false;
+                        push_cell(&mut current_row, raw, limits)?;
                     }
                     "tr" if tbl_depth == 1 && in_row => {
                         in_row = false;
@@ -594,11 +613,19 @@ fn parse_document(
                             // Drop a table with no text at all (layout-only
                             // tables); keep ragged/empty-cell structure
                             // otherwise so columns stay aligned.
-                            let any_text = table_rows.iter().flatten().any(|c| !c.is_empty());
+                            let any_text = table_rows.iter().flatten().any(|c| !c.text.is_empty());
                             if any_text {
+                                let (rows, spans) =
+                                    gist_model::layout_table(std::mem::take(&mut table_rows), limits)
+                                        .map_err(|e| ParseError::ResourceLimitExceeded {
+                                            limit: e.limit,
+                                            kind: gist_model::LimitKind::TableTooLarge,
+                                            attempted: e.attempted,
+                                        })?;
                                 blocks.push(gist_model::Block::Table {
-                                    rows: std::mem::take(&mut table_rows),
+                                    rows,
                                     header_row: table_header,
+                                    spans,
                                 });
                             }
                             table_rows.clear();
@@ -663,10 +690,34 @@ fn parse_document(
     Ok((blocks, has_tracked_changes))
 }
 
+/// Read `w:gridSpan` / `w:vMerge` (Start or Empty event) into the cell's
+/// merge state. `vMerge` with `w:val="restart"` begins a vertical merge (an
+/// ordinary cell for layout); `vMerge` with no `val`, or any other value, is
+/// a continuation. Hostile `gridSpan` values are bounded by `layout_table`.
+fn apply_merge_prop(
+    e: &quick_xml::events::BytesStart<'_>,
+    tag_local: &str,
+    colspan: &mut u32,
+    vmerge_continue: &mut bool,
+) {
+    let mut val: Option<String> = None;
+    for attr in e.attributes().flatten() {
+        let k = attr.key.as_ref();
+        if k.rsplit(':').next().unwrap_or(k) == "val" {
+            val = Some(attr.value.to_string());
+        }
+    }
+    if tag_local == "gridSpan" {
+        *colspan = gist_model::parse_span_attr(val.as_deref().unwrap_or("1"));
+    } else {
+        *vmerge_continue = !matches!(val.as_deref(), Some("restart"));
+    }
+}
+
 /// Append one cell to `row`, enforcing `max_table_cols` before the push.
 fn push_cell(
-    row: &mut Vec<String>,
-    cell: String,
+    row: &mut Vec<gist_model::RawCell>,
+    cell: gist_model::RawCell,
     limits: &gist_model::ParseLimits,
 ) -> Result<(), ParseError> {
     if row.len() >= limits.max_table_cols {
@@ -1040,7 +1091,7 @@ mod tests {
             .blocks
             .iter()
             .filter_map(|b| match b {
-                gist_model::Block::Table { rows, header_row } => Some((rows, *header_row)),
+                gist_model::Block::Table { rows, header_row, .. } => Some((rows, *header_row)),
                 _ => None,
             })
             .collect()

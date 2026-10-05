@@ -529,11 +529,19 @@ fn extract_table(
     depth: usize,
     limits: &ParseLimits,
 ) -> Result<Option<Block>, ParseError> {
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut raw: Vec<Vec<gist_model::RawCell>> = Vec::new();
     let mut header_row = false;
-    collect_table_rows(table, depth, limits, false, &mut rows, &mut header_row)?;
-    if rows.iter().flatten().any(|c| !c.is_empty()) {
-        Ok(Some(Block::Table { rows, header_row }))
+    collect_table_rows(table, depth, limits, false, &mut raw, &mut header_row)?;
+    if raw.iter().flatten().any(|c| !c.text.is_empty()) {
+        // Merged cells (colspan/rowspan): bounded layout, ADR-019 addendum 2.
+        let (rows, spans) = gist_model::layout_table(raw, limits).map_err(|_| {
+            ParseError::ResourceLimitExceeded(gist_model::LimitKind::TableTooLarge)
+        })?;
+        Ok(Some(Block::Table {
+            rows,
+            header_row,
+            spans,
+        }))
     } else {
         Ok(None)
     }
@@ -544,7 +552,7 @@ fn collect_table_rows(
     depth: usize,
     limits: &ParseLimits,
     in_thead: bool,
-    rows: &mut Vec<Vec<String>>,
+    rows: &mut Vec<Vec<gist_model::RawCell>>,
     header_row: &mut bool,
 ) -> Result<(), ParseError> {
     if depth > limits.max_nesting_depth {
@@ -567,7 +575,7 @@ fn collect_table_rows(
                         gist_model::LimitKind::TableTooLarge,
                     ));
                 }
-                let mut row: Vec<String> = Vec::new();
+                let mut row: Vec<gist_model::RawCell> = Vec::new();
                 let mut has_th = false;
                 for cell in child_el.children() {
                     let Some(cell_el) = scraper::ElementRef::wrap(cell) else {
@@ -585,7 +593,18 @@ fn collect_table_rows(
                     has_th |= name == "th";
                     let mut text = String::new();
                     cell_text(cell_el, &mut text, depth + 2, limits.max_nesting_depth)?;
-                    row.push(normalize_cell_text(&text));
+                    let span = |attr: &str| {
+                        cell_el
+                            .value()
+                            .attr(attr)
+                            .map_or(1, gist_model::parse_span_attr)
+                    };
+                    row.push(gist_model::RawCell {
+                        text: normalize_cell_text(&text),
+                        colspan: span("colspan"),
+                        rowspan: span("rowspan"),
+                        v_merge_continue: false,
+                    });
                 }
                 if !row.is_empty() {
                     if rows.is_empty() && (in_thead || has_th) {
@@ -972,7 +991,7 @@ mod tests {
         blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Table { rows, header_row } => Some((rows, *header_row)),
+                Block::Table { rows, header_row, .. } => Some((rows, *header_row)),
                 _ => None,
             })
             .collect()
