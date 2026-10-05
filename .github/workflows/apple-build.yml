@@ -102,6 +102,11 @@ jobs:
       - name: Fetch pinned pdfium
         run: ./tools/fetch-pdfium.sh
 
+      # Fails if a user-facing string literal is missing from
+      # Localizable.xcstrings (the build does not write keys back).
+      - name: Check string catalog coverage
+        run: ./tools/check-localisation.sh
+
       - name: xcodegen generate
         working-directory: apps/apple
         run: xcodegen generate

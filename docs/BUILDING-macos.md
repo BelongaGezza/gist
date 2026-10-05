@@ -95,6 +95,27 @@ signing identity set up and specifically want to test a signed build:
 xcodebuild -scheme GISTmacOS build test CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
 ```
 
+## Localisation
+
+The source language is en-GB and no other language exists. UI strings live in
+`apps/apple/Shared/Localizable.xcstrings`. The build only *emits* extracted keys
+(`SWIFT_EMIT_LOC_STRINGS`); it does not write them back into the catalog, so new
+user-visible strings must be added to the catalog by hand (key = the English text;
+interpolations become `%lld` / `%@`, and a key with two or more arguments also needs an
+`en-GB` `stringUnit` using positional specifiers such as `%1$lld`, matching existing entries).
+
+- Literals passed directly to `Text`, `Button`, `Label`, `.help`, `.accessibilityLabel`, alert
+  titles and so on are localised automatically. Anything built into a plain `String` (enum
+  `label` properties, `String` parameters, `+` concatenation) bypasses localisation: wrap it in
+  `String(localized: "…")` with interpolation, never concatenation.
+- `tools/check-localisation.sh` (bash + perl, no python3) fails when a string literal passed to a
+  known user-facing API is missing from the catalog. It runs in `apple-build.yml`. Limits: it
+  cannot see strings that were already flattened to a `String` variable, does not check that
+  `%lld` / `%@` matches the interpolated type, and does not flag unused catalog keys.
+- Plural forms are currently spelled out with `\(n == 1 ? "" : "s")` interpolations rather than
+  catalog plural variations. That is adequate for English only and must be redone before any
+  other language is added.
+
 ## Known environment caveats
 
 - **A signed, notarized Release build needs a real Apple Developer ID certificate and App Store

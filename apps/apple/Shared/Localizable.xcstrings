@@ -1,6 +1,78 @@
 {
   "sourceLanguage" : "en-GB",
   "strings" : {
+    "%@ is password-protected and can't be imported. GIST never attempts to bypass protection." : {
+
+    },
+    "Choose one or more page photos or scans (JPEG, PNG, HEIC, TIFF). GIST runs on-device text recognition on each page, then lets you review and correct the results before adding it to your library." : {
+
+    },
+    "Couldn't render page %lld of this PDF." : {
+
+    },
+    "empty" : {
+      "comment" : "Accessibility value read for a table cell that has no text."
+    },
+    "Fast" : {
+      "comment" : "Read-aloud speed option."
+    },
+    "Faster" : {
+      "comment" : "Read-aloud speed option."
+    },
+    "Normal" : {
+      "comment" : "Read-aloud speed option."
+    },
+    "Page %lld of this PDF is too large to scan." : {
+
+    },
+    "Preparing PDF pages — page %lld of %lld" : {
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Preparing PDF pages — page %1$lld of %2$lld"
+          }
+        }
+      }
+    },
+    "Row %lld of %lld, column %lld of %lld" : {
+      "comment" : "Accessibility value for a table cell: its row and column position.",
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Row %1$lld of %2$lld, column %3$lld of %4$lld"
+          }
+        }
+      }
+    },
+    "Slow" : {
+      "comment" : "Read-aloud speed option."
+    },
+    "Slower" : {
+      "comment" : "Read-aloud speed option."
+    },
+    "Table, %lld rows, %lld columns" : {
+      "comment" : "Accessibility label for a table: its row and column counts.",
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Table, %1$lld rows, %2$lld columns"
+          }
+        }
+      }
+    },
+    "This PDF has %lld pages; GIST's limit is %lld." : {
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF has %1$lld pages; GIST's limit is %2$lld."
+          }
+        }
+      }
+    },
     "_No annotations yet._" : {
 
     },

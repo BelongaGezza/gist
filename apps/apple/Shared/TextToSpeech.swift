@@ -39,11 +39,11 @@ enum TtsRate: String, CaseIterable, Identifiable, Equatable {
 
     var label: String {
         switch self {
-        case .slower: return "Slower"
-        case .slow: return "Slow"
-        case .normal: return "Normal"
-        case .fast: return "Fast"
-        case .faster: return "Faster"
+        case .slower: return String(localized: "Slower")
+        case .slow: return String(localized: "Slow")
+        case .normal: return String(localized: "Normal")
+        case .fast: return String(localized: "Fast")
+        case .faster: return String(localized: "Faster")
         }
     }
 
