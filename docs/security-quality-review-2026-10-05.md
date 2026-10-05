@@ -46,7 +46,10 @@ No High or Medium defect found. Schema v7, the typed limit errors, the PDF text 
 
 ## 8. Item 6 — fetch-pdfium.sh
 
-(to be filled)
+Read in full (`tools/fetch-pdfium.sh`). Fail-closed paths: archive SHA-256 mismatch exits 1 before any extraction; `validate_archive` runs on the verified archive before `rm -rf`/`tar -xzf`; the extracted `lib/libpdfium.dylib` is re-hashed against `PDFIUM_DYLIB_SHA256` and `artifacts/pdfium` is removed on mismatch; the idempotent short-circuit re-hashes the on-disk dylib every run (the stamp is only written, never trusted). `curl` has `--proto '=https' --proto-redir '=https' --tlsv1.2`. Validation covers absolute, `..`, backslash/drive-letter, control-character names, entry count (cap 500), and non-`-`/`d` types plus GNU `link to` / `->` spellings. Running `./tools/fetch-pdfium.sh` printed "archive validated: 48 entries" and "verified and extracted".
+TOCTOU: validation and extraction both read the same file in a private `mktemp -d` directory after the hash check; swapping it needs same-user write access (outside the threat model). Residual: only the dylib is hash-pinned individually; headers/licences extracted beside it are covered only by the archive hash.
+
+**F71 (defect, fixed in b518d7f).** `bash tools/test-fetch-pdfium-guard.sh` on macOS: 12 ok, 1 `FAIL - fixture writer produced a tar that does not extract correctly`, with `cat: .../x/lib/libpdfium.dylib: Permission denied` and `rm: ... Directory not empty` leaving a temp tree. Cause: `write_entry` wrote mode 0644 for every entry including directories (typeflag 5), so bsdtar created `lib/` without a search bit. (It passes on Git Bash for Windows, where modes are not enforced.) Fix: 0755 for directories and `chmod -R u+rwx` before cleanup; rerun gives 13/13 ok. The self-test is still not wired into CI (F52).
 
 ## 9. Item 7 — Localisation guard
 
