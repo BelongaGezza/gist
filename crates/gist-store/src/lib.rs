@@ -4491,7 +4491,9 @@ mod tests {
 
         let loaded = store.get_item(&id).unwrap().expect("item");
         match &loaded.sections[0].blocks[1] {
-            gist_model::Block::Table { rows, header_row, .. } => {
+            gist_model::Block::Table {
+                rows, header_row, ..
+            } => {
                 assert!(*header_row);
                 assert_eq!(rows[1], vec!["Zucchinimarrow", "Green"]);
             }
