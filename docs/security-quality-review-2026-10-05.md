@@ -41,7 +41,11 @@ No High or Medium defect found. Schema v7, the typed limit errors, the PDF text 
 
 ## 5. Item 3 — PDF text budget and find_gutters
 
-(to be filled)
+- `text_budget(limits) = min(max_expanded_bytes, MAX_PDF_TEXT_BYTES = 64 MiB)`. Order in `pdfium_backend::extract`: `max_pages` before any page loads; per page, pdfium's char count `n` is checked against `MAX_GLYPHS_PER_PAGE` and `remaining_chars` before `glyphs.reserve(n)`, then `remaining_chars` is reduced; `lib.rs` re-checks UTF-8 text bytes per page and `build_document` checks the total. Chars vs UTF-8 bytes: the char check bounds allocation, the byte check catches multi-byte text at most one page (<= 8 MB) late.
+- `checked_page_index` uses `PdfPageIndex::try_from` (u16); out-of-range is a `TooManyPages` error, not a wrap (unit test covers 65 536).
+- Consuming `pages.into_iter().zip(mask)` compiles without use-after-move; output unchanged (existing layout tests pass).
+- **`find_gutters` rewrite**: `left = x1s.partition_point(|v| v <= gx0+bw)` equals the old `count(x1 <= gx0+bw)` and `right = n - x0s.partition_point(|v| v < gx1-bw)` equals `count(x0 >= gx1-bw)` for finite values; `-0.0`/`0.0` compare equal under the predicates so `total_cmp` ordering cannot differ. Independent check: I temporarily added a differential test (reverted, not committed) running the old implementation against the new on 40 000 adversarial layouts (integer-quantised coordinates to force ties with bin edges, zero-width and negative-x fragments, 8-67 fragments, page widths 612/0/-5/1e9/1): all equal, 14 800 of them with non-empty gutters.
+- No defect found. The 64 MiB figure rests on the role's own memory measurements on synthetic PDFs; I did not re-measure.
 
 ## 6. Item 4 — Merged-cell tables
 
