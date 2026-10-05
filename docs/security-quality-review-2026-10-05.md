@@ -83,7 +83,12 @@ TOCTOU: validation and extraction both read the same file in a private `mktemp -
 
 ## 10. Item 8 — Paginated view
 
-(to be filled)
+- **Position-meaning rule holds.** `grep` for `FlowScrollPositionStore`, `saveProgress`, `persistsFlowScrollFraction`: the paged layout declares `persistsFlowScrollFraction = false`; `FlowReaderContainer` (line 89) writes the flow store only when that is true; `goToPage` writes only `PagedPositionStore`; the only reads of the flow store are in `seedProgress` (first entry, read-only). `core.saveProgress` is called only from `RsvpView`. `markItemOpened` is the only core call from either flow layout (via `openFlowDocument`).
+- **Paginator robustness** (`Paginator.swift`): page height and spacing pass through `finite()` and a 40 pt floor; line/atomic heights are finite-clamped; NaN/inf/zero cannot loop, because every page places at least one element and a `cursor <= position` guard forces progress (a degenerate duplicate `lineStarts` list could make that guard skip the rest of a block, losing display of text, never hanging; the measurer emits strictly increasing starts). `pageIndex`/`pieces`/`clampedPage` clamp. `PagedPositionStore.load` clamps to >= 0 and `PagePosition.clamped` clamps to the document; non-`Int` values read as nil.
+- **Annotation anchors** stay ADR-003 `(section id, UTF-8 byte offset)`; conversion goes through `PagedDocumentIndex` and does not involve page size. Mid-scalar byte offsets map to the end of the block (acceptable; anchors fall on scalar boundaries).
+- No force unwraps or `try!` in the three new Swift files (`grep`). Repagination runs `.task(id:)` with a 120 ms debounce, a detached measuring task, and `guard !Task.isCancelled` before publishing results, so a stale result is discarded; the stale detached task still runs to completion (F74).
+- **Findings:** F72 (O(N^2) `position(forAnchorSection:)`), F73 (per-cell `TableSpanMap`), F74 (per-cell `NSLayoutManager` in the table estimate; `NSFontManager.shared` off main), F78 (linear `firstLine` scan). Also `pieceView` recomputes `blockByteOffset` per rendered piece (O(index)), the same cost the scroll view already has. A single multi-megabyte paragraph builds an `AttributedString` for the whole block on every page render before slicing; unmeasured, no display here.
+- No display access: layout fidelity, clipping and slack are untested by me (see `docs/qa-manual-clickthrough-m3.md`).
 
 ## 11. Item 9 — PDF isolation spike
 
