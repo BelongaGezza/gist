@@ -73,16 +73,16 @@ Operational lessons from M6 to apply: keep agent tool calls small and run long c
 
 | # | Track | Role | Scope | Depends on | Status |
 |---|---|---|---|---|---|
-| R1 | A: v1.0 completeness | Rust+Swift — reading-state model and the missing sort keys (type / last read / progress) | ADR, `gist-store` schema v6 + migration, `gist-core`/`gist-ffi`, `CoreClient`, `LibraryView`/`CollectionDetailView`, row progress UI, tests | D2, D7 | Not started (D2: `last_opened_at` only; progress from RSVP) |
+| R1 | A: v1.0 completeness | Rust+Swift — reading-state model and the missing sort keys (type / last read / progress) | ADR, `gist-store` schema v6 + migration, `gist-core`/`gist-ffi`, `CoreClient`, `LibraryView`/`CollectionDetailView`, row progress UI, tests | D2, D7 | **Done 2026-10-05** (schema v7; ADR-021) |
 | R2 | A: v1.0 quality | Rust — real-PDF corpus and layout tuning | `fixtures/pdf/real/`, `fixtures/README.md`, `crates/gist-parse-pdf/src/layout.rs`, `corpus.rs`, quality notes | D6, D7 | **Dropped (D6: no real PDFs)** |
-| R3 | A: PDF hardening | Rust+Swift — typed resource-limit error, PDF text budget (`F36`) | `gist-core`/`gist-ffi` error variants, `gist-parse-pdf` budget, `CoreClient` alert, tests | — | Not started |
-| R4 | A: PDF hardening | Design+spike — `F33` out-of-process pdfium (ADR, measured prototype; implementation only if D3 says so) | `docs/adr/`, `apps/apple/` spike branch | D3 | Not started (D3: spike + measurements only, no implementation) |
-| R5 | A: platform floor | Swift — deployment-target availability audit (compile at 14 / 15), then apply D1 | `apps/apple/project.yml`, `Shared/*`, `macOS/*`, README/dev plan | D1 | Not started (audit first; apply step gated on the user's D1 decision) |
-| R6 | A: polish | Swift — localisation completion + string audit | `Localizable.xcstrings`, call sites | — | Not started |
-| R7 | B: v1.1 | Rust+Swift — merged-cell tables (`gridSpan`/`vMerge`) | `gist-model`, DOCX/epub/web parsers, ADR-019 addendum (IR version decision), `FlowTableView.swift` | D4 | Included (D4) |
-| R8 | B: v1.1 | Swift — paginated reading view (Q3) as a second `ReadingLayout` | `apps/apple/macOS/` | D4 | Included (D4) |
+| R3 | A: PDF hardening | Rust+Swift — typed resource-limit error, PDF text budget (`F36`) | `gist-core`/`gist-ffi` error variants, `gist-parse-pdf` budget, `CoreClient` alert, tests | — | **Done 2026-10-05** (typed limit errors; F36 closed) |
+| R4 | A: PDF hardening | Design+spike — `F33` out-of-process pdfium (ADR, measured prototype; implementation only if D3 says so) | `docs/adr/`, `apps/apple/` spike branch | D3 | **Done 2026-10-05** (ADR-022; recommendation pending user decision) |
+| R5 | A: platform floor | Swift — deployment-target availability audit (compile at 14 / 15), then apply D1 | `apps/apple/project.yml`, `Shared/*`, `macOS/*`, README/dev plan | D1 | **Done 2026-10-05** (audit + apply; minimum macOS 14.0) |
+| R6 | A: polish | Swift — localisation completion + string audit | `Localizable.xcstrings`, call sites | — | **Done 2026-10-05** |
+| R7 | B: v1.1 | Rust+Swift — merged-cell tables (`gridSpan`/`vMerge`) | `gist-model`, DOCX/epub/web parsers, ADR-019 addendum (IR version decision), `FlowTableView.swift` | D4 | **Done 2026-10-05** (no ir_version bump) |
+| R8 | B: v1.1 | Swift — paginated reading view (Q3) as a second `ReadingLayout` | `apps/apple/macOS/` | D4 | **Done 2026-10-05** (ADR-023; Q3 resolved) |
 | R9 | C: iOS | Build system — iOS target, shared-code compile, simulator tests, CI | `project.yml`, `apps/apple/iOS/`, `.github/workflows/apple-build.yml` | D4, D5 | **Paused (D5)** |
-| R-final | review | Independent security/quality review (fresh agent) + hygiene (`F29` duplicates, `THIRD-PARTY.md` drift) | `docs/security-quality-review-<date>.md` | all landed | Not started |
+| R-final | review | Independent security/quality review (fresh agent) + hygiene (`F29` duplicates, `THIRD-PARTY.md` drift) | `docs/security-quality-review-<date>.md` | all landed | **Done 2026-10-05** (docs/security-quality-review-2026-10-05.md; F71–F78) |
 
 Batches: see "Decisions resolved 2026-10-04" above (R2 dropped, R9 paused). R1 and R3 both touch `gist-core`/`gist-ffi`, and R5/R6/R1 all touch Swift `Shared/` — integrate one at a time and re-run the gate.
 
@@ -153,3 +153,11 @@ Batches: see "Decisions resolved 2026-10-04" above (R2 dropped, R9 paused). R1 a
 ## 4. Adopting this plan
 
 When approved: (a) resolve D1–D7; (b) repoint `CLAUDE.md`'s "proceed with development" convention and `.claude/commands/proceed-with-development.md` from `docs/m6-agent-roles.md` to this file, dated, noting that M6's backlog is exhausted; (c) add an M7 row to the milestone register; (d) update `development-plan-v2.md` §5 with M7 and **correct Q9** according to D1; (e) create `integration/m7-<date>` off `main` and commit the adoption there before spawning. Until then nothing here is binding.
+
+## 5. Outcome notes (2026-10-05)
+
+- **Schema number correction:** this plan's R1 text and D2 row say "schema v6". `SCHEMA_VERSION` was already 6 (annotations, ADR-003), so the `last_opened_at` migration is **v7** (ADR-021). D2's decision is unchanged; a later shared progress column would be **v8**, not v7.
+- **Finding IDs:** the Windows W4/W5 reviews took `F39`–`F70` while M7 ran, so this milestone's review findings are **`F71`–`F78`**.
+- **R5 split:** the audit and the apply step were run as two steps, as D1 required; the user chose macOS 14 after seeing the evidence.
+- **Batch execution:** Batch 2 and the review were interrupted repeatedly by usage limits, the stall watchdog and the machine sleeping (a `caffeinate` was used). Roles were resumed with their context rather than restarted; no work was lost.
+- **Dropped / paused:** R2 (D6, no real PDFs — PDF layout quality remains unmeasured on real documents) and R9 (D5, iOS paused).

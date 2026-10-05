@@ -67,6 +67,15 @@ pre-1.0 work, not a shipped release note.
   author), plus a small progress bar and "Last read …" line on library rows (ADR-021). The core
   stores a "last opened" time (schema v7) that both readers set; progress is derived from the RSVP
   reading position. Items never opened sort last for "last read".
+- Imports that hit GIST's safety limits (too many pages, too large, too deeply nested, a table too
+  big) now show a specific "Can't Import This File" message naming the file instead of a generic
+  error. PDF text extraction is also capped, so a hostile PDF can no longer drive multi-gigabyte
+  memory use.
+- Merged table cells (DOCX column/row merges, HTML `colspan`/`rowspan`) are now kept: later columns
+  no longer shift, and VoiceOver announces a merged cell once with the rows/columns it covers.
+- An optional paginated (page-turning) reading view, chosen with a Scroll/Pages control in the
+  reader toolbar or Settings → Reading. Scroll remains the default. Your place is remembered
+  separately from the scrolling and RSVP positions.
 - Sidebar navigation across the library and user-created collections.
 - A theme engine: system-follow, light, dark, sepia, and true-black OLED.
 - A flow (continuous document) reading view: virtualized rendering, typography controls (size,
@@ -143,9 +152,5 @@ rest and at-rest-integrity work described above. To report a new vulnerability, 
   hearing the read-aloud feature, and a real-display Dynamic Type/contrast check on macOS, plus
   the equivalent Windows Narrator/visual pass — has not happened yet.
 - **PDF import is new and lightly tested.** It works end to end (text PDFs and scanned PDFs via OCR), but layout heuristics are tuned on synthetic PDFs only (two-column and simple footnote-free layouts); rotated text, right-to-left scripts, footnotes and tables inside PDFs are not handled, and the signed/notarised build of the embedded pdfium library has not been verified.
-- **A paginated (page-turning) reading view is not implemented** — only the continuous flow view
-  and RSVP exist today; a paginated view is an open question for a future release.
-- **IR/schema forward-compatibility policy is not yet implemented.** The persisted document
-  format (`gist-model::Document`, stored as `<id>.json`) has no version field and no defined
-  behavior for a future, incompatible format change — tracked as an open question and scheduled
-  ahead of the first public beta.
+- **The paginated reading view is new and only logic-tested.** Whether the measured page breaks match what SwiftUI actually draws (a clipped last line or an under-filled page is possible), the page-turn feel, VoiceOver, read-aloud follow-along and performance on very large documents have not been verified on a real display. Tables taller than a page scroll inside their page instead of splitting by row.
+- **IR/schema forward compatibility is implemented but has one deliberate limit.** Stored documents carry an `ir_version` (ADR-019), and a newer-than-understood version is refused with a clear message instead of failing obscurely. Documents containing a table are stored as version 2, so an older GIST build reports "needs a newer version" for them. An older build that opens a library whose database was upgraded to schema v7 will refuse it (`SchemaTooNew`). (This bullet previously said the policy was not implemented; that has been untrue since ADR-019, corrected 2026-10-05.)
