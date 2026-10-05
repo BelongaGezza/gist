@@ -1,0 +1,27 @@
+# THROWAWAY SPIKE for F33 / ADR-022 -- NOT a shipping target.
+# Own [workspace] so `cargo test --workspace` at the repo root never sees it.
+[workspace]
+
+[package]
+name = "pdf-isolation-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+gist-model = { path = "../../crates/gist-model" }
+gist-parse-pdf = { path = "../../crates/gist-parse-pdf" }
+serde_json = "1"
+libc = "0.2"
+
+[[bin]]
+name = "spike-helper"
+path = "src/bin/helper.rs"
+
+[[bin]]
+name = "spike-host"
+path = "src/bin/host.rs"
+
+[profile.release]
+panic = "unwind"
