@@ -35,8 +35,8 @@ jobs:
       # project.yml's `options.xcodeVersion: "16"` is XcodeGen project-file
       # metadata (LastUpgradeCheck/compatibility attributes) only — it does
       # not gate which Xcode toolchain must build the project. What actually
-      # matters is `options.deploymentTarget.macOS: "26.5"`, which needs a
-      # current Xcode. Pin to latest-stable rather than a specific version:
+      # matters is `options.deploymentTarget.macOS: "14.0"` (D1), built
+      # against the current SDK. Pin to latest-stable rather than a specific version:
       # exact Xcode versions available on GitHub's macos-latest image shift
       # frequently, and hardcoding one here would go stale fast. Revisit if
       # build reproducibility ever needs an exact pin instead.
