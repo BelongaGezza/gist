@@ -251,6 +251,27 @@ final class PaginatorTests: XCTestCase {
         }
     }
 
+    /// Review F72: anchor lookup used to be O(N^2) in the section's block
+    /// count. The incremental offsets must agree with `blockByteOffset(at:)`
+    /// for every block, and a large section must resolve quickly.
+    func testAnchorLookupMatchesBlockByteOffsetAndScalesLinearly() throws {
+        let n = 4000
+        let blocks = (0..<n).map { i in
+            "{\"Paragraph\":{\"runs\":[{\"text\":\"p\(i) é\",\"bold\":false,\"italic\":false,\"code\":false}]}}"
+        }.joined(separator: ",")
+        let json = "{\"id\":\"d\",\"metadata\":{\"title\":\"T\",\"author\":null},\"sections\":[{\"id\":\"s\",\"heading\":null,\"blocks\":[\(blocks)]}]}"
+        let doc = try JSONDecoder().decode(FlowDocumentVM.self, from: Data(json.utf8))
+        let index = PagedDocumentIndex(document: doc)
+        let section = doc.sections[0]
+        let start = Date()
+        for i in stride(from: 0, to: n, by: 397) + [n - 1] {
+            let byte = section.blockByteOffset(at: i) + 1
+            let pos = try XCTUnwrap(index.position(forAnchorSection: "s", byteStart: byte))
+            XCTAssertEqual(pos.blockIndex, i)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
     // MARK: - Measurer (AppKit) invariants
 
     func testMeasurerLineStartsAreMonotonicAndWiderMeansFewerLines() {

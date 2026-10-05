@@ -386,14 +386,19 @@ struct PagedDocumentIndex {
     /// never page-relative, so this works at any page size.
     func position(forAnchorSection sectionId: String, byteStart: Int) -> PagePosition? {
         guard let section = sectionsById[sectionId], let firstBlock = firstBlockOfSection[sectionId] else { return nil }
+        // Accumulate the start incrementally (same arithmetic as
+        // `blockByteOffset(at:)`: previous end + the 2-byte "\n\n" separator).
+        // Calling `blockByteOffset(at: i)` per block was O(N^2) in the
+        // section's block count.
+        var blockStart = 0
         for i in 0..<section.blocks.count {
-            let blockStart = section.blockByteOffset(at: i)
-            let blockEnd = blockStart + section.blocks[i].plainText.utf8.count
+            let blockEnd = blockStart + blockTexts[firstBlock + i].utf8.count
             if byteStart >= blockStart && byteStart <= blockEnd {
                 let flat = firstBlock + i
                 let offset = PageTextOffsets.characterOffset(forByteOffset: byteStart - blockStart, in: blockTexts[flat])
                 return PagePosition(blockIndex: flat, offset: offset)
             }
+            blockStart = blockEnd + 2
         }
         return nil
     }

@@ -112,7 +112,17 @@ TOCTOU: validation and extraction both read the same file in a private `mktemp -
 
 ## 13. Item 12 — Fuzzing
 
-(to be filled)
+Run after `./tools/fetch-pdfium.sh`, `cd fuzz && cargo +nightly fuzz run <target> <scratch corpus> fuzz/corpus/<target> -- -max_total_time=130` under `caffeinate`, with a scratch output corpus so no generated entries touch the repo.
+
+| Target | Requested | Runs (libFuzzer "Done") | Wall-clock | Crashes |
+|---|---|---|---|---|
+| fuzz_parse_pdf (`-max_len=1048576 -timeout=20`) | 130 s | 31,749 | 131 s | 0 |
+| fuzz_parse_docx | 130 s | 740,110 | 171 s | 0 |
+| fuzz_parse_epub | 130 s | 542,521 | 133 s | 0 |
+| fuzz_web_extract | 130 s | 140,180 | 1003 s | 0 |
+| fuzz_parse_txt | 60 s | not completed (my driver script was interrupted) | n/a | none seen |
+
+`fuzz_web_extract` took 1003 s wall for 130 s requested and the PDF/epub targets wrote `slow-unit-*` artifacts (epub 1, pdf 2); no `crash-*`, `oom-*`, `timeout-*`, `leak-*`. I re-executed all three slow units standalone: epub 1 ms, pdf 82 ms and 32 ms, all exit 0. So they are host stalls (machine load/sleep during the run), not real slow inputs. PDF throughput (~240 runs/s) is low as expected for pdfium via FFI, so a clean PDF result is weak evidence. The fuzz targets exercise the merged-cell code only through the docx/epub/web seeds; I did not add span-specific seeds. `fuzz/artifacts` was deleted; nothing generated is committed.
 
 ## 14. Could not verify
 
