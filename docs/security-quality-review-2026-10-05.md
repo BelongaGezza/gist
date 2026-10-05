@@ -26,7 +26,11 @@ No High or Medium defect found. Schema v7, the typed limit errors, the PDF text 
 
 ## 3. Item 1 — Schema v7 and reading state
 
-(to be filled)
+- **Migration** (`gist-store/src/lib.rs` ~960): `BEGIN; ALTER TABLE library_items ADD COLUMN last_opened_at INTEGER; CREATE INDEX IF NOT EXISTS idx_tokens_item_idx ON tokens(item_id, token_idx); PRAGMA user_version = 7; COMMIT;` in one `execute_batch`, guarded by `version < 7` and after the `SchemaTooNew` ceiling check. Nullable column, no rewrite, no backfill; no data loss. A failure mid-batch drops the connection (rollback). The index build is a one-off O(n log n) pass over `tokens` at first open of a v6 database; not timed on a large library. The index also helps the `ON DELETE CASCADE` on `tokens.item_id`. Tests: `newer_schema_is_rejected_with_schema_too_new`, `old_db_compat` from v3 and v5.
+- **SQL** (`LIBRARY_ITEM_SELECT`): constant string; the only variable parts are bound parameters (`?1`/`?2`), so no injection surface. `json_extract` is guarded by `json_valid`. Progress: `COALESCE(CASE WHEN COALESCE(rp.token_index,0)>0 THEN MIN(1.0, ti*1.0/MAX((SELECT MAX(token_idx)...),1)) END, 0.0)` — NULL (no tokens) yields 0.0, divisor floored at 1, result also clamped in Rust. `tokens.token_idx` is the stream index of Word tokens (`insert_item`), matching `reading_progress.token_index`. The subquery runs only for rows with a saved position; `item_row_queries_use_the_token_index` asserts the plan uses the index.
+- **`mark_item_opened`**: one bound `UPDATE`, poison-tolerant lock (`unwrap_or_else(|p| p.into_inner())`), unknown id is a no-op. No new bare `.lock().unwrap()` in the diff.
+- **FFI**: exactly one new `#[uniffi::export]` (`mark_item_opened`), `ffi_catch!`-wrapped. I checked every `pub fn` before the first `#[cfg(test)]` in `gist-ffi/src/lib.rs` with a script: 57 of 57 contain `ffi_catch!` (plus the panic probe). `FfiLibraryItem` gained `source_type`, `last_opened_at`, `progress_fraction`; the four duplicated mappings were replaced by one `From`.
+- Result: no defect. Plan text saying "v6" is stale (ADR-021 says so itself); source is v7.
 
 ## 4. Item 2 — Typed resource-limit errors
 
