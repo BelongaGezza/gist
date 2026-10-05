@@ -383,9 +383,12 @@ fn parse_document(
     // `Block::Table`; a table nested inside a cell is flattened into that
     // cell's text (its paragraphs append to the enclosing cell).
     let mut tbl_depth = 0usize;
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut table_rows: Vec<Vec<gist_model::RawCell>> = Vec::new();
     let mut table_header = false;
-    let mut current_row: Vec<String> = Vec::new();
+    let mut current_row: Vec<gist_model::RawCell> = Vec::new();
+    // Merge properties of the cell being read (w:gridSpan / w:vMerge).
+    let mut cell_colspan: u32 = 1;
+    let mut cell_vmerge_continue = false;
     let mut row_is_header = false;
     let mut in_row = false;
     let mut in_cell = false;
@@ -466,9 +469,19 @@ fn parse_document(
                     "tc" if tbl_depth == 1 && in_row => {
                         cell_parts.clear();
                         in_cell = true;
+                        cell_colspan = 1;
+                        cell_vmerge_continue = false;
                     }
                     "tblHeader" if tbl_depth == 1 && in_row => {
                         row_is_header = true;
+                    }
+                    "gridSpan" | "vMerge" if tbl_depth == 1 && in_cell => {
+                        apply_merge_prop(
+                            e,
+                            tag_local,
+                            &mut cell_colspan,
+                            &mut cell_vmerge_continue,
+                        );
                     }
                     _ => {}
                 }
@@ -484,7 +497,15 @@ fn parse_document(
                         row_is_header = true;
                     }
                     "tc" if tbl_depth == 1 && in_row && !in_cell => {
-                        push_cell(&mut current_row, String::new(), limits)?;
+                        push_cell(&mut current_row, gist_model::RawCell::plain(""), limits)?;
+                    }
+                    "gridSpan" | "vMerge" if tbl_depth == 1 && in_cell => {
+                        apply_merge_prop(
+                            e,
+                            tag_local,
+                            &mut cell_colspan,
+                            &mut cell_vmerge_continue,
+                        );
                     }
                     "pStyle" => {
                         for attr in e.attributes().flatten() {
@@ -574,7 +595,15 @@ fn parse_document(
                         let cell = normalize_cell_text(&cell_parts.join(" "));
                         cell_parts.clear();
                         in_cell = false;
-                        push_cell(&mut current_row, cell, limits)?;
+                        let raw = gist_model::RawCell {
+                            text: cell,
+                            colspan: cell_colspan,
+                            rowspan: 1,
+                            v_merge_continue: cell_vmerge_continue,
+                        };
+                        cell_colspan = 1;
+                        cell_vmerge_continue = false;
+                        push_cell(&mut current_row, raw, limits)?;
                     }
                     "tr" if tbl_depth == 1 && in_row => {
                         in_row = false;
@@ -594,11 +623,21 @@ fn parse_document(
                             // Drop a table with no text at all (layout-only
                             // tables); keep ragged/empty-cell structure
                             // otherwise so columns stay aligned.
-                            let any_text = table_rows.iter().flatten().any(|c| !c.is_empty());
+                            let any_text = table_rows.iter().flatten().any(|c| !c.text.is_empty());
                             if any_text {
+                                let (rows, spans) = gist_model::layout_table(
+                                    std::mem::take(&mut table_rows),
+                                    limits,
+                                )
+                                .map_err(|e| ParseError::ResourceLimitExceeded {
+                                    limit: e.limit,
+                                    kind: gist_model::LimitKind::TableTooLarge,
+                                    attempted: e.attempted,
+                                })?;
                                 blocks.push(gist_model::Block::Table {
-                                    rows: std::mem::take(&mut table_rows),
+                                    rows,
                                     header_row: table_header,
+                                    spans,
                                 });
                             }
                             table_rows.clear();
@@ -663,10 +702,34 @@ fn parse_document(
     Ok((blocks, has_tracked_changes))
 }
 
+/// Read `w:gridSpan` / `w:vMerge` (Start or Empty event) into the cell's
+/// merge state. `vMerge` with `w:val="restart"` begins a vertical merge (an
+/// ordinary cell for layout); `vMerge` with no `val`, or any other value, is
+/// a continuation. Hostile `gridSpan` values are bounded by `layout_table`.
+fn apply_merge_prop(
+    e: &quick_xml::events::BytesStart<'_>,
+    tag_local: &str,
+    colspan: &mut u32,
+    vmerge_continue: &mut bool,
+) {
+    let mut val: Option<String> = None;
+    for attr in e.attributes().flatten() {
+        let k = attr.key.as_ref();
+        if k.rsplit(':').next().unwrap_or(k) == "val" {
+            val = Some(attr.value.to_string());
+        }
+    }
+    if tag_local == "gridSpan" {
+        *colspan = gist_model::parse_span_attr(val.as_deref().unwrap_or("1"));
+    } else {
+        *vmerge_continue = !matches!(val.as_deref(), Some("restart"));
+    }
+}
+
 /// Append one cell to `row`, enforcing `max_table_cols` before the push.
 fn push_cell(
-    row: &mut Vec<String>,
-    cell: String,
+    row: &mut Vec<gist_model::RawCell>,
+    cell: gist_model::RawCell,
     limits: &gist_model::ParseLimits,
 ) -> Result<(), ParseError> {
     if row.len() >= limits.max_table_cols {
@@ -1040,7 +1103,9 @@ mod tests {
             .blocks
             .iter()
             .filter_map(|b| match b {
-                gist_model::Block::Table { rows, header_row } => Some((rows, *header_row)),
+                gist_model::Block::Table {
+                    rows, header_row, ..
+                } => Some((rows, *header_row)),
                 _ => None,
             })
             .collect()
@@ -1156,5 +1221,117 @@ mod tests {
         ] {
             let _ = parse(&docx_with_body(body), "t", &ParseLimits::default());
         }
+    }
+
+    // ── Merged cells (M7/R7) ─────────────────────────────────────────────
+
+    fn merged_tc(text: &str, props: &str) -> String {
+        format!(r#"<w:tc><w:tcPr>{props}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"#)
+    }
+
+    fn spans_of(doc: &gist_model::Document) -> Vec<gist_model::CellSpan> {
+        doc.sections[0]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                gist_model::Block::Table { spans, .. } => Some(spans.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_merged_fixture_has_aligned_grid_and_spans() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/docx/with_merged_cells.docx"
+        ))
+        .unwrap();
+        let doc = parse(&bytes, "t", &ParseLimits::default()).unwrap();
+        let tables = tables_of(&doc);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(
+            tables[0].0,
+            &vec![
+                vec!["Sales", "", "Notes"],
+                vec!["North", "100", "Strong"],
+                vec!["South", "80", ""],
+                vec!["Grand total", "", "180"],
+            ]
+        );
+        let sp = |row, col, rowspan, colspan| gist_model::CellSpan {
+            row,
+            col,
+            rowspan,
+            colspan,
+        };
+        assert_eq!(
+            spans_of(&doc),
+            vec![sp(0, 0, 1, 2), sp(1, 2, 2, 1), sp(3, 0, 1, 2)]
+        );
+    }
+
+    #[test]
+    fn test_hostile_grid_span_is_rejected_with_table_too_large() {
+        for val in ["4294967295", "99999999999999999999", "65"] {
+            let body = format!(
+                "<w:tbl><w:tr>{}</w:tr></w:tbl>",
+                merged_tc("x", &format!(r#"<w:gridSpan w:val="{val}"/>"#))
+            );
+            let r = parse(&docx_with_body(&body), "t", &ParseLimits::default());
+            assert!(
+                matches!(
+                    r,
+                    Err(ParseError::ResourceLimitExceeded {
+                        kind: gist_model::LimitKind::TableTooLarge,
+                        ..
+                    })
+                ),
+                "gridSpan={val}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_garbage_grid_span_and_orphan_vmerge_do_not_panic_or_merge() {
+        for props in [
+            r#"<w:gridSpan w:val="-3"/>"#,
+            r#"<w:gridSpan w:val="abc"/>"#,
+            r#"<w:gridSpan/>"#,
+            r#"<w:vMerge/>"#, // orphan continuation in the first row
+        ] {
+            let body = format!(
+                "<w:tbl><w:tr>{}{}</w:tr></w:tbl>",
+                merged_tc("a", props),
+                merged_tc("b", "")
+            );
+            let doc = parse(&docx_with_body(&body), "t", &ParseLimits::default()).unwrap();
+            let t = tables_of(&doc);
+            assert_eq!(t[0].0, &vec![vec!["a", "b"]], "{props}");
+            assert!(spans_of(&doc).is_empty(), "{props}");
+        }
+    }
+
+    #[test]
+    fn test_vmerge_chain_and_overlong_chain_are_bounded() {
+        let first = format!(
+            "<w:tr>{}</w:tr>",
+            merged_tc("top", r#"<w:vMerge w:val="restart"/>"#)
+        );
+        let cont = format!("<w:tr>{}</w:tr>", merged_tc("", "<w:vMerge/>"));
+        let body = format!("<w:tbl>{first}{cont}{cont}</w:tbl>");
+        let doc = parse(&docx_with_body(&body), "t", &ParseLimits::default()).unwrap();
+        assert_eq!(tables_of(&doc)[0].0, &vec![vec!["top"], vec![""], vec![""]]);
+        assert_eq!(spans_of(&doc)[0].rowspan, 3);
+
+        let limits = ParseLimits {
+            max_table_rows: 3,
+            ..ParseLimits::default()
+        };
+        let long = format!("<w:tbl>{first}{}</w:tbl>", cont.repeat(5));
+        assert!(matches!(
+            parse(&docx_with_body(&long), "t", &limits),
+            Err(ParseError::ResourceLimitExceeded { .. })
+        ));
     }
 }

@@ -47,7 +47,7 @@ final class FlowTableTests: XCTestCase {
         }()
 
         for block in [plain, snake] {
-            guard case .table(let rows, let headerRow) = block else {
+            guard case .table(let rows, let headerRow, _) = block else {
                 return XCTFail("expected .table, got \(block)")
             }
             XCTAssertEqual(rows, [["Fruit", "Colour"], ["Apple", ""]])
@@ -57,7 +57,7 @@ final class FlowTableTests: XCTestCase {
 
     func testTableBlockWithoutHeaderRowKeyDefaultsToFalse() throws {
         let data = Data(#"{"Table":{"rows":[["a"]]}}"#.utf8)
-        guard case .table(_, let headerRow) = try JSONDecoder().decode(FlowBlockVM.self, from: data) else {
+        guard case .table(_, let headerRow, _) = try JSONDecoder().decode(FlowBlockVM.self, from: data) else {
             return XCTFail("expected .table")
         }
         XCTAssertFalse(headerRow)
@@ -211,7 +211,7 @@ final class FlowTableTests: XCTestCase {
 
         // Structure: paragraph, ONE table (not N loose paragraphs), paragraph.
         XCTAssertEqual(section.blocks.count, 3)
-        guard case .table(let rows, let headerRow) = section.blocks[1] else {
+        guard case .table(let rows, let headerRow, _) = section.blocks[1] else {
             return XCTFail("expected block 1 to be a table, got \(section.blocks[1])")
         }
         XCTAssertTrue(headerRow)
@@ -237,5 +237,199 @@ final class FlowTableTests: XCTestCase {
                 result.status, .valid,
                 "Rust and Swift disagree on the table flattening: annotation \(result.annotation.id) misanchored")
         }
+    }
+
+    /// M7/R7: imports `with_merged_cells.docx` through the real core, checks
+    /// the decoded spans and that annotations in/after the merged table stay
+    /// `.valid` (Rust and Swift flatten the covered slots identically).
+    func testRealImportedMergedTableDecodesSpansAndAnnotationsStayValid() async throws {
+        guard let bundled = Bundle(for: Self.self).url(forResource: "with_merged_cells", withExtension: "docx")
+        else { throw XCTSkip("with_merged_cells.docx fixture missing from test bundle resources") }
+        let source = tempDir.appendingPathComponent("with_merged_cells.docx")
+        try FileManager.default.copyItem(at: bundled, to: source)
+
+        await client.importFile(url: source)
+        guard let item = client.items.first else { return XCTFail("expected an imported item") }
+        guard let document = await client.loadDocument(itemId: item.id), let section = document.sections.first
+        else { return XCTFail("expected a loaded document") }
+
+        XCTAssertEqual(section.blocks.count, 3)
+        guard case .table(let rows, _, let spans) = section.blocks[1] else {
+            return XCTFail("expected block 1 to be a table, got \(section.blocks[1])")
+        }
+        XCTAssertEqual(rows[0], ["Sales", "", "Notes"])
+        XCTAssertEqual(rows[2], ["South", "80", ""])
+        XCTAssertEqual(
+            Set(spans),
+            [
+                TableSpanVM(row: 0, col: 0, rowspan: 1, colspan: 2),
+                TableSpanVM(row: 1, col: 2, rowspan: 2, colspan: 1),
+                TableSpanVM(row: 3, col: 0, rowspan: 1, colspan: 2),
+            ])
+
+        let text = section.concatenatedPlainText
+        for needle in ["Strong", "180", "After the table."] {
+            guard let range = text.range(of: needle) else { return XCTFail("missing \(needle)") }
+            let start = text.utf8.distance(from: text.utf8.startIndex, to: range.lowerBound)
+            let len = needle.utf8.count
+            let (prefixHash, quoteHash) = AnnotationAnchoring.hashes(fullText: text, start: start, len: len)
+            let id = await client.createAnnotation(
+                itemId: item.id, kind: .highlight, blockId: section.id, start: start, len: len,
+                prefixHash: prefixHash, quoteHash: quoteHash, noteText: nil)
+            XCTAssertNotNil(id)
+        }
+        let results = await client.reanchorAnnotations(itemId: item.id)
+        XCTAssertEqual(results.count, 3)
+        for result in results {
+            XCTAssertEqual(result.status, .valid, "annotation \(result.annotation.id) misanchored")
+        }
+    }
+
+    // MARK: - Merged cells (M7/R7)
+
+    /// The SECOND cross-language golden: identical literals to
+    /// `MERGED_BLOCK_JSON_GOLDEN` / `MERGED_SECTION_TEXT_GOLDEN` in gist-core.
+    private let mergedBlockJSON =
+        #"{"Table":{"rows":[["Sales","","Notes"],["North","100","Strong"],["South","80",""]],"header_row":true,"spans":[{"row":0,"col":0,"rowspan":1,"colspan":2},{"row":1,"col":2,"rowspan":2,"colspan":1}]}}"#
+    private let mergedGoldenSectionText =
+        "Intro text.\n\nSales\t\tNotes\nNorth\t100\tStrong\nSouth\t80\t\n\nOutro text after."
+
+    private func decodeBlock(_ json: String, snakeCase: Bool) throws -> FlowBlockVM {
+        let decoder = JSONDecoder()
+        if snakeCase { decoder.keyDecodingStrategy = .convertFromSnakeCase }
+        return try decoder.decode(FlowBlockVM.self, from: Data(json.utf8))
+    }
+
+    func testMergedTableDecodesSpansUnderPlainAndSnakeCaseDecoders() throws {
+        for snake in [false, true] {
+            guard case .table(let rows, let headerRow, let spans) = try decodeBlock(mergedBlockJSON, snakeCase: snake)
+            else { return XCTFail("expected .table") }
+            XCTAssertEqual(rows.count, 3)
+            XCTAssertTrue(headerRow)
+            XCTAssertEqual(
+                spans,
+                [
+                    TableSpanVM(row: 0, col: 0, rowspan: 1, colspan: 2),
+                    TableSpanVM(row: 1, col: 2, rowspan: 2, colspan: 1),
+                ], "snakeCase=\(snake)")
+        }
+    }
+
+    func testPreSpansBlobDecodesWithEmptySpans() throws {
+        guard case .table(_, _, let spans) = try decodeBlock(tableBlockJSON, snakeCase: false) else {
+            return XCTFail("expected .table")
+        }
+        XCTAssertTrue(spans.isEmpty)
+    }
+
+    func testMergedSectionTextMatchesSecondRustGolden() throws {
+        let json = """
+        {"id": "s0", "heading": null, "blocks": [
+            {"Paragraph": {"runs": [{"text": "Intro text.", "bold": false, "italic": false, "code": false}]}},
+            \(mergedBlockJSON),
+            {"Paragraph": {"runs": [{"text": "Outro text after.", "bold": false, "italic": false, "code": false}]}}
+        ]}
+        """
+        let section = try JSONDecoder().decode(FlowSectionVM.self, from: Data(json.utf8))
+        XCTAssertEqual(section.concatenatedPlainText, mergedGoldenSectionText)
+    }
+
+    private let mergedRows = [
+        ["Sales", "", "Notes"], ["North", "100", "Strong"], ["South", "80", ""], ["Grand total", "", "180"],
+    ]
+    private var mergedSpans: [TableSpanVM] {
+        [
+            TableSpanVM(row: 0, col: 0, rowspan: 1, colspan: 2),
+            TableSpanVM(row: 1, col: 2, rowspan: 2, colspan: 1),
+            TableSpanVM(row: 3, col: 0, rowspan: 1, colspan: 2),
+        ]
+    }
+
+    func testSpanMapClassifiesSlots() {
+        let map = TableSpanMap(rows: mergedRows, spans: mergedSpans)
+        XCTAssertEqual(map.slot(row: 0, column: 0), .cell)
+        XCTAssertEqual(map.slot(row: 0, column: 1), .coveredRight)
+        XCTAssertEqual(map.slot(row: 1, column: 2), .cell)
+        XCTAssertEqual(map.slot(row: 2, column: 2), .coveredBelow(originCol: 2, colspan: 1))
+        XCTAssertEqual(map.slot(row: 3, column: 1), .coveredRight)
+        // Only origins/ordinary cells are announced; covered slots are not.
+        XCTAssertFalse(map.isAnnounced(row: 0, column: 1))
+        XCTAssertFalse(map.isAnnounced(row: 2, column: 2))
+        XCTAssertTrue(map.isAnnounced(row: 2, column: 0))
+        // Row-span border logic: origin has no bottom edge, last filler does.
+        XCTAssertTrue(map.horizontalEdges(row: 1, column: 2).top)
+        XCTAssertFalse(map.horizontalEdges(row: 1, column: 2).bottom)
+        XCTAssertFalse(map.horizontalEdges(row: 2, column: 2).top)
+        XCTAssertTrue(map.horizontalEdges(row: 2, column: 2).bottom)
+    }
+
+    func testSpanMapSanitisesHostileSpans() {
+        let rows = [["a", "b"], ["c", "d"]]
+        let hostile = [
+            TableSpanVM(row: 9, col: 0, rowspan: 2, colspan: 2),  // origin outside grid
+            TableSpanVM(row: 0, col: 0, rowspan: 0, colspan: 1),  // invalid
+            TableSpanVM(row: 0, col: 0, rowspan: 1, colspan: 1),  // not a merge
+            TableSpanVM(row: -1, col: 0, rowspan: 2, colspan: 1),
+            TableSpanVM(row: 0, col: 1, rowspan: Int.max, colspan: Int.max),  // clipped to grid
+            TableSpanVM(row: 0, col: 0, rowspan: 2, colspan: 2),  // overlaps the clipped one: dropped
+        ]
+        let map = TableSpanMap(rows: rows, spans: hostile)
+        XCTAssertEqual(map.span(row: 0, column: 1), TableSpanVM(row: 0, col: 1, rowspan: 2, colspan: 1))
+        XCTAssertNil(map.span(row: 0, column: 0))
+        XCTAssertEqual(map.slot(row: 1, column: 1), .coveredBelow(originCol: 1, colspan: 1))
+        // Empty and ragged tables never crash.
+        XCTAssertEqual(TableSpanMap(rows: [], spans: hostile).columnCount, 0)
+        XCTAssertEqual(TableSpanMap(rows: [[]], spans: hostile).slot(row: 0, column: 0), .cell)
+    }
+
+    func testSpannedWidthAndColumnWidthsIgnoreMergedCells() {
+        let widths: [CGFloat] = [100, 80, 90]
+        XCTAssertEqual(TableCellLayout.spannedWidth(widths: widths, column: 0, colspan: 1), 100)
+        XCTAssertEqual(
+            TableCellLayout.spannedWidth(widths: widths, column: 0, colspan: 2),
+            180 + TableCellLayout.cellHorizontalPadding)
+        XCTAssertEqual(
+            TableCellLayout.spannedWidth(widths: widths, column: 1, colspan: 99),
+            170 + TableCellLayout.cellHorizontalPadding, "colspan is clipped to the grid")
+        let rows = [["A very long merged heading across two columns", ""], ["x", "y"]]
+        let merged = TableCellLayout.columnWidths(
+            rows: rows, fontSize: 14, spans: [TableSpanVM(row: 0, col: 0, rowspan: 1, colspan: 2)])
+        let unmerged = TableCellLayout.columnWidths(rows: rows, fontSize: 14)
+        XCTAssertLessThan(merged[0], unmerged[0], "a merged cell must not widen its first column")
+    }
+
+    func testMergedCellAccessibilityPositionsAndLabels() {
+        // Whole-region position strings (state the covered extent).
+        XCTAssertEqual(
+            TableAccessibility.cellPosition(rowCount: 4, columnCount: 3, row: 0, column: 0, rowspan: 1, colspan: 2),
+            "Row 1 of 4, columns 1 to 2 of 3")
+        XCTAssertEqual(
+            TableAccessibility.cellPosition(rowCount: 4, columnCount: 3, row: 1, column: 2, rowspan: 2, colspan: 1),
+            "Rows 2 to 3 of 4, column 3 of 3")
+        XCTAssertEqual(
+            TableAccessibility.cellPosition(rowCount: 4, columnCount: 3, row: 1, column: 0, rowspan: 2, colspan: 2),
+            "Rows 2 to 3 of 4, columns 1 to 2 of 3")
+        XCTAssertEqual(
+            TableAccessibility.cellPosition(rowCount: 4, columnCount: 3, row: 1, column: 1),
+            "Row 2 of 4, column 2 of 3", "unmerged cells read exactly as before")
+        // A data cell under a spanning header is qualified by that header.
+        XCTAssertEqual(
+            TableAccessibility.cellLabel(rows: mergedRows, headerRow: true, row: 1, column: 1, spans: mergedSpans),
+            "Sales: 100")
+        // Without spans the covered header slot would be empty (the M6 behaviour).
+        XCTAssertEqual(
+            TableAccessibility.cellLabel(rows: mergedRows, headerRow: true, row: 1, column: 1), "100")
+    }
+
+    func testAnnotationOffsetsStillResolveInsideMergedTableCells() {
+        // Covered slots are empty cells with empty ranges: highlights on the
+        // origin cell's text are unaffected by the merge.
+        let ranges = TableCellLayout.cellRanges(rows: mergedRows)
+        let plain = FlowBlockVM.table(rows: mergedRows, headerRow: true, spans: mergedSpans).plainText
+        let r = ranges[1][2]  // "Strong"
+        let start = plain.index(plain.startIndex, offsetBy: r.lowerBound)
+        let end = plain.index(plain.startIndex, offsetBy: r.upperBound)
+        XCTAssertEqual(String(plain[start..<end]), "Strong")
+        XCTAssertTrue(ranges[2][2].isEmpty)
     }
 }

@@ -325,9 +325,10 @@ fn xhtml_to_blocks(xhtml: &str, limits: &ParseLimits) -> Result<Vec<Block>, Pars
 
     // Table state (M6/R3). Only the outermost <table> becomes a block.
     let mut table_depth: usize = 0;
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut table_rows: Vec<Vec<gist_model::RawCell>> = Vec::new();
     let mut table_header = false;
-    let mut current_row: Vec<String> = Vec::new();
+    let mut current_row: Vec<gist_model::RawCell> = Vec::new();
+    let mut cell_spans: (u32, u32) = (1, 1);
     let mut row_has_th = false;
     let mut in_row = false;
     let mut in_cell = false;
@@ -376,6 +377,7 @@ fn xhtml_to_blocks(xhtml: &str, limits: &ParseLimits) -> Result<Vec<Block>, Pars
                         "td" | "th" if table_depth == 1 && in_row => {
                             cell_buf.clear();
                             in_cell = true;
+                            cell_spans = span_attrs(e);
                             if name == "th" {
                                 row_has_th = true;
                             }
@@ -439,7 +441,12 @@ fn xhtml_to_blocks(xhtml: &str, limits: &ParseLimits) -> Result<Vec<Block>, Pars
                             in_cell = false;
                             push_table_cell(
                                 &mut current_row,
-                                normalize_cell_text(&cell_buf),
+                                gist_model::RawCell {
+                                    text: normalize_cell_text(&cell_buf),
+                                    colspan: cell_spans.0,
+                                    rowspan: cell_spans.1,
+                                    v_merge_continue: false,
+                                },
                                 limits,
                             )?;
                             cell_buf.clear();
@@ -460,10 +467,20 @@ fn xhtml_to_blocks(xhtml: &str, limits: &ParseLimits) -> Result<Vec<Block>, Pars
                                 in_row = false;
                                 in_cell = false;
                                 // Drop a table with no text at all.
-                                if table_rows.iter().flatten().any(|c| !c.is_empty()) {
+                                if table_rows.iter().flatten().any(|c| !c.text.is_empty()) {
+                                    let (rows, spans) = gist_model::layout_table(
+                                        std::mem::take(&mut table_rows),
+                                        limits,
+                                    )
+                                    .map_err(|e| ParseError::ResourceLimitExceeded {
+                                        limit: e.limit,
+                                        kind: gist_model::LimitKind::TableTooLarge,
+                                        attempted: e.attempted,
+                                    })?;
                                     blocks.push(Block::Table {
-                                        rows: std::mem::take(&mut table_rows),
+                                        rows,
                                         header_row: table_header,
+                                        spans,
                                     });
                                 }
                                 table_rows.clear();
@@ -561,7 +578,17 @@ fn xhtml_to_blocks(xhtml: &str, limits: &ParseLimits) -> Result<Vec<Block>, Pars
                 let name = e.name().as_ref().to_lowercase();
                 let name = name.rsplit(':').next().unwrap_or(&name).to_string();
                 if table_depth == 1 && in_row && !in_cell && (name == "td" || name == "th") {
-                    push_table_cell(&mut current_row, String::new(), limits)?;
+                    let (colspan, rowspan) = span_attrs(e);
+                    push_table_cell(
+                        &mut current_row,
+                        gist_model::RawCell {
+                            text: String::new(),
+                            colspan,
+                            rowspan,
+                            v_merge_continue: false,
+                        },
+                        limits,
+                    )?;
                 }
             }
             Ok(Event::Eof) => break,
@@ -599,10 +626,25 @@ fn xhtml_to_blocks(xhtml: &str, limits: &ParseLimits) -> Result<Vec<Block>, Pars
     })
 }
 
+/// `(colspan, rowspan)` of a `<td>`/`<th>` start tag; missing or hostile
+/// values become 1 (or a large value that `layout_table` rejects/clamps).
+fn span_attrs(e: &quick_xml::events::BytesStart<'_>) -> (u32, u32) {
+    let (mut cs, mut rs) = (1, 1);
+    for attr in e.attributes().flatten() {
+        let key = attr.key.as_ref().to_lowercase();
+        match key.as_str() {
+            "colspan" => cs = gist_model::parse_span_attr(&attr.value),
+            "rowspan" => rs = gist_model::parse_span_attr(&attr.value),
+            _ => {}
+        }
+    }
+    (cs, rs)
+}
+
 /// Append one cell to `row`, enforcing `max_table_cols` before the push.
 fn push_table_cell(
-    row: &mut Vec<String>,
-    cell: String,
+    row: &mut Vec<gist_model::RawCell>,
+    cell: gist_model::RawCell,
     limits: &ParseLimits,
 ) -> Result<(), ParseError> {
     if row.len() >= limits.max_table_cols {
@@ -834,7 +876,9 @@ mod tests {
         blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Table { rows, header_row } => Some((rows, *header_row)),
+                Block::Table {
+                    rows, header_row, ..
+                } => Some((rows, *header_row)),
                 _ => None,
             })
             .collect()
@@ -915,5 +959,85 @@ mod tests {
         ] {
             let _ = xhtml_to_blocks(x, &ParseLimits::default());
         }
+    }
+
+    // ── Merged cells (M7/R7) ─────────────────────────────────────────────
+
+    fn merged_table(blocks: &[Block]) -> (Vec<Vec<String>>, Vec<gist_model::CellSpan>) {
+        blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table { rows, spans, .. } => Some((rows.clone(), spans.clone())),
+                _ => None,
+            })
+            .expect("a table")
+    }
+
+    #[test]
+    fn test_merged_fixture_has_aligned_grid_and_spans() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/epub/with_merged_cells.epub"
+        ))
+        .unwrap();
+        let doc = parse(&bytes, "t", &ParseLimits::default()).unwrap();
+        let (rows, spans) = merged_table(&doc.sections[0].blocks);
+        assert_eq!(
+            rows,
+            vec![
+                vec!["Sales", "", "Notes"],
+                vec!["North", "100", "Strong"],
+                vec!["South", "80", ""],
+                vec!["Grand total", "", "180"],
+            ]
+        );
+        assert_eq!(spans.len(), 3);
+        assert_eq!((spans[1].row, spans[1].col, spans[1].rowspan), (1, 2, 2));
+    }
+
+    #[test]
+    fn test_hostile_colspan_is_rejected_and_garbage_values_are_one() {
+        for v in ["4294967295", "99999999999999999999", "65"] {
+            let x = format!("<body><table><tr><td colspan=\"{v}\">x</td></tr></table></body>");
+            assert!(
+                matches!(
+                    xhtml_to_blocks(&x, &ParseLimits::default()),
+                    Err(ParseError::ResourceLimitExceeded {
+                        kind: gist_model::LimitKind::TableTooLarge,
+                        ..
+                    })
+                ),
+                "colspan={v}"
+            );
+        }
+        for v in ["-1", "abc", "0", "", "1.5"] {
+            let x = format!(
+                "<body><table><tr><td colspan=\"{v}\" rowspan=\"{v}\">a</td><td>b</td></tr></table></body>"
+            );
+            let blocks = xhtml_to_blocks(&x, &ParseLimits::default()).unwrap();
+            let (rows, spans) = merged_table(&blocks);
+            assert_eq!(rows, vec![vec!["a", "b"]], "value {v:?}");
+            assert!(spans.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_rowspan_past_last_row_is_clamped_and_overlap_is_truncated() {
+        let x = "<body><table><tr><td rowspan=\"4294967295\">a</td><td>b</td></tr>\
+                 <tr><td>c</td></tr></table></body>";
+        let blocks = xhtml_to_blocks(x, &ParseLimits::default()).unwrap();
+        let (rows, spans) = merged_table(&blocks);
+        // `a` is clamped to the 2 rows that exist; row 1's `c` skips col 0.
+        assert_eq!(rows, vec![vec!["a", "b"], vec!["", "c"]]);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].rowspan, 2);
+
+        // A colspan running into a slot covered from above is truncated.
+        let x = "<body><table><tr><td>a</td><td rowspan=\"2\">b</td></tr>\
+                 <tr><td colspan=\"3\">c</td></tr></table></body>";
+        let blocks = xhtml_to_blocks(x, &ParseLimits::default()).unwrap();
+        let (rows, spans) = merged_table(&blocks);
+        assert_eq!(rows, vec![vec!["a", "b"], vec!["c", ""]]);
+        assert_eq!(spans.len(), 1, "c truncated to 1 column: {spans:?}");
     }
 }

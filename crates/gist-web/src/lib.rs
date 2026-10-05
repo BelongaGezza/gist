@@ -529,11 +529,18 @@ fn extract_table(
     depth: usize,
     limits: &ParseLimits,
 ) -> Result<Option<Block>, ParseError> {
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut raw: Vec<Vec<gist_model::RawCell>> = Vec::new();
     let mut header_row = false;
-    collect_table_rows(table, depth, limits, false, &mut rows, &mut header_row)?;
-    if rows.iter().flatten().any(|c| !c.is_empty()) {
-        Ok(Some(Block::Table { rows, header_row }))
+    collect_table_rows(table, depth, limits, false, &mut raw, &mut header_row)?;
+    if raw.iter().flatten().any(|c| !c.text.is_empty()) {
+        // Merged cells (colspan/rowspan): bounded layout, ADR-019 addendum 2.
+        let (rows, spans) = gist_model::layout_table(raw, limits)
+            .map_err(|_| ParseError::ResourceLimitExceeded(gist_model::LimitKind::TableTooLarge))?;
+        Ok(Some(Block::Table {
+            rows,
+            header_row,
+            spans,
+        }))
     } else {
         Ok(None)
     }
@@ -544,7 +551,7 @@ fn collect_table_rows(
     depth: usize,
     limits: &ParseLimits,
     in_thead: bool,
-    rows: &mut Vec<Vec<String>>,
+    rows: &mut Vec<Vec<gist_model::RawCell>>,
     header_row: &mut bool,
 ) -> Result<(), ParseError> {
     if depth > limits.max_nesting_depth {
@@ -567,7 +574,7 @@ fn collect_table_rows(
                         gist_model::LimitKind::TableTooLarge,
                     ));
                 }
-                let mut row: Vec<String> = Vec::new();
+                let mut row: Vec<gist_model::RawCell> = Vec::new();
                 let mut has_th = false;
                 for cell in child_el.children() {
                     let Some(cell_el) = scraper::ElementRef::wrap(cell) else {
@@ -585,7 +592,18 @@ fn collect_table_rows(
                     has_th |= name == "th";
                     let mut text = String::new();
                     cell_text(cell_el, &mut text, depth + 2, limits.max_nesting_depth)?;
-                    row.push(normalize_cell_text(&text));
+                    let span = |attr: &str| {
+                        cell_el
+                            .value()
+                            .attr(attr)
+                            .map_or(1, gist_model::parse_span_attr)
+                    };
+                    row.push(gist_model::RawCell {
+                        text: normalize_cell_text(&text),
+                        colspan: span("colspan"),
+                        rowspan: span("rowspan"),
+                        v_merge_continue: false,
+                    });
                 }
                 if !row.is_empty() {
                     if rows.is_empty() && (in_thead || has_th) {
@@ -972,7 +990,9 @@ mod tests {
         blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Table { rows, header_row } => Some((rows, *header_row)),
+                Block::Table {
+                    rows, header_row, ..
+                } => Some((rows, *header_row)),
                 _ => None,
             })
             .collect()
@@ -1046,5 +1066,81 @@ mod tests {
             extract_content(&html, 200),
             Err(ParseError::ResourceLimitExceeded(_))
         ));
+    }
+
+    // ── Merged cells (M7/R7) ─────────────────────────────────────────────
+
+    fn merged(blocks: &[Block]) -> (Vec<Vec<String>>, Vec<gist_model::CellSpan>) {
+        blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table { rows, spans, .. } => Some((rows.clone(), spans.clone())),
+                _ => None,
+            })
+            .expect("a table")
+    }
+
+    #[test]
+    fn test_merged_fixture_has_aligned_grid_and_spans() {
+        let html = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/web/merged_cells_article.html"
+        ))
+        .unwrap();
+        let (_, blocks) = extract_content(&html, 200).unwrap();
+        let (rows, spans) = merged(&blocks);
+        assert_eq!(
+            rows,
+            vec![
+                vec!["Sales", "", "Notes"],
+                vec!["North", "100", "Strong"],
+                vec!["South", "80", ""],
+                vec!["Grand total", "", "180"],
+            ]
+        );
+        assert_eq!(spans.len(), 3);
+        assert_eq!((spans[1].row, spans[1].col, spans[1].rowspan), (1, 2, 2));
+    }
+
+    #[test]
+    fn test_hostile_spans_are_rejected_clamped_or_ignored() {
+        for v in ["4294967295", "99999999999999999999", "65"] {
+            let html = format!("<body><table><tr><td colspan=\"{v}\">x</td></tr></table></body>");
+            assert!(
+                matches!(
+                    extract_content(&html, 200),
+                    Err(ParseError::ResourceLimitExceeded(
+                        gist_model::LimitKind::TableTooLarge
+                    ))
+                ),
+                "colspan={v}"
+            );
+        }
+        for v in ["-1", "abc", "0", "1.5"] {
+            let html = format!(
+                "<body><table><tr><td colspan=\"{v}\" rowspan=\"{v}\">a</td><td>b</td></tr></table></body>"
+            );
+            let (_, blocks) = extract_content(&html, 200).unwrap();
+            let (rows, spans) = merged(&blocks);
+            assert_eq!(rows, vec![vec!["a", "b"]], "value {v}");
+            assert!(spans.is_empty());
+        }
+        // rowspan past the last row clamps; overlap truncates.
+        let html =
+            "<body><table><tr><td rowspan=\"4294967295\">a</td><td rowspan=\"2\">b</td></tr>\
+                    <tr><td colspan=\"9\">c</td></tr></table></body>";
+        let (_, blocks) = extract_content(html, 200).unwrap();
+        let (rows, spans) = merged(&blocks);
+        assert_eq!(
+            rows,
+            vec![
+                vec!["a", "b"],
+                vec!["", "", "c", "", "", "", "", "", "", "", ""]
+            ]
+            .into_iter()
+            .map(|r: Vec<&str>| r.into_iter().map(String::from).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+        );
+        assert!(spans.iter().all(|s| s.rowspan <= 2));
     }
 }
