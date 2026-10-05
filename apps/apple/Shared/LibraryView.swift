@@ -243,15 +243,23 @@ struct LibraryView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle("Library")
         .searchable(text: $searchText, prompt: "Search library")
-        .searchFocused($isSearchFieldFocused)
+        .modifier(SearchFocusedIfAvailable(isFocused: $isSearchFieldFocused))
         .background {
             // Invisible button purely to host the ⌘F shortcut -- standard
             // SwiftUI idiom for binding a keyboard shortcut to an action
-            // that isn't itself a visible control. `.searchFocused` (the
-            // declarative macOS/iOS 17+ counterpart to `.searchable`) does
-            // the actual focus work; no manual NSResponder/first-responder
-            // poking involved.
-            Button("Focus Search") { isSearchFieldFocused = true }
+            // that isn't itself a visible control. On macOS 15+
+            // `.searchFocused` (applied above via SearchFocusedIfAvailable)
+            // does the actual focus work. On macOS 14 (the minimum, D1)
+            // that API doesn't exist, so SearchFieldLocator makes the
+            // toolbar's NSSearchField first responder instead (best-effort,
+            // unverified on a real macOS 14 machine; a no-op if not found).
+            Button("Focus Search") {
+                if #available(macOS 15, *) {
+                    isSearchFieldFocused = true
+                } else {
+                    SearchFieldLocator.focusSearchField()
+                }
+            }
                 .keyboardShortcut("f", modifiers: .command)
                 .hidden()
         }
