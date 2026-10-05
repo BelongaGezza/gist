@@ -13,6 +13,14 @@ covered here.
 - **A full Xcode install, not just Command Line Tools.** `xcode-select -p` should print a path
   inside an `Xcode.app` bundle (e.g. `/Applications/Xcode.app/Contents/Developer`), not
   `CommandLineTools`. `xcodebuild` will fail confusingly otherwise.
+- **Minimum macOS: 14.0** (decision D1, 2026-10-04; previously the project built for 26.5 by
+  accident, see `docs/macos-deployment-target-audit-2026-10-04.md`). It is set in three places that
+  must move together: `apps/apple/project.yml` (`options.deploymentTarget.macOS` and the
+  `GISTmacOS` target's `MACOSX_DEPLOYMENT_TARGET`), `apps/apple/macOS/Info.plist`
+  (`LSMinimumSystemVersion`, a literal), and `tools/build-core-xcframework.sh`
+  (`MACOSX_DEPLOYMENT_TARGET`, so the Rust static library's C objects do not inherit the build
+  machine's OS). Any Xcode/SDK new enough to build with a 14.0 target works. The floor is
+  compile-verified only; it has not been run on a real macOS 14 or 15 machine.
 - **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** — the Xcode project
   (`apps/apple/GIST.xcodeproj`) is generated from `apps/apple/project.yml` and is not committed to
   git.

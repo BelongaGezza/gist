@@ -110,7 +110,23 @@ epub zip-bomb gap in the import paths (both closed the day they were found); FTS
 hardening for search input; a macOS App Sandbox with minimal entitlements; and the encryption-at-
 rest and at-rest-integrity work described above. To report a new vulnerability, see `SECURITY.md`.
 
+### Changed
+
+- **Minimum macOS is now 14.** The project had been building for macOS 26.5 since 2026-09-10 (a
+  workaround for linker warnings, not an API requirement); the intended floor of 14 is restored
+  (decision D1, 2026-10-04). The Rust static library is now built with a macOS 14 deployment
+  target, and the one macOS-15-only API (`searchFocused`, used for the library search field) is
+  availability-guarded.
+
 ### Known limitations
+
+- **The macOS 14 floor is compile-verified only.** It builds and the automated tests pass with a
+  14.0 deployment target, but it has not been run on a real macOS 14 (or 15) machine. Behaviour
+  differences in SwiftUI/AppKit, Keychain, sandbox, Vision OCR, speech or loading the embedded
+  `libpdfium.dylib` on those versions are untested.
+- **Cmd+F on macOS 14:** the library search field is focused by an AppKit fallback that looks the
+  field up in the window toolbar; it is unverified on a real macOS 14 machine and does nothing if
+  the field is not found. On macOS 15 and later it uses the native `searchFocused` API.
 
 - **Library "progress" counts RSVP reading only.** A book you have read only in the Flow view
   shows a correct "last read" date but 0% progress, and sorts as unstarted under the progress sort
