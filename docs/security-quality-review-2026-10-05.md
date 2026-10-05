@@ -34,7 +34,10 @@ No High or Medium defect found. Schema v7, the typed limit errors, the PDF text 
 
 ## 4. Item 2 — Typed resource-limit errors
 
-(to be filled)
+- `gist_model::LimitKind` (7 values) is carried by every parser's `ResourceLimitExceeded` (a required field, so the compiler enforces that no construction site omits it). I listed every non-test `LimitKind::` site (`grep`): txt, epub, docx, pdf, web, imageprep (`map_imageprep_error`), core OCR page/size caps; kinds match the limit (nesting -> `TooDeeplyNested`, entry count -> `TooManyEntries`, tables -> `TableTooLarge`, redirects -> `Other`).
+- `gist-core` maps epub/docx/pdf/txt/web limit errors into `ImportError::ResourceLimitExceeded{kind}`; `CoreError::limit_kind` covers `import_txt`. `gist-ffi::limit_kind_to_error` is an exhaustive `match` (a new kind fails to compile). The 7 flat `GistError` variants have fixed `#[error]` text: no paths, numbers or payloads; test `every_limit_kind_maps_to_a_distinct_path_free_gist_error` feeds a limit string containing a path and a count and asserts neither appears.
+- Swift: `ImportLimitMessage` switches on the case only; it shows the user's own file name (last path component) or URL host. `CoreClient.importFile/importUrl` have the new branch; DRM, `PdfEncrypted`, `PdfUnavailable` and `PdfNoTextLayer` branches are untouched in the diff. Xcode build is exhaustive over `GistError`, so no case is unhandled.
+- Result: no defect found.
 
 ## 5. Item 3 — PDF text budget and find_gutters
 
