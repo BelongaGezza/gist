@@ -4869,6 +4869,7 @@ mod tests {
                         vec!["Apple".to_string(), String::new()],
                     ],
                     header_row: true,
+                    spans: vec![],
                 },
                 Block::Paragraph {
                     runs: vec![TextRun::plain("Outro text after.")],
@@ -4893,6 +4894,74 @@ mod tests {
             serde_json::to_string(&section.blocks[1]).unwrap(),
             TABLE_BLOCK_JSON_GOLDEN
         );
+    }
+
+    /// SECOND golden pair (M7/R7), shared with Swift `FlowTableTests`: a
+    /// merged-cell table. Covered slots are empty strings, so the tab/newline
+    /// structure keeps columns aligned; `spans` is the additive JSON field.
+    const MERGED_SECTION_TEXT_GOLDEN: &str =
+        "Intro text.\n\nSales\t\tNotes\nNorth\t100\tStrong\nSouth\t80\t\n\nOutro text after.";
+    const MERGED_BLOCK_JSON_GOLDEN: &str = r#"{"Table":{"rows":[["Sales","","Notes"],["North","100","Strong"],["South","80",""]],"header_row":true,"spans":[{"row":0,"col":0,"rowspan":1,"colspan":2},{"row":1,"col":2,"rowspan":2,"colspan":1}]}}"#;
+
+    fn section_with_merged_table() -> Section {
+        let raw = |t: &str, cs, rs| gist_model::RawCell {
+            text: t.to_string(),
+            colspan: cs,
+            rowspan: rs,
+            v_merge_continue: false,
+        };
+        let (rows, spans) = gist_model::layout_table(
+            vec![
+                vec![raw("Sales", 2, 1), raw("Notes", 1, 1)],
+                vec![raw("North", 1, 1), raw("100", 1, 1), raw("Strong", 1, 2)],
+                vec![raw("South", 1, 1), raw("80", 1, 1)],
+            ],
+            &gist_model::ParseLimits::default(),
+        )
+        .unwrap();
+        Section {
+            id: "s0".to_string(),
+            heading: None,
+            blocks: vec![
+                Block::Paragraph {
+                    runs: vec![TextRun::plain("Intro text.")],
+                },
+                Block::Table {
+                    rows,
+                    header_row: true,
+                    spans,
+                },
+                Block::Paragraph {
+                    runs: vec![TextRun::plain("Outro text after.")],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn merged_table_matches_the_second_cross_language_golden() {
+        let section = section_with_merged_table();
+        assert_eq!(
+            anchoring::section_text(&section),
+            MERGED_SECTION_TEXT_GOLDEN
+        );
+        assert_eq!(
+            serde_json::to_string(&section.blocks[1]).unwrap(),
+            MERGED_BLOCK_JSON_GOLDEN
+        );
+    }
+
+    #[test]
+    fn annotations_in_a_merged_table_stay_valid() {
+        let section = section_with_merged_table();
+        let doc = Document::new(Metadata::minimal("merged anchors"), vec![section.clone()]);
+        let text = anchoring::section_text(&section);
+        for quote in ["Notes", "Strong", "Outro text"] {
+            let start = text.find(quote).unwrap();
+            let annotation = highlight_annotation("s0", start, quote.len(), &text);
+            let (status, _) = anchoring::reanchor(&doc, &annotation);
+            assert_eq!(status, AnchorStatus::Valid, "quote {quote:?}");
+        }
     }
 
     #[test]

@@ -4388,6 +4388,7 @@ mod tests {
                         vec!["Zucchinimarrow".into(), "Green".into()],
                     ],
                     header_row: true,
+                    spans: vec![],
                 },
             ],
         };
@@ -4490,7 +4491,7 @@ mod tests {
 
         let loaded = store.get_item(&id).unwrap().expect("item");
         match &loaded.sections[0].blocks[1] {
-            gist_model::Block::Table { rows, header_row } => {
+            gist_model::Block::Table { rows, header_row, .. } => {
                 assert!(*header_row);
                 assert_eq!(rows[1], vec!["Zucchinimarrow", "Green"]);
             }
@@ -4514,6 +4515,129 @@ mod tests {
         for bytes in [bare.as_slice(), v1.as_bytes()] {
             let loaded: gist_model::Document = deserialize_ir_blob(bytes).unwrap();
             assert_eq!(loaded.metadata.title, "legacy-after-tables");
+        }
+    }
+
+    // ── Merged-cell `spans` forward-compat evidence (ADR-019 addendum 2, M7/R7) ──
+
+    /// The IR types exactly as an M6 (table-aware, span-unaware) binary knew
+    /// them: `Block::Table { rows, header_row }` with NO `spans` field.
+    mod pre_spans {
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        pub enum Block {
+            Heading {
+                level: u8,
+                text: String,
+            },
+            Paragraph {
+                runs: Vec<gist_model::TextRun>,
+            },
+            Image {
+                src: String,
+                alt: Option<String>,
+                caption: Option<String>,
+            },
+            List {
+                ordered: bool,
+                items: Vec<String>,
+            },
+            Table {
+                rows: Vec<Vec<String>>,
+                header_row: bool,
+            },
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        pub struct Section {
+            pub id: String,
+            pub heading: Option<(u8, String)>,
+            pub blocks: Vec<Block>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        pub struct Document {
+            pub id: String,
+            pub metadata: gist_model::Metadata,
+            pub sections: Vec<Section>,
+            pub token_stream: Vec<gist_model::Token>,
+        }
+    }
+
+    fn doc_with_merged_table(title: &str) -> gist_model::Document {
+        let section = gist_model::Section {
+            id: "s0".to_string(),
+            heading: None,
+            blocks: vec![gist_model::Block::Table {
+                rows: vec![
+                    vec!["Sales".into(), "".into(), "Notes".into()],
+                    vec!["North".into(), "100".into(), "Strong".into()],
+                ],
+                header_row: true,
+                spans: vec![gist_model::CellSpan {
+                    row: 0,
+                    col: 0,
+                    rowspan: 1,
+                    colspan: 2,
+                }],
+            }],
+        };
+        gist_model::Document::new(gist_model::Metadata::minimal(title), vec![section])
+    }
+
+    /// EVIDENCE: a blob with merged-cell spans is still `ir_version` 2 (a
+    /// table document), and an M6 binary — which knows `Table` but not
+    /// `spans` — decodes it with its grid intact (serde ignores the unknown
+    /// field). So no further version bump is needed.
+    #[test]
+    fn an_m6_binary_reads_a_spans_blob_with_the_grid_intact_so_no_bump_is_needed() {
+        let doc = doc_with_merged_table("spans-fwd");
+        assert_eq!(required_ir_version(&doc), IR_VERSION_TABLES);
+        let blob = serialize_ir_blob(&doc, required_ir_version(&doc)).unwrap();
+        assert!(blob.contains("\"spans\""), "the new field is in the blob");
+        let old: pre_spans::Document =
+            deserialize_ir_blob_with_max(blob.as_bytes(), IR_VERSION_TABLES)
+                .expect("M6 binary decodes a spans blob");
+        match &old.sections[0].blocks[0] {
+            pre_spans::Block::Table { rows, header_row } => {
+                assert!(*header_row);
+                assert_eq!(rows[0], vec!["Sales", "", "Notes"]);
+                assert_eq!(rows[1], vec!["North", "100", "Strong"]);
+            }
+            other => panic!("expected a table, got {other:?}"),
+        }
+    }
+
+    /// The reverse direction: an M6-written table blob (no `spans` key at
+    /// all) loads in this binary with empty spans, and an unmerged table
+    /// serialises byte-identically to the M6 shape.
+    #[test]
+    fn m6_table_blobs_load_with_empty_spans_and_unmerged_output_is_unchanged() {
+        let m6 = r#"{"ir_version":2,"payload":{"id":"d1","metadata":{"title":"t","author":null,"source_type":"","source_ref":null,"import_date":null,"language":null,"word_count":0},"sections":[{"id":"s0","heading":null,"blocks":[{"Table":{"rows":[["a","b"]],"header_row":false}}]}],"token_stream":[]}}"#;
+        let doc: gist_model::Document = deserialize_ir_blob(m6.as_bytes()).unwrap();
+        match &doc.sections[0].blocks[0] {
+            gist_model::Block::Table { spans, .. } => assert!(spans.is_empty()),
+            other => panic!("expected a table, got {other:?}"),
+        }
+        let unmerged = doc_with_table("plain");
+        let blob = serialize_ir_blob(&unmerged, required_ir_version(&unmerged)).unwrap();
+        assert!(!blob.contains("spans"), "unmerged tables omit the field");
+    }
+
+    #[test]
+    fn merged_table_document_round_trips_through_the_store_and_search() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_merged_table("merged-roundtrip");
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+        let loaded = store.get_item(&id).unwrap().expect("item");
+        match &loaded.sections[0].blocks[0] {
+            gist_model::Block::Table { spans, .. } => assert_eq!(spans.len(), 1),
+            other => panic!("expected a table, got {other:?}"),
         }
     }
 
