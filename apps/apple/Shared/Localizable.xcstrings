@@ -46,6 +46,39 @@
         }
       }
     },
+    "Row %lld of %lld, columns %lld to %lld of %lld" : {
+      "comment" : "Accessibility value for a merged table cell spanning several columns: its row, then the first and last column it covers.",
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Row %1$lld of %2$lld, columns %3$lld to %4$lld of %5$lld"
+          }
+        }
+      }
+    },
+    "Rows %lld to %lld of %lld, column %lld of %lld" : {
+      "comment" : "Accessibility value for a merged table cell spanning several rows: the first and last row it covers, then its column.",
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Rows %1$lld to %2$lld of %3$lld, column %4$lld of %5$lld"
+          }
+        }
+      }
+    },
+    "Rows %lld to %lld of %lld, columns %lld to %lld of %lld" : {
+      "comment" : "Accessibility value for a merged table cell spanning several rows and columns: the rows and columns it covers.",
+      "localizations" : {
+        "en-GB" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Rows %1$lld to %2$lld of %3$lld, columns %4$lld to %5$lld of %6$lld"
+          }
+        }
+      }
+    },
     "Slow" : {
       "comment" : "Read-aloud speed option."
     },
