@@ -92,7 +92,9 @@ TOCTOU: validation and extraction both read the same file in a private `mktemp -
 
 ## 11. Item 9 — PDF isolation spike
 
-(to be filled)
+- **Not part of any shipping target:** root `Cargo.toml` has `exclude = ["spikes"]`; the spike has its own `[workspace]` and lockfile; `cargo test --workspace` (366 tests), `cargo deny check` and `cargo clippy --workspace` never saw it; `grep` finds no reference in `project.yml` or any workflow. The only root `Cargo.lock` change is a `serde_json` dev-dependency edge on `gist-parse-pdf` (for its `parse_file` example).
+- **Re-ran the crash-containment script** after `cargo build --release --offline` in `spikes/pdf-isolation` (12.8 s): `crash.sh` gave `HelperCrashed{signal=6}` (abort), `{signal=11}` (SEGV), `{timeout}` after 20 055 ms (hang), host exit 0 each time, and a normal parse afterwards returned `Ok` (26 571 B JSON), matching the results document. I did not re-run the benchmark table.
+- **ADR-022 reasoning**: consistent with D3 (spike only, no product change) and with the numbers; the recommendation (accept for v1.0, portable helper later) follows from Low severity, the unmeasured signing/N8 risk and the weak privilege separation of an inherited sandbox. Two gaps (F76): it does not mention that a sandboxed app's spawned helper must be signed with `com.apple.security.inherit` to launch at all, and it carries an empty duplicate `## Recommendation` heading. The measurements are synthetic fixtures on one unsigned macOS 27 machine, which the document says itself.
 
 ## 12. Items 10, 11, 13 — Windows handoffs, claim check, hygiene
 
