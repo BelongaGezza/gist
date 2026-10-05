@@ -50,4 +50,25 @@ Realistic risk: pdfium is Chromium's PDF engine, heavily fuzzed, but it is the l
 
 ## Recommendation
 
-Pending measurements.
+## Measured evidence (summary; `docs/pdf-isolation-spike-2026-10-05.md` has the tables)
+
+All figures: synthetic and hostile fixtures plus one generated 400-page PDF only (no real documents exist, D6), one machine (macOS 27, Apple Silicon), unsigned, option (b) only.
+
+- Fixed cost of a helper process: about 4-5 ms per parse (small fixtures: 15 ms in-process vs 20 ms isolated).
+- 400-page text-heavy PDF: 294 ms in-process vs 372 ms (pipe) and 381 ms (fd); the extra time is mostly the 17.4 MB Document JSON round trip. Helper peak 58 MiB, host peak 39 MiB (host holds only the deserialised Document), versus 57 MiB in-process.
+- Fault injection (abort, SIGSEGV, hang): the host survived all three, returned a typed outcome (`HelperCrashed{signal=6}`, `{signal=11}`, `{timeout}` after a 20 s watchdog) and parsed a normal file afterwards. This proves the mechanism, not a real pdfium bug.
+- A deny-default `sandbox-exec` profile that allowed broad reads (but no writes or network) still let pdfium load and parse; a stricter read-restricted profile made the helper abort at startup and was not debugged. Per-service XPC sandboxing was not tested.
+- Not measured: XPC, signed or notarised behaviour, Hardened Runtime validation of a second binary, inputs near 256 MiB, Documents near the 64 MiB text budget, real PDFs, macOS 14/15, Windows.
+
+## Recommendation (for the user to decide; this ADR does not decide it)
+
+**Do not build it for v1.0; accept the risk now (option c) with the mitigations already in force, and schedule a portable helper process (option b, hardened toward a) for a post-v1.0 milestone.**
+
+Basis:
+
+1. Severity is Low (F33): a local single-user app, the user chooses the file, the App Sandbox already limits what a compromised process reaches, and the F36 budget, the limits and the fuzzing are in place. The realistic failure today is "importing a hostile PDF closes the app", with library and reading progress safe in SQLite.
+2. The spike shows fault containment is cheap (about 5 ms; about 30 % on a large text PDF) and gives a clean typed-error UX, so the cost argument against it is weak. What it cannot show is the part that matters for exploit containment: a helper that inherits the app sandbox gives crash containment but little privilege separation, and a tighter sandbox (XPC, or `sandbox_init` in the helper) was not demonstrated.
+3. The risky unknown is signing: a second Mach-O or XPC bundle in the notarised DMG and the Hardened Runtime library-validation interplay with `libpdfium.dylib` (N8) cannot be verified without credentials. Adding it before the first real signed release (still gated on credentials) would add a second unverified piece to a pipeline that has never run signed.
+4. If isolation is wanted later, build the portable stdin/stdout helper first (it serves macOS and Windows from one Rust binary, and the spike is a working starting point), keep the Document reply bounded (reply size scales with the text budget; consider returning sections only), and layer XPC sandboxing on macOS only if the signed experiment shows it is worth the bundle.
+
+Alternatives for the user: **implement now** (option b, about the spike's size plus a typed `GistError` variant, a Swift alert, `project.yml`/release-pipeline changes and tests; justified only if a pdfium CVE in the wild changes the severity), or **implement later** as above (this recommendation's second half). Mitigations that apply to the accept choice and cost nothing: keep the pinned pdfium current (fetch script hash bump on each Chromium security release), keep `fuzz_parse_pdf` in the nightly run, and keep the release checklist's signed-launch check for N8.
