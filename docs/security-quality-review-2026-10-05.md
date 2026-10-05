@@ -49,7 +49,12 @@ No High or Medium defect found. Schema v7, the typed limit errors, the PDF text 
 
 ## 6. Item 4 — Merged-cell tables
 
-(to be filled)
+- `parse_span_attr` accepts only ASCII digits, saturates overflow to `u32::MAX`, 0 and garbage -> 1. `layout_table` checks `nrows <= max_table_rows` first, rejects a cell whose `colspan` would pass `max_table_cols` using `want > max_cols - c` (no overflow), and clamps `rowspan` to the rows that exist, so allocation is bounded by rows x cols (default 2000 x 64 = 128k slots) whatever the declared spans say. Spans never overlap (a colspan stops at the first covered slot; slots covered from above also cover the current row, so lower rows are free).
+- **Adversarial test** (temporary integration test, deleted, not committed): 200 000 random raw tables (up to 13 rows x 7 cells, tight limits 12x10, colspan/rowspan drawn from 0, `u32::MAX`, 1-100, 2-4, random `v_merge_continue`). ~28 k and ~65 k tables (two distribution runs) were accepted and every one satisfied: dimensions within limits, spans inside the grid, no two spans overlap, covered non-origin slots empty, `plain_text()` does not panic. The rest were correctly rejected. No panic, overflow or invariant break.
+- Cost: O(cells + covered area), covered area <= grid; no quadratic path from many small spans.
+- Serde: `spans` is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`; unmerged tables serialise byte-identically (test asserts no "spans" key). Forward compat (ADR-019 Addendum 2, no `ir_version` bump): the test `an_m6_binary_reads_a_spans_blob_with_the_grid_intact...` deserialises into a locally defined `pre_spans::Table{rows,header_row}` (no `spans`, no `deny_unknown_fields`) at max version 2 and gets the grid intact; the reverse (M6 blob without `spans`) loads with empty spans. The old-shape types are genuinely span-unaware, so the claim holds: an old binary shows merged cells as flat grid with empty covered slots, which is not misbehaviour.
+- DOCX `gridSpan`/`vMerge` and epub/web `colspan`/`rowspan` all go through `layout_table`/`parse_span_attr` (fixtures and hostile-value tests in each crate pass). Swift side: `TableSpanMap` drops out-of-grid/overlapping spans and clips to the grid; the two cross-language golden strings match (`merged_table_golden_plain_text_matches_swift` and the Swift mirror, both pass in the 366/271 runs).
+- Findings: F73 (per-cell `TableSpanMap` rebuild in `cellLabel`), F77 (continuation-cell text dropped). Also `TableSpanMap.init` has no early exit when a span overlaps, so a tampered blob with many full-grid spans costs O(spans x area); parsers never emit that.
 
 ## 7. Item 5 — Deployment target 14.0
 
