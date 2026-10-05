@@ -32,7 +32,21 @@ Realistic risk: pdfium is Chromium's PDF engine, heavily fuzzed, but it is the l
 
 ## Costs shared by (a) and (b)
 
-Filled in below.
+**Signing, Hardened Runtime and N8.** Every nested executable and dylib must be signed with the app's Team ID, inside-out, before the app is signed; the current pipeline (`release-macos.yml`, `tools/build-dmg.sh`) signs the app's embedded `libpdfium.dylib` through Xcode's `codeSign: true` and has never been run with real credentials. A helper adds a second Mach-O to that chain. Library validation is satisfied while everything shares the Team ID, so `disable-library-validation` stays unnecessary (ADR-002 rule). N8's lesson applies: the helper must link the Rust core **statically** and load `libpdfium.dylib` by absolute path from a known location; never rely on `-l` search-path resolution. **None of this can be verified here (no signing identity), including notarisation of a nested bundle or helper.**
+
+**Where pdfium lives.** For (a) the dylib moves into the service bundle (`GISTPdf.xpc/Contents/Frameworks/`) and is removed from the app, so the main process no longer maps pdfium at all, which is what makes the isolation real. For (b) it can stay in `Contents/Frameworks` and the helper loads it by path relative to its own executable. In both cases `project.yml` changes (not done here).
+
+**IPC.** Input up to 256 MiB (`ParseLimits.max_bytes`) crosses once. A pipe copies it; passing a file descriptor (stdin redirected to the user-selected file, or an XPC `xpc_fd`/`NSFileHandle`) copies nothing and also keeps the bytes out of the app's memory. The reply is the whole `Document` as JSON (sections plus the full token stream); the spike measures its size. The reply is bounded by the F36 text budget (64 MiB of text), so it is bounded but not small. A leaner protocol (reply only sections and let the host re-tokenise) is possible but changes the core's shape.
+
+**Memory.** During an isolated parse the bytes exist in the host (read from disk) and the helper; the Document exists in the helper and, after deserialisation, in the host. Peak host RSS is therefore roughly the Document's size, not pdfium's working set; peak helper RSS carries pdfium plus layout. Measured in the results document.
+
+**Failure UX.** The host classifies helper termination into a typed error: signal, non-zero exit, protocol error, timeout. The Swift side would map one new `GistError` variant (for example `PdfParserCrashed`) to a calm alert, "this PDF could not be read safely", with nothing persisted for the failed import. No crash report for the app, no lost UI state. A watchdog (the spike uses 20 s) also contains hangs.
+
+**Testing strategy.** A fault-injection mode in the helper (compiled only into test builds) triggers abort, null write and hang on marker bytes, and host tests assert a typed error and an intact process; real-pdfium fixture tests run through both paths and compare Documents byte for byte; the signed launch step goes onto the release checklist next to N8.
+
+**Windows.** The core is shared. Option (b)'s protocol (stdin bytes in, framed reply out) is portable: on Windows the same helper runs under `CreateProcess` with a restricted token or AppContainer. Option (a) is Apple-only and would leave Windows on in-process pdfium unless (b) is built as well. If any isolation is built, the portable helper is the only design that serves both apps from one codebase; an XPC wrapper could later be layered on macOS if stronger sandboxing is wanted.
+
+**What XPC adds over (b), not measured here.** A per-service sandbox profile that can be tighter than the app's (no network, no file access), launchd-managed lifecycle and automatic restart, entitlement-checked connections, and a first-party Swift API. It costs a bundle, an `Info.plist`, an Xcode target, and Objective-C or Swift glue between the Swift app and the Rust core. The spike did not build an XPC bundle: it needs a signed, launchd-registered bundle that cannot be exercised from an unsigned script, so XPC-specific latency, restart behaviour and sandbox enforcement are unmeasured.
 
 ## Recommendation
 
