@@ -198,10 +198,24 @@ enum TableAccessibility {
     static func cellLabel(
         rows: [[String]], headerRow: Bool, row: Int, column: Int, spans: [TableSpanVM] = []
     ) -> String {
+        guard headerRow, row > 0 else {
+            return cellLabel(rows: rows, headerRow: headerRow, row: row, column: column, map: nil)
+        }
+        return cellLabel(
+            rows: rows, headerRow: headerRow, row: row, column: column,
+            map: TableSpanMap(rows: rows, spans: spans))
+    }
+
+    /// Same label using an already-built span map, so a table view that
+    /// renders many cells builds the map once instead of once per cell
+    /// (review F73).
+    static func cellLabel(
+        rows: [[String]], headerRow: Bool, row: Int, column: Int, map: TableSpanMap?
+    ) -> String {
         let text = cellText(rows: rows, row: row, column: column)
         let shown = text.isEmpty ? String(localized: "empty") : text
-        guard headerRow, row > 0 else { return shown }
-        let header = TableSpanMap(rows: rows, spans: spans).headerText(rows: rows, column: column)
+        guard headerRow, row > 0, let map else { return shown }
+        let header = map.headerText(rows: rows, column: column)
         return header.isEmpty ? shown : "\(header): \(shown)"
     }
 
@@ -354,7 +368,7 @@ struct FlowTableView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
                 TableAccessibility.cellLabel(
-                    rows: rows, headerRow: headerRow, row: r, column: c, spans: spans)
+                    rows: rows, headerRow: headerRow, row: r, column: c, map: map)
             )
             .accessibilityValue(
                 TableAccessibility.cellPosition(

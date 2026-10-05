@@ -14,8 +14,8 @@ No High or Medium defect found. Schema v7, the typed limit errors, the PDF text 
 | ID | Severity | Status | Summary |
 |----|----------|--------|---------|
 | F71 | Low | Fixed (b518d7f) | `tools/test-fetch-pdfium-guard.sh` fails on macOS (12 of 13 ok, 1 FAIL, temp tree not removable): its ustar writer gave directory entries mode 0644, so extraction produced a directory with no search bit ("Permission denied" reading `lib/libpdfium.dylib`). Fix: 0755 for typeflag 5 plus `chmod -R u+rwx` before cleanup. Now 13/13. Not run in CI (F52 still open). |
-| F72 | Low | Open | `PagedDocumentIndex.position(forAnchorSection:byteStart:)` (`Paginator.swift`) calls `FlowSectionVM.blockByteOffset(at:)` (O(i), recomputes `plainText`) inside a loop over all blocks: O(N^2) per annotation jump in a section with N blocks. Fix: accumulate the offset incrementally. |
-| F73 | Low | Open | `TableAccessibility.cellLabel` builds a fresh `TableSpanMap` (allocates rows x cols slots) for every data cell body evaluation when `headerRow` is true; `cell(...)` already has the map. Wasteful on big tables (up to 2000x64). Pass the map in. |
+| F72 | Low | Fixed | `PagedDocumentIndex.position(forAnchorSection:byteStart:)` (`Paginator.swift`) calls `FlowSectionVM.blockByteOffset(at:)` (O(i), recomputes `plainText`) inside a loop over all blocks: O(N^2) per annotation jump in a section with N blocks. Fix: accumulate the offset incrementally. |
+| F73 | Low | Fixed | `TableAccessibility.cellLabel` builds a fresh `TableSpanMap` (allocates rows x cols slots) for every data cell body evaluation when `headerRow` is true; `cell(...)` already has the map. Wasteful on big tables (up to 2000x64). Pass the map in. |
 | F74 | Low | Open | `PageBlockMeasurer.estimatedTableHeight` creates an `NSTextStorage`+`NSLayoutManager` per non-empty cell (up to 128k at the table caps) on a detached task that is not cooperatively cancellable; `NSFontManager.shared` is also used off the main thread. Spinner, not a hang, but unmeasured. |
 | F75 | Info | Open | `tools/check-localisation.sh` false negatives/positives: triple-quoted string literals and strings held in `String` variables are not checked (the latter is documented, the former is not); `Text(verbatim:)` literals are flagged as missing (false positive). Verified by a temp Swift file: plain `Text`/`Button`/`.help` misses are caught. |
 | F76 | Info | Open | ADR-022 omits that a sandboxed app's `posix_spawn`ed helper needs `com.apple.security.inherit` (plus app-sandbox) to launch, which affects option (b)'s cost; it also has an empty duplicate `## Recommendation` heading. |
@@ -126,8 +126,28 @@ Run after `./tools/fetch-pdfium.sh`, `cd fuzz && cargo +nightly fuzz run <target
 
 ## 14. Could not verify
 
-(to be filled)
+- A Release (arm64+x86_64) `GIST.app` link and its `minos`; only the Debug arm64 app and the two static slices were inspected.
+- Anything on macOS 14 or 15: `SearchFieldLocator`, `searchFocused` fallback, and the whole app at its stated minimum.
+- Paginated-view visual correctness, page clipping and the SwiftUI-vs-AppKit line-break slack (no display); the performance of a single multi-megabyte paragraph or a 2000x64 table in the paged view (F74, unmeasured).
+- Memory amplification figures behind `MAX_PDF_TEXT_BYTES` (taken from the role's report, not re-measured); real-document PDF layout (none exist, D6).
+- Windows: C# bindings regenerated with the new variants/fields, and the decoder ignoring `spans`, are from reading only; nothing was built or run.
+- The signed/Hardened-Runtime launch (N8), notarisation, and a nested helper binary (ADR-022) — no signing identity.
+- Migration cost on a large real library (index build on `tokens`) was not timed.
+- `fuzz_parse_txt` did not complete; fuzz coverage of merged cells beyond existing seeds.
+- The spike benchmark table was not re-run (only the crash script).
 
 ## 15. Gates run on the tree
 
-(to be filled)
+All run in this worktree at `c0c8ff6` (+ reviewer commits), logs under the session scratchpad:
+- `./tools/fetch-pdfium.sh`: verified and extracted. `cargo fmt --check`: exit 0. `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
+- `GIST_REQUIRE_PDFIUM=1 cargo test --workspace`: **366 passed, 0 failed, 0 ignored**.
+- `cargo deny check bans licenses sources`: ok. `cargo check -p gist-model --target wasm32-unknown-unknown`: ok. `bash tools/check-localisation.sh`: 358 literals, 0 missing.
+- `./tools/build-core-xcframework.sh`, `./tools/gen-bindings.sh`, `xcodegen generate`: exit 0. `xcodebuild test -scheme GISTmacOS ... -skip-testing:GISTTests/KeychainKeyProviderIntegrationTests`: **271 tests, 0 failures, 0 compile errors**, 0 newer-macOS warnings ; after the F72/F73 Swift edits a re-run gave 272 tests (271 + 1 new), 0 failures.
+- `bash tools/test-fetch-pdfium-guard.sh`: 12/13 before the F71 fix, 13/13 after.
+
+## 16. What I changed
+
+- `b518d7f` F71: guard self-test directory mode and cleanup (`tools/test-fetch-pdfium-guard.sh`).
+- F72: `PagedDocumentIndex.position(forAnchorSection:byteStart:)` accumulates block offsets incrementally; new test `testAnchorLookupMatchesBlockByteOffsetAndScalesLinearly`.
+- F73: `TableAccessibility.cellLabel(... map:)` overload; the table view passes its single `TableSpanMap`; the old signature is kept and delegates.
+- This document. No change to `CLAUDE.md`, `docs/m7-agent-roles.md` or `apps/windows`. Temporary tests (layout fuzz, gutter differential, localisation negative) were deleted, not committed.
