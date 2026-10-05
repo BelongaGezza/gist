@@ -58,7 +58,14 @@ No High or Medium defect found. Schema v7, the typed limit errors, the PDF text 
 
 ## 7. Item 5 — Deployment target 14.0
 
-(to be filled)
+Rebuilt with `./tools/build-core-xcframework.sh` (exit 0), then ran `vtool -show-build` on every object extracted (`ar x`) from both release slices:
+- `aarch64-apple-darwin/release/libgist_ffi.a`: 895 objects; 504 at `minos 14.0` (C deps via `cc`), 391 at `minos 11.0` (Rust objects). Highest 14.0.
+- `x86_64-apple-darwin/release/libgist_ffi.a`: 813 objects; 517 at `minos 14.0`, 296 Rust objects carry `LC_VERSION_MIN_MACOSX` 10.12. Highest 14.0.
+- Debug `GIST.app` built by the test run: `Contents/MacOS/GIST` and `GIST.debug.dylib` arm64 `minos 14.0` (sdk 27.0); embedded `Frameworks/libpdfium.dylib` arm64 and x86_64 `minos 13.0`; `Info.plist` `LSMinimumSystemVersion` 14.0. The claim "highest minos 14.0" holds.
+- The xcframework is still built from `libgist_ffi_universal.a` by explicit full path (`-library "$UNIVERSAL_LIB"`), so N8's static-link selection is intact; `export MACOSX_DEPLOYMENT_TARGET=14.0` is in the script.
+- `xcodebuild test` log: 0 occurrences of "newer macOS"/"newer version"; the only warnings are two pre-existing Swift concurrency warnings in `OcrImportModel.swift`. The project builds at 14.0, so no unavailable API is used without `#available` (the compiler enforces that).
+- `SearchFieldLocator` (`SearchFocusCompat.swift`): optional-chained `guard let`, no force unwrap, finite recursive walk of the window's view tree, keeps no references. Harmless no-op if no field is found. It is compile-verified only, never run on macOS 14.
+- Not verified: a Release (`x86_64`+`arm64`) app link, and any run on a real macOS 14 machine.
 
 ## 8. Item 6 — fetch-pdfium.sh
 
