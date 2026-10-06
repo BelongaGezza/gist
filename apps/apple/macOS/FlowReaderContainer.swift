@@ -12,6 +12,10 @@ import SwiftUI
 /// shape `RsvpPlayer.load` uses for RSVP sessions (see RsvpView.swift).
 struct FlowReaderContainer<Layout: ReadingLayout>: View {
     let itemId: String
+    /// Set by `FlowReaderHost`: the active layout and how to switch it. `nil`
+    /// (e.g. a container built directly) hides the Scroll/Pages control.
+    var layoutMode: ReadingLayoutMode?
+    var onSwitchLayout: ((ReadingLayoutMode, Double) -> Void)?
     @EnvironmentObject var core: CoreClient
     @EnvironmentObject var themeManager: ThemeManager
     @State private var document: FlowDocumentVM?
@@ -28,8 +32,15 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
     /// `ReadingLayout` is hosting it.
     @StateObject private var tts = TtsPlayer()
 
-    init(itemId: String) {
+    init(
+        itemId: String,
+        carryFraction: Double? = nil,
+        layoutMode: ReadingLayoutMode? = nil,
+        onSwitchLayout: ((ReadingLayoutMode, Double) -> Void)? = nil
+    ) {
         self.itemId = itemId
+        self.layoutMode = layoutMode
+        self.onSwitchLayout = onSwitchLayout
         // Seeded synchronously from the Settings scene's Typography-tab
         // defaults (`TypographyDefaults`, see AppSettings.swift) at init
         // time, same as `progress` below -- a fresh install still gets
@@ -40,7 +51,7 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
         // so the very first `Layout` instance already has the real
         // `initialFraction` to restore to, rather than a placeholder 0 that
         // would need a second, jarring scroll once the real value loads.
-        _progress = StateObject(wrappedValue: ReadingProgress(initialFraction: FlowScrollPositionStore.load(itemId: itemId)))
+        _progress = StateObject(wrappedValue: Layout.seedProgress(itemId: itemId, carryFraction: carryFraction))
     }
 
     var body: some View {
@@ -68,13 +79,20 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
         .background(themeManager.resolvedTheme.background)
         .foregroundStyle(themeManager.resolvedTheme.foreground)
         .task {
-            document = await core.loadDocument(itemId: itemId)
+            document = await core.openFlowDocument(itemId: itemId)
         }
         .task {
             await annotationState.reload(itemId: itemId, core: core)
         }
         .onChange(of: progress.fraction) { _, newValue in
-            FlowScrollPositionStore.save(itemId: itemId, fraction: newValue)
+            // Only the scrolling layout owns the flow store (ADR-023).
+            if Layout.persistsFlowScrollFraction {
+                FlowScrollPositionStore.save(itemId: itemId, fraction: newValue)
+            }
+        }
+        .onChange(of: tts.currentBlockIndex) { _, blockIndex in
+            // Read-aloud follow-along for layouts that page (ignored by flow).
+            if let blockIndex { navigation.pendingBlockIndex = blockIndex }
         }
         // Stop read-aloud when leaving the screen -- otherwise speech would
         // keep going after the reader has navigated away, with no visible
@@ -180,6 +198,8 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
                 }
             }
 
+            layoutPicker(document: document)
+
             typographyMenu
 
             readAloudControls(document: document)
@@ -250,6 +270,31 @@ struct FlowReaderContainer<Layout: ReadingLayout>: View {
             }
         } label: {
             Label("Typography", systemImage: "textformat.size")
+        }
+    }
+
+    /// Scroll / Pages choice (ADR-023). Switching hands the current block
+    /// position to the other layout through `ReadingPositionMapping`; neither
+    /// layout's own position store is written by the switch.
+    @ViewBuilder
+    private func layoutPicker(document: FlowDocumentVM) -> some View {
+        if let layoutMode, let onSwitchLayout {
+            Picker("Layout", selection: Binding(
+                get: { layoutMode },
+                set: { newMode in
+                    guard newMode != layoutMode else { return }
+                    let blockCount = document.sections.reduce(0) { $0 + $1.blocks.count }
+                    let block = ReadingPositionMapping.blockIndex(forFraction: progress.fraction, blockCount: blockCount)
+                    onSwitchLayout(newMode, ReadingPositionMapping.carryFraction(forBlockIndex: block, blockCount: blockCount))
+                }
+            )) {
+                ForEach(ReadingLayoutMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 140)
+            .accessibilityLabel("Reading layout")
         }
     }
 

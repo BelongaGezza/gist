@@ -134,7 +134,7 @@ struct AnnotationsSidebarView: View {
                     .fill(highlight.highlightColor?.color ?? .yellow)
                     .frame(width: 12, height: 12)
                     .padding(.top, 4)
-                    .accessibilityLabel("\(highlight.highlightColor?.label ?? "Yellow") highlight")
+                    .accessibilityLabel("\(highlight.highlightColor?.label ?? String(localized: "Yellow")) highlight")
                 VStack(alignment: .leading, spacing: 2) {
                     Text(document.sectionLabel(for: highlight))
                         .font(.caption)

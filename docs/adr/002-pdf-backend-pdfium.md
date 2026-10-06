@@ -94,3 +94,41 @@ real Developer-ID-signed, notarized Release build — cannot be verified here
 `docs/v1.0-release-checklist.md`. What *was* verified: an unsigned build embeds
 the dylib in `Contents/Frameworks/` and the test host (`GIST.app`) imports a
 real PDF through it.
+
+## Addendum (M7 R3, 2026-10-04): PDF total-text budget (F36)
+
+`ParseLimits.max_expanded_bytes` (512 MiB) is sized for zip expansion and was
+the only total-text budget for PDFs. For a PDF the extracted text is not the
+dominant cost: it is amplified into the `Document`'s word-token stream (about
+12-14 bytes of resident memory per extracted byte), and a PDF's input-size cap
+gives no protection because a single flate-compressed content stream can be
+shared by every page.
+
+**Decision.** `gist-parse-pdf` enforces
+`text_budget(limits) = min(limits.max_expanded_bytes, MAX_PDF_TEXT_BYTES)` with
+`MAX_PDF_TEXT_BYTES = 64 MiB`, a constant in the crate (no new `ParseLimits`
+field, so `gist-model` is unchanged for Windows/wasm32). It is checked before
+allocation (pdfium's reported glyph count against the remaining budget) and
+again on the laid-out text. Related hardening: page indices are narrowed with a
+checked conversion (a limit error, never a silent `u16` wrap); gutter
+detection uses sorted extents plus binary search instead of a per-gutter scan
+of all fragments (output identical, asserted against the old implementation);
+and `build_document` consumes each page's lines as they are folded into
+paragraphs so lines and paragraphs are not both resident.
+
+**Evidence and its limits.** There is no real-document corpus (decision D6), so
+the number is derived from hostile synthetic PDFs only, generated with stdlib
+code (not committed), measured with `/usr/bin/time -l` on
+`cargo build --release -p gist-parse-pdf --example parse_file`:
+
+| input | text | peak RSS before | peak RSS after |
+|---|---|---|---|
+| 2000 pages x 3.5 K chars (a long book) | 7 M chars | 120 MiB | 120 MiB |
+| 200 pages x 280 K chars (dense, under the cap) | 56 M chars | 804 MiB | 742 MiB |
+| 1000 pages x 280 K chars (hostile, over the cap) | 280 M chars | 3.1-3.7 GiB, completes | 181 MiB, rejected after ~64 M chars |
+
+A very text-dense 2000-page book is about 12 MB, so 64 MiB leaves roughly 5x
+headroom while bounding the parse itself to about 0.9 GiB. Layout quality on
+real documents remains unmeasured (D6). Extraction with pages dropped
+immediately peaks at 92 MiB for the 56 M-character case; retained line text adds
+~75 MiB; the remainder is the token stream built by `Document::new`.

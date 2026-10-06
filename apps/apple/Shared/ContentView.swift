@@ -37,7 +37,7 @@ struct ContentView: View {
                         case .rsvp(let itemId):
                             RsvpView(itemId: itemId, navigationPath: $navigationPath)
                         case .flow(let itemId):
-                            FlowReaderContainer<FlowViewSwiftUINative>(itemId: itemId)
+                            FlowReaderHost(itemId: itemId)
                         }
                     }
             }

@@ -10,7 +10,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+tmp="$(mktemp -d)"; trap 'chmod -R u+rwx "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT
 
 guard() { bash "$root/tools/fetch-pdfium.sh" --check-archive "$1" >/dev/null 2>&1; }
 
@@ -42,7 +42,13 @@ write_entry() {
     emit_header() {
         {
             printf '%s' "$name";                     nuls $((100 - ${#name}))
-            printf '%07o\0' 420                      # mode 0644
+            # mode: 0755 for a directory (typeflag 5), 0644 otherwise. A
+            # directory header carrying 0644 extracts on POSIX hosts into a
+            # directory with no search bit, so the sanity extraction below
+            # fails with "Permission denied" and the temp tree cannot be
+            # removed (R-final review, 2026-10-05).
+            if [ "$typeflag" = "5" ]; then printf '%07o\0' 493
+            else printf '%07o\0' 420; fi
             printf '%07o\0' 0                        # uid
             printf '%07o\0' 0                        # gid
             printf '%011o\0' "$size"                 # size

@@ -8,6 +8,16 @@ XCFRAMEWORK_PATH="$ARTIFACTS_DIR/GistCore.xcframework"
 
 cd "$REPO_ROOT"
 
+# The app's minimum macOS is 14.0 (D1, 2026-10-04; keep in step with
+# apps/apple/project.yml and Info.plist LSMinimumSystemVersion). Without this
+# the `cc` crate compiles the C dependencies (ring, sqlite3, blake3) with the
+# BUILD MACHINE's OS as their minimum (27.0 on the audit machine), which makes
+# the linker emit "object file was built for newer macOS version" warnings.
+# Set here (not .cargo/config.toml) because this script is the single entry
+# point CI (apple-build, release-macos) and local builds share, and it only
+# affects these macOS target builds; a plain host `cargo build` is untouched.
+export MACOSX_DEPLOYMENT_TARGET=14.0
+
 echo "→ Ensuring Rust cross-compilation targets are installed..."
 rustup target add aarch64-apple-darwin 2>/dev/null || true
 rustup target add x86_64-apple-darwin 2>/dev/null || true

@@ -14,6 +14,8 @@ members = [
     "crates/gist-ffi",
 ]
 
+exclude = ["spikes"]   # throwaway spikes (own [workspace]); never shipping
+
 [workspace.dependencies]
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"

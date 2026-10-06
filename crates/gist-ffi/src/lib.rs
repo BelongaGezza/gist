@@ -43,12 +43,57 @@ pub enum GistError {
     /// pdfium could not be loaded in this build/bundle.
     #[error("PDF support is unavailable in this build")]
     PdfUnavailable,
+    // ── Typed resource-limit errors (M7 R3) ────────────────────────────────
+    // One flat variant per `gist_model::LimitKind` (uniffi `flat_error`
+    // cannot carry a payload enum), so Swift/C# switch on the case and show
+    // an honest, specific message. Messages are fixed text: no paths, no
+    // limit numbers, no panic payloads.
+    /// The input is larger than GIST's per-file size limit.
+    #[error("this file is too large for GIST's import limits")]
+    ResourceLimitTooLarge,
+    /// More pages (or chapters) than GIST's page limit.
+    #[error("this document has too many pages for GIST's import limits")]
+    ResourceLimitTooManyPages,
+    /// More internal archive entries than GIST's limit (epub/docx).
+    #[error("this file contains too many internal parts for GIST's import limits")]
+    ResourceLimitTooManyEntries,
+    /// Structure nested deeper than GIST's limit.
+    #[error("this document is nested too deeply for GIST's import limits")]
+    ResourceLimitTooDeeplyNested,
+    /// Extracted/decompressed content exceeds GIST's size budget.
+    #[error("this document's content is too large for GIST's import limits")]
+    ResourceLimitContentTooLarge,
+    /// A table with too many rows or columns.
+    #[error("this document contains a table that is too large for GIST's import limits")]
+    ResourceLimitTableTooLarge,
+    /// Any other limit.
+    #[error("this document exceeds GIST's import limits")]
+    ResourceLimitOther,
     #[error("internal error")]
     InternalPanic,
 }
 
+/// Maps the importers' typed [`gist_model::LimitKind`] to the matching flat
+/// `GistError` case. Exhaustive on purpose: adding a `LimitKind` forces a
+/// decision here.
+fn limit_kind_to_error(kind: gist_model::LimitKind) -> GistError {
+    use gist_model::LimitKind as K;
+    match kind {
+        K::TooLarge => GistError::ResourceLimitTooLarge,
+        K::TooManyPages => GistError::ResourceLimitTooManyPages,
+        K::TooManyEntries => GistError::ResourceLimitTooManyEntries,
+        K::TooDeeplyNested => GistError::ResourceLimitTooDeeplyNested,
+        K::ExpandedTooLarge => GistError::ResourceLimitContentTooLarge,
+        K::TableTooLarge => GistError::ResourceLimitTableTooLarge,
+        K::Other => GistError::ResourceLimitOther,
+    }
+}
+
 impl From<gist_core::CoreError> for GistError {
     fn from(e: gist_core::CoreError) -> Self {
+        if let Some(kind) = e.limit_kind() {
+            return limit_kind_to_error(kind);
+        }
         match e {
             gist_core::CoreError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
                 GistError::ChecksumMismatch { path }
@@ -65,6 +110,7 @@ impl From<gist_core::ImportError> for GistError {
             gist_core::ImportError::PdfEncrypted => GistError::PdfEncrypted,
             gist_core::ImportError::PdfNoTextLayer => GistError::PdfNoTextLayer,
             gist_core::ImportError::PdfUnavailable(_) => GistError::PdfUnavailable,
+            gist_core::ImportError::ResourceLimitExceeded { kind, .. } => limit_kind_to_error(kind),
             gist_core::ImportError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
                 GistError::ChecksumMismatch { path }
             }
@@ -233,6 +279,31 @@ pub struct FfiLibraryItem {
     /// whose actual content this `GistCore` instance can no longer decrypt
     /// (see `GistCore::encrypt_items`'s doc comment).
     pub content_encrypted: bool,
+    /// Normalised source format: "txt" / "epub" / "docx" / "web" / "pdf" /
+    /// "ocr", or "" if unknown (ADR-021).
+    pub source_type: String,
+    /// Unix milliseconds of the last time either reader opened the item;
+    /// `None` = never opened (ADR-021).
+    pub last_opened_at: Option<i64>,
+    /// Derived RSVP progress in `0.0..=1.0` (ADR-021). Flow-view-only items
+    /// report 0.0 — accepted limitation.
+    pub progress_fraction: f64,
+}
+
+impl From<gist_store::LibraryItem> for FfiLibraryItem {
+    fn from(i: gist_store::LibraryItem) -> Self {
+        FfiLibraryItem {
+            id: i.id,
+            title: i.title,
+            authors: i.authors,
+            source_path: i.source_path,
+            cover_path: i.cover_path,
+            content_encrypted: i.content_encrypted,
+            source_type: i.source_type,
+            last_opened_at: i.last_opened_at,
+            progress_fraction: i.progress_fraction,
+        }
+    }
 }
 
 #[derive(uniffi::Record)]
@@ -1139,17 +1210,7 @@ impl GistCore {
                 .inner
                 .list_items(offset as usize, limit as usize)
                 .map_err(GistError::from)?;
-            Ok(items
-                .into_iter()
-                .map(|i| FfiLibraryItem {
-                    id: i.id,
-                    title: i.title,
-                    authors: i.authors,
-                    source_path: i.source_path,
-                    cover_path: i.cover_path,
-                    content_encrypted: i.content_encrypted,
-                })
-                .collect())
+            Ok(items.into_iter().map(FfiLibraryItem::from).collect())
         })
     }
 
@@ -1165,17 +1226,7 @@ impl GistCore {
                 .inner
                 .search_items(&query, limit as usize)
                 .map_err(GistError::from)?;
-            Ok(items
-                .into_iter()
-                .map(|i| FfiLibraryItem {
-                    id: i.id,
-                    title: i.title,
-                    authors: i.authors,
-                    source_path: i.source_path,
-                    cover_path: i.cover_path,
-                    content_encrypted: i.content_encrypted,
-                })
-                .collect())
+            Ok(items.into_iter().map(FfiLibraryItem::from).collect())
         })
     }
 
@@ -1237,6 +1288,17 @@ impl GistCore {
         ffi_catch!({
             self.inner
                 .save_progress(&item_id, token_index as usize)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Record that a reader (RSVP or flow) opened `item_id` just now — feeds
+    /// the library's "date last read" sort (ADR-021). Idempotent; an unknown
+    /// id is a no-op. Returns the Unix-millisecond timestamp written.
+    pub fn mark_item_opened(&self, item_id: String) -> Result<i64, GistError> {
+        ffi_catch!({
+            self.inner
+                .mark_item_opened(&item_id)
                 .map_err(GistError::from)
         })
     }
@@ -1372,17 +1434,7 @@ impl GistCore {
                 .inner
                 .list_items_in_collection(&collection_id)
                 .map_err(GistError::from)?;
-            Ok(items
-                .into_iter()
-                .map(|i| FfiLibraryItem {
-                    id: i.id,
-                    title: i.title,
-                    authors: i.authors,
-                    source_path: i.source_path,
-                    cover_path: i.cover_path,
-                    content_encrypted: i.content_encrypted,
-                })
-                .collect())
+            Ok(items.into_iter().map(FfiLibraryItem::from).collect())
         })
     }
 
@@ -1431,17 +1483,7 @@ impl GistCore {
                 .inner
                 .list_items_by_tag(&tag_name)
                 .map_err(GistError::from)?;
-            Ok(items
-                .into_iter()
-                .map(|i| FfiLibraryItem {
-                    id: i.id,
-                    title: i.title,
-                    authors: i.authors,
-                    source_path: i.source_path,
-                    cover_path: i.cover_path,
-                    content_encrypted: i.content_encrypted,
-                })
-                .collect())
+            Ok(items.into_iter().map(FfiLibraryItem::from).collect())
         })
     }
 
@@ -1702,6 +1744,58 @@ mod tests {
         let core_err = gist_core::CoreError::NotFound("missing-id".to_string());
         let ffi_err = GistError::from(core_err);
         assert!(matches!(ffi_err, GistError::Core(_)));
+    }
+
+    // ── Typed resource-limit errors (M7 R3) ──────────────────────────────
+
+    /// Every `LimitKind` must reach its own flat `GistError` case, and the
+    /// message must be fixed text (no limit numbers, no paths).
+    #[test]
+    fn every_limit_kind_maps_to_a_distinct_path_free_gist_error() {
+        use gist_model::LimitKind as K;
+        let cases = [
+            (K::TooLarge, "ResourceLimitTooLarge"),
+            (K::TooManyPages, "ResourceLimitTooManyPages"),
+            (K::TooManyEntries, "ResourceLimitTooManyEntries"),
+            (K::TooDeeplyNested, "ResourceLimitTooDeeplyNested"),
+            (K::ExpandedTooLarge, "ResourceLimitContentTooLarge"),
+            (K::TableTooLarge, "ResourceLimitTableTooLarge"),
+            (K::Other, "ResourceLimitOther"),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for (kind, name) in cases {
+            let ffi_err = GistError::from(gist_core::ImportError::ResourceLimitExceeded {
+                limit: "max_pages=2000 /Users/someone/secret.pdf".to_string(),
+                attempted: 123_456,
+                kind,
+            });
+            let dbg = format!("{ffi_err:?}");
+            assert_eq!(dbg, name);
+            let msg = ffi_err.to_string();
+            assert!(!msg.contains("/Users") && !msg.contains("123456"), "{msg}");
+            assert!(seen.insert(dbg));
+        }
+    }
+
+    /// End to end through `GistCore`: an oversized plain-text file is
+    /// rejected with the typed variant, not `Core(String)`.
+    #[test]
+    fn import_txt_oversized_file_surfaces_typed_limit_error_over_ffi() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let big = dir.join("big.txt");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(gist_model::ParseLimits::default().max_bytes as u64 + 1)
+            .unwrap();
+        let core = GistCore::new(
+            dir.join("db.sqlite").to_string_lossy().into_owned(),
+            dir.join("store").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let err = core
+            .import_file(big.to_string_lossy().into_owned())
+            .unwrap_err();
+        assert!(matches!(err, GistError::ResourceLimitTooLarge), "{err:?}");
     }
 
     fn corrupt_file(path: &std::path::Path) {
@@ -2287,5 +2381,42 @@ pub mod test_support {
     #[uniffi::export]
     pub fn ffi_panic_probe_uniffi() -> Result<(), GistError> {
         ffi_panic_probe()
+    }
+}
+
+#[cfg(test)]
+mod reading_state_tests {
+    use super::*;
+
+    /// ADR-021: the new DTO fields cross the FFI boundary, and
+    /// `mark_item_opened` is callable and idempotent.
+    #[test]
+    fn reading_state_fields_and_mark_item_opened_cross_the_ffi() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = GistCore::new(
+            db.to_string_lossy().into_owned(),
+            storage.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let txt = dir.path().join("book.txt");
+        std::fs::write(&txt, b"alpha beta gamma delta epsilon zeta eta theta").unwrap();
+        let id = core
+            .import_file(txt.to_string_lossy().into_owned())
+            .unwrap();
+
+        let item = core.list_items(0, 10).unwrap().remove(0);
+        assert_eq!(item.source_type, "txt");
+        assert_eq!(item.last_opened_at, None);
+        assert_eq!(item.progress_fraction, 0.0);
+
+        let ts = core.mark_item_opened(id.clone()).unwrap();
+        core.mark_item_opened("missing".to_string()).unwrap();
+        core.save_progress(id, 3).unwrap();
+        let item = core.list_items(0, 10).unwrap().remove(0);
+        assert!(item.last_opened_at.is_some_and(|t| t >= ts));
+        assert!(item.progress_fraction > 0.0 && item.progress_fraction <= 1.0);
     }
 }
