@@ -61,7 +61,7 @@ jobs:
           echo "All required release-signing secrets are present."
 
       # Same xcode-version pinning rationale as apple-build.yml: this
-      # repo's deploymentTarget (project.yml) tracks a current OS, so pin to
+      # repo's deploymentTarget (project.yml, macOS 14.0) is built against the current SDK, so pin to
       # latest-stable rather than an exact Xcode version that would go
       # stale on GitHub's shared runner image.
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1.7.0

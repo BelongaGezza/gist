@@ -657,7 +657,7 @@ Scoped in `docs/m6-agent-roles.md` (adopted 2026-10-03). Gaps found after M5: PD
 
 ### M7 — v1.0 completeness, PDF hardening, v1.1 items · **adopted 2026-10-04**
 
-Scoped in `docs/m7-agent-roles.md`. Found by checking the spec's v1.0 promises and decided policies against source: three v1.0 library sort keys are missing (source type, date last read, progress); the deployment target (26.5) contradicts Q9 (macOS 14) — Q9 below is **under review pending the R5 audit** and is not changed yet; PDF layout is tuned on synthetic files only and, by decision, will stay that way for M7 (no real-document corpus); `F33`/`F36` and an untyped resource-limit error are open. Includes the v1.1 items (merged-cell tables, paginated view). iOS is paused. v1.0 waits for M7's R1 and the independent review.
+**Status 2026-10-05: agent-executable roles R1, R3, R4, R5, R6, R7, R8 and the independent review are done and merged on `integration/m7-2026-10-04` (R2 dropped, R9 paused); see the CLAUDE.md M7 row for results and what remains. Q9 is resolved: minimum macOS 14.0.** Scoped in `docs/m7-agent-roles.md`. Found by checking the spec's v1.0 promises and decided policies against source: three v1.0 library sort keys are missing (source type, date last read, progress); the deployment target (26.5) contradicts Q9 (macOS 14) — Q9 below is **under review pending the R5 audit** and is not changed yet; PDF layout is tuned on synthetic files only and, by decision, will stay that way for M7 (no real-document corpus); `F33`/`F36` and an untyped resource-limit error are open. Includes the v1.1 items (merged-cell tables, paginated view). iOS is paused. v1.0 waits for M7's R1 and the independent review.
 
 **Total: ~25 weeks / ~6 months** to public macOS v1.0.
 *(+2 weeks from v1 plan for security hardening sprint in M1)*
@@ -705,7 +705,7 @@ Scoped in `docs/m7-agent-roles.md`. Found by checking the spec's v1.0 promises a
 - Q5: URL fetching on iOS — use Swift `URLSession` (system proxy, ATS, cellular-awareness) ✅
 - Q6: Copy-on-import (ADR-006) ✅
 - Q7: IR storage format — `<id>.json` + `<id>.tokens.json` on disk, SQLite holds metadata + paths (ADR-007) ✅
-- Q9: Minimum macOS version = macOS 14 (unlocks `@Observable`, modern `NavigationSplitView`, string catalogs) ✅ **(2026-10-04: contradicted by `project.yml`, which builds for 26.5 since commit `cc5d539`; under review — M7 R5 audit, then a user decision. Not yet changed.)**
+- Q9: Minimum macOS version = macOS 14 (unlocks `@Observable`, modern `NavigationSplitView`, string catalogs) ✅ **(Resolved 2026-10-04, M7 D1: macOS 14 confirmed. `project.yml` had built for 26.5 since commit `cc5d539` (a workaround for linker warnings from the Rust static library's C objects inheriting the build machine's OS, not an API need). The audit (`docs/macos-deployment-target-audit-2026-10-04.md`) found `View.searchFocused` (macOS 15) as the only API failing at 14. Applied: `project.yml`, `Info.plist` `LSMinimumSystemVersion` and `build-core-xcframework.sh` (`MACOSX_DEPLOYMENT_TARGET=14.0`) set to 14; `searchFocused` guarded with `#available(macOS 15, *)` plus an AppKit fallback for Cmd+F on 14. Compile-verified only; not run on a real macOS 14/15 machine.)**
 - Q12: Web fetch policy — ADR-005 written and gist-web implemented ✅ `[F26]`
 - Q8: SwiftUI `Text` vs TextKit 2 for the flow view — **decided 2026-09-12: SwiftUI-native**, both prototyped in M2 first. See §3.5's architecture-decision note for the full rationale. ✅
 

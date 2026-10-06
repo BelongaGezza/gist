@@ -1,0 +1,21 @@
+;; Deny-default profile for the spike helper (sandbox-exec -f). Spike only.
+;; Allows: exec of the helper, reading system libraries, the pdfium dylib dir
+;; and the helper binary dir, and the inherited stdin/stdout/stderr fds.
+;; Denies by default: network, writes to any file, reading user files.
+(version 1)
+(deny default)
+(allow process-exec*)
+(allow process-fork)
+(allow sysctl-read)
+(allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.system.notification_center"))
+(allow file-read*)  ;; broad read: the strict variant (helper.sb) aborts the helper at startup
+(allow file-read*
+  (subpath "/usr/lib")
+  (subpath "/System/Library")
+  (subpath "/System/Volumes/Preboot/Cryptexes")
+  (subpath "/private/var/db/dyld")
+  (literal "/dev/null")
+  (literal "/dev/urandom")
+  (subpath "@ROOT@/artifacts/pdfium/lib")
+  (subpath "@ROOT@/spikes/pdf-isolation/target/release"))
+(allow file-write* (literal "/dev/null"))

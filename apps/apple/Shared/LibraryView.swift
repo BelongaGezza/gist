@@ -49,7 +49,56 @@ enum LibraryFiltering {
             return items.sorted {
                 ($0.authors.first ?? "").localizedCaseInsensitiveCompare($1.authors.first ?? "") == .orderedAscending
             }
+        case .sourceType:
+            // Unknown type ("") sorts last; ties keep incoming (date-added) order.
+            return stableSorted(items) { a, b in
+                switch (a.sourceType.isEmpty, b.sourceType.isEmpty) {
+                case (true, true): return nil
+                case (true, false): return false
+                case (false, true): return true
+                case (false, false):
+                    let r = a.sourceType.localizedCaseInsensitiveCompare(b.sourceType)
+                    return r == .orderedSame ? nil : r == .orderedAscending
+                }
+            }
+        case .lastReadNewest:
+            return stableSorted(items) { lastReadOrder($0, $1, newestFirst: true) }
+        case .lastReadOldest:
+            return stableSorted(items) { lastReadOrder($0, $1, newestFirst: false) }
+        case .progressHighest:
+            return stableSorted(items) { a, b in
+                a.progressFraction == b.progressFraction ? nil : a.progressFraction > b.progressFraction
+            }
+        case .progressLowest:
+            return stableSorted(items) { a, b in
+                a.progressFraction == b.progressFraction ? nil : a.progressFraction < b.progressFraction
+            }
         }
+    }
+
+    /// "Last read" comparison (ADR-021): never-opened items always sort
+    /// last, whichever direction is chosen. `nil` = tie.
+    private static func lastReadOrder(_ a: LibraryItemVM, _ b: LibraryItemVM, newestFirst: Bool) -> Bool? {
+        switch (a.lastOpenedAt, b.lastOpenedAt) {
+        case (nil, nil): return nil
+        case (nil, _): return false
+        case (_, nil): return true
+        case let (x?, y?):
+            if x == y { return nil }
+            return newestFirst ? x > y : x < y
+        }
+    }
+
+    /// Sorts with an explicit index tie-break so equal keys keep their
+    /// incoming (date-added, newest-first) order regardless of the standard
+    /// library's sort stability. `before` returns `nil` for a tie.
+    private static func stableSorted(
+        _ items: [LibraryItemVM],
+        before: (LibraryItemVM, LibraryItemVM) -> Bool?
+    ) -> [LibraryItemVM] {
+        items.enumerated()
+            .sorted { l, r in before(l.element, r.element) ?? (l.offset < r.offset) }
+            .map(\.element)
     }
 }
 
@@ -59,6 +108,13 @@ enum LibrarySortOrder: String, CaseIterable, Identifiable {
     case titleAZ
     case titleZA
     case authorAZ
+    // ADR-021 (reading-state sort keys). Appended after the original five so
+    // the existing menu order is unchanged.
+    case sourceType
+    case lastReadNewest
+    case lastReadOldest
+    case progressHighest
+    case progressLowest
 
     var id: String { rawValue }
 
@@ -71,6 +127,11 @@ enum LibrarySortOrder: String, CaseIterable, Identifiable {
         case .titleAZ: return String(localized: "Title (A–Z)")
         case .titleZA: return String(localized: "Title (Z–A)")
         case .authorAZ: return String(localized: "Author (A–Z)")
+        case .sourceType: return String(localized: "Type")
+        case .lastReadNewest: return String(localized: "Last Read (Most Recent)")
+        case .lastReadOldest: return String(localized: "Last Read (Oldest)")
+        case .progressHighest: return String(localized: "Progress (Most Read)")
+        case .progressLowest: return String(localized: "Progress (Least Read)")
         }
     }
 }
@@ -182,15 +243,23 @@ struct LibraryView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle("Library")
         .searchable(text: $searchText, prompt: "Search library")
-        .searchFocused($isSearchFieldFocused)
+        .modifier(SearchFocusedIfAvailable(isFocused: $isSearchFieldFocused))
         .background {
             // Invisible button purely to host the ⌘F shortcut -- standard
             // SwiftUI idiom for binding a keyboard shortcut to an action
-            // that isn't itself a visible control. `.searchFocused` (the
-            // declarative macOS/iOS 17+ counterpart to `.searchable`) does
-            // the actual focus work; no manual NSResponder/first-responder
-            // poking involved.
-            Button("Focus Search") { isSearchFieldFocused = true }
+            // that isn't itself a visible control. On macOS 15+
+            // `.searchFocused` (applied above via SearchFocusedIfAvailable)
+            // does the actual focus work. On macOS 14 (the minimum, D1)
+            // that API doesn't exist, so SearchFieldLocator makes the
+            // toolbar's NSSearchField first responder instead (best-effort,
+            // unverified on a real macOS 14 machine; a no-op if not found).
+            Button("Focus Search") {
+                if #available(macOS 15, *) {
+                    isSearchFieldFocused = true
+                } else {
+                    SearchFieldLocator.focusSearchField()
+                }
+            }
                 .keyboardShortcut("f", modifiers: .command)
                 .hidden()
         }
@@ -213,6 +282,9 @@ struct LibraryView: View {
         }
         .task { await core.listCollections() }
         .task { await core.listAllTags() }
+        // ADR-021: readers change last-read/progress while the Library is
+        // off-screen; re-read the loaded rows when it comes back.
+        .onAppear { Task { await core.refreshLoadedItems() } }
         // Keyed on tagFilter so picking a different tag (or clearing it)
         // reloads; nil clears tagFilteredItems back to empty since
         // displayedItems ignores it once tagFilter is nil anyway.
@@ -252,6 +324,7 @@ struct LibraryView: View {
             } label: {
                 Label("Sort", systemImage: "arrow.up.arrow.down")
             }
+            .help(LibraryRowReadingState.limitationHelp)
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
@@ -401,6 +474,17 @@ struct LibraryView: View {
                 Button("OK", role: .cancel) { core.pdfUnavailableFile = nil }
             } message: {
                 Text("PDF support is unavailable in this build of GIST, so this file couldn't be imported. Other formats still work.")
+            }
+            .alert(
+                "Can't Import This File",
+                isPresented: Binding(
+                    get: { core.importLimitMessage != nil },
+                    set: { if !$0 { core.importLimitMessage = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { core.importLimitMessage = nil }
+            } message: {
+                Text(core.importLimitMessage ?? "")
             }
             .alert(
                 "Error",
