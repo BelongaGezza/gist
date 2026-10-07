@@ -14,10 +14,12 @@ gist/
 │   ├── gist-rsvp     # RSVP pacing engine (pure, no I/O)
 │   ├── gist-store    # SQLite persistence (rusqlite + FTS5)
 │   ├── gist-core     # Facade: import pipeline, library API
-│   └── gist-ffi      # uniffi bindings → Swift; C ABI shim → Windows
+│   └── gist-ffi      # uniffi bindings → Swift, Kotlin; C ABI shim → Windows
 ├── apps/
 │   ├── apple/        # SwiftUI (macOS + iOS)
-│   └── windows/      # WinUI 3 (future)
+│   ├── windows/      # WinUI 3 (Windows)
+│   ├── android/      # Jetpack Compose + Kotlin (Android)
+│   └── linux/        # GTK4 (Linux, planned)
 ├── docs/             # Architecture docs, ADRs, build guides
 ├── fixtures/         # Test corpus (public-domain only)
 └── tools/            # Build scripts
@@ -31,30 +33,35 @@ gist-model (no I/O, wasm32 safe)
     └── gist-imageprep, gist-web, gist-rsvp
     └── gist-store
             └── gist-core
-                    └── gist-ffi → Swift shell / C ABI
+                    └── gist-ffi → Swift / Kotlin (uniffi) / C ABI (Windows)
 ```
 
 ## Key design decisions
 
 See `docs/adr/` for full decision records.
 
-- **FFI:** uniffi 0.32 proc-macro mode (ADR-001). No hand-rolled C ABI for Swift.
-- **PDF:** `pdfium-render` (BSD-3) behind a swappable trait (ADR-002).
+- **FFI:** uniffi 0.32 proc-macro mode (ADR-001). Generates Swift bindings for Apple targets, Kotlin bindings for Android (ADR-022), and C# bindings for Windows (ADR-015).
+- **PDF:** `pdfium-render` (BSD-3) behind a swappable trait (ADR-002), loading `libpdfium` dynamically on macOS, Linux, and Android (ADR-026).
 - **Annotation anchoring:** `(block_id, start, len, prefix_hash, quote_hash)` with re-anchoring (ADR-003).
-- **RSVP timing:** pure `(state, elapsed_ms) → token` function; shell drives from `CVDisplayLink`.
+- **RSVP timing:** pure `(state, elapsed_ms) → token` function; shell drives from `CVDisplayLink` (Apple), `DispatcherQueueTimer` (Windows), or `Choreographer` / monotonic nano-clock (Android).
 - **Persistence:** SQLite via `rusqlite` (bundled, FTS5). WAL mode. No sync, no backend.
-- **Distribution:** notarised DMG via GitHub Actions on `v*` tag. No App Store required.
+- **Key custody:** Hardware-backed Apple Keychain on macOS/iOS (ADR-011), Windows DPAPI CurrentUser (ADR-016), and hardware-backed Android Keystore TEE/StrongBox (ADR-023).
+- **Distribution:** notarised DMG (macOS), signed MSIX (Windows), signed APK / AAB (Android). No cloud sync, no server accounts required.
 
 ## Local persistence
 
-All user data lives in `~/Library/Application Support/GIST/` (macOS):
+All user data lives in platform-sandboxed local storage:
+- macOS: `~/Library/Application Support/GIST/`
+- Windows: `%LOCALAPPDATA%\Packages\<PackageId>\LocalState` (packaged) or `%LOCALAPPDATA%\GIST`
+- Android: `context.filesDir` (e.g. `/data/user/0/app.gist.reader/files/`)
 
+Directory contents:
 - `gist.sqlite` — library metadata, progress, annotations, FTS5 index
 - `docs/` — serialised Document JSON files
 - `originals/` — content-addressed copy of imported source files, per ADR-006
-  (implemented 2026-09-12; file-based imports only — URL imports have no
-  local file to copy). `Metadata.source_ref` remains the raw original path,
-  informational only; `Metadata.source_copy_ref` points at the copy here.
+  (file-based imports only — URL imports have no local file to copy). `Metadata.source_ref`
+  remains the raw original path, informational only; `Metadata.source_copy_ref` points at
+  the copy here.
 
 No data leaves the device. No accounts. No telemetry.
 
@@ -68,4 +75,6 @@ estimation.
 
 `gist-imageprep` handles pre/post-processing in Rust. Recognition is delegated
 to a platform-native engine via a uniffi callback interface (`OcrEngine` trait):
-Vision framework on Apple, `Windows.Media.Ocr` on Windows.
+- Apple: Vision framework
+- Windows: `Windows.Media.Ocr`
+- Android: Bundled on-device Google ML Kit Text Recognition (ADR-025)
