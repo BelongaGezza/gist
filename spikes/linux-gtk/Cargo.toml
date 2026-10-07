@@ -1,0 +1,15 @@
+[package]
+name = "gist-linux-gtk-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+gist-core = { path = "../../crates/gist-core" }
+gist-model = { path = "../../crates/gist-model" }
+gist-rsvp = { path = "../../crates/gist-rsvp" }
+gist-store = { path = "../../crates/gist-store" }
+gtk = { package = "gtk4", version = "0.10" }
+serde_json = "1"
