@@ -20,15 +20,23 @@ host="$(hostname 2>/dev/null || echo unknown)"
 root="${CLAUDE_PROJECT_DIR:-.}"
 
 present=""; missing=""
-for t in cargo rustup xcodebuild xcodegen dotnet msbuild flutter dart; do
+for t in cargo rustup xcodebuild xcodegen dotnet msbuild adb javac cargo-ndk flutter dart; do
   if have "$t"; then present="$present $t"; else missing="$missing $t"; fi
 done
 
 yn() { [ "$1" = 1 ] && echo yes || echo NO; }
-core=0; apple=0; win=0
+core=0; apple=0; win=0; android=0
 have cargo && core=1
 [ "$os" = macos ] && have xcodebuild && apple=1
 [ "$os" = windows ] && { have dotnet || have msbuild; } && win=1
+android_sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
+android_ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+if { have javac || have java; } \
+  && { have adb || [ -x "$android_sdk/platform-tools/adb" ]; } \
+  && have cargo-ndk \
+  && { [ -n "$android_ndk" ] || [ -d "$android_sdk/ndk" ]; }; then
+  android=1
+fi
 
 # Pinned Rust toolchain check (read-only; never triggers an install).
 pin_note=""
@@ -42,7 +50,7 @@ if [ -f "$root/rust-toolchain.toml" ]; then
 fi
 
 echo "[GIST ENV] os=$os arch=$arch host=$host"
-echo "[GIST ENV] buildable this session: rust-core=$(yn $core) apple(macOS/iOS)=$(yn $apple) windows-shell=$(yn $win)"
+echo "[GIST ENV] buildable this session: rust-core=$(yn $core) apple(macOS/iOS)=$(yn $apple) windows-shell=$(yn $win) android-shell=$(yn $android)"
 echo "[GIST ENV] tools present:${present:- none} | missing:${missing:- none}"
 [ -n "$pin_note" ] && echo "[GIST ENV] $pin_note"
 echo "[GIST ENV] Machine-specific claims in CLAUDE.md (Xcode version, permissions, 'verified locally') are historical; THIS block is current truth."
