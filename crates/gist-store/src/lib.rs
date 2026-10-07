@@ -1451,20 +1451,33 @@ impl Store {
         Ok(removed)
     }
 
-    /// Full-text search across all imported document tokens.
-    /// Returns item IDs (deduplicated) ranked by FTS5 relevance.
+    /// Search imported document text and library title/source path.
+    /// Text matches are ranked ahead of title/path matches; results are
+    /// deduplicated and limited after combining both match sources.
     pub fn search_items(&self, query: &str, limit: usize) -> Result<Vec<String>, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT t.item_id
-             FROM tokens t
-             WHERE t.rowid IN (
-                 SELECT rowid FROM fts_index WHERE token_text MATCH ?1
+            "WITH matches(item_id, rank) AS (
+                 SELECT t.item_id, 0
+                 FROM tokens t
+                 WHERE t.rowid IN (
+                     SELECT rowid FROM fts_index WHERE token_text MATCH ?1
+                 )
+                 UNION ALL
+                 SELECT li.id, 1
+                 FROM library_items li
+                 WHERE lower(COALESCE(li.title, '')) LIKE ?2 ESCAPE '\\'
+                    OR lower(COALESCE(li.source_path, '')) LIKE ?2 ESCAPE '\\'
              )
-             LIMIT ?2",
+             SELECT item_id
+             FROM matches
+             GROUP BY item_id
+             ORDER BY MIN(rank), item_id
+             LIMIT ?3",
         )?;
         let escaped = escape_fts5_query(query);
-        let rows = stmt.query_map(params![escaped, limit as i64], |row| {
+        let metadata_pattern = format!("%{}%", escape_like_pattern(&query.to_lowercase()));
+        let rows = stmt.query_map(params![escaped, metadata_pattern, limit as i64], |row| {
             row.get::<_, String>(0)
         })?;
         let mut ids = Vec::new();
@@ -2202,6 +2215,13 @@ fn escape_fts5_query(query: &str) -> String {
         return "\"\"".to_string();
     }
     format!("\"{}\"*", query.replace('"', "\"\""))
+}
+
+fn escape_like_pattern(query: &str) -> String {
+    query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Reduces `ext` to ASCII alphanumeric characters only, for safe use in a
@@ -3258,6 +3278,36 @@ mod tests {
                 results
             );
         }
+    }
+
+    #[test]
+    fn search_items_finds_partial_filename_and_title_matches() {
+        let (_dir, store) = open_test_store();
+        let mut doc = doc_with_title("quarterly-report");
+        doc.metadata.title = "Annual Reading Notes".into();
+        doc.metadata.source_ref = Some("/books/Quarterly_Report_2025.txt".into());
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+
+        for query in ["report_20", "READING"] {
+            let results = store.search_items(query, 10).unwrap();
+            assert!(
+                results.contains(&id),
+                "expected query {query:?} to find title or filename, got {results:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_items_treats_like_wildcards_as_literal_metadata_text() {
+        let (_dir, store) = open_test_store();
+        let mut doc = doc_with_title("literal-percent");
+        doc.metadata.title = "100%_ready_report".into();
+        let id = doc.id.clone();
+        store.insert_item(&doc).unwrap();
+        store.insert_item(&doc_with_title("unrelated")).unwrap();
+
+        assert_eq!(store.search_items("%_ready", 10).unwrap(), vec![id]);
     }
 
     // ── Encryption at rest (ADR-011) ─────────────────────────────────────

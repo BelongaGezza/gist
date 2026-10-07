@@ -2007,6 +2007,13 @@ mod tests {
             results
         );
 
+        let filename_results = core.search_items("ardva", 10).unwrap();
+        assert!(
+            filename_results.iter().any(|item| item.id == id),
+            "expected partial filename search to find the imported item, got {:?}",
+            filename_results
+        );
+
         let no_match = core.search_items("nonexistentxyzzy", 10).unwrap();
         assert!(no_match.is_empty());
     }
