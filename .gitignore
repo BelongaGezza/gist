@@ -41,3 +41,8 @@ apps/windows/**/obj/
 # Staged native core (tools/build-core-windows.sh); .gitkeep stays tracked
 apps/windows/native/**/*.dll
 !apps/windows/native/**/.gitkeep
+
+# Android shell — generated UniFFI Kotlin bindings and Gradle build output
+apps/android/**/src/main/java/uniffi/gist_ffi/
+apps/android/.gradle/
+apps/android/**/build/
