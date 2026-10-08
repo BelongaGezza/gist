@@ -150,7 +150,11 @@ enum FlowBlockVM: Decodable {
     case list(ordered: Bool, items: [String])
     /// `gist_model::Block::Table` (M6/R3). Cells are plain text; a row may be
     /// shorter than the widest row (ragged), and an empty cell is `""`.
-    case table(rows: [[String]], headerRow: Bool)
+    ///
+    /// `spans` (M7/R7, ADR-019 addendum 2) lists only merged cells; `rows`
+    /// stays the full grid with the merged text in its top-left slot and
+    /// `""` in every covered slot, so `plainText` is unchanged by merges.
+    case table(rows: [[String]], headerRow: Bool, spans: [TableSpanVM] = [])
 
     /// Plain text used for search matching and (for non-paragraph blocks)
     /// as a fallback render — mirrors `gist_model::Block::plain_text`. An image
@@ -163,7 +167,7 @@ enum FlowBlockVM: Decodable {
         case .paragraph(let runs): return runs.map(\.text).joined()
         case .image(_, let alt, _): return alt ?? ""
         case .list(_, let items): return items.joined(separator: " ")
-        case .table(let rows, _):
+        case .table(let rows, _, _):
             return rows.map { $0.joined(separator: Self.tableCellSeparator) }
                 .joined(separator: Self.tableRowSeparator)
         }
@@ -187,7 +191,7 @@ enum FlowBlockVM: Decodable {
     /// block), so progress-derived indices stay meaningful.
     var speakableText: String {
         switch self {
-        case .table(let rows, _):
+        case .table(let rows, _, _):
             return rows
                 .map { $0.filter { !$0.isEmpty }.joined(separator: ", ") }
                 .filter { !$0.isEmpty }
@@ -213,6 +217,7 @@ enum FlowBlockVM: Decodable {
         case rows
         case headerRowSnake = "header_row"
         case headerRowCamel = "headerRow"
+        case spans
     }
 
     init(from decoder: Decoder) throws {
@@ -244,7 +249,9 @@ enum FlowBlockVM: Decodable {
             self = .table(
                 rows: try inner.decode([[String]].self, forKey: .rows),
                 headerRow: try inner.decodeIfPresent(Bool.self, forKey: .headerRowSnake)
-                    ?? inner.decodeIfPresent(Bool.self, forKey: .headerRowCamel) ?? false
+                    ?? inner.decodeIfPresent(Bool.self, forKey: .headerRowCamel) ?? false,
+                // Absent in every pre-M7 blob (and omitted for unmerged tables).
+                spans: try inner.decodeIfPresent([TableSpanVM].self, forKey: .spans) ?? []
             )
         } else {
             throw DecodingError.dataCorrupted(
@@ -252,6 +259,16 @@ enum FlowBlockVM: Decodable {
             )
         }
     }
+}
+
+/// `gist_model::CellSpan`: a merged table cell starting at (`row`, `col`)
+/// covering `rowspan` rows by `colspan` columns. All keys are single words, so
+/// plain and `.convertFromSnakeCase` decoders agree.
+struct TableSpanVM: Decodable, Equatable, Hashable {
+    let row: Int
+    let col: Int
+    let rowspan: Int
+    let colspan: Int
 }
 
 struct FlowTextRunVM: Decodable {
@@ -391,6 +408,10 @@ final class SearchState: ObservableObject {
 @MainActor
 final class SectionNavigator: ObservableObject {
     @Published var pendingSectionId: String?
+    /// Request to bring a flat block index into view (read-aloud follow-along).
+    /// Only the paged layout consumes it (ADR-023); the scrolling flow view
+    /// ignores it.
+    @Published var pendingBlockIndex: Int?
 }
 
 /// Tracks how far through the document the reader has scrolled, as a
@@ -406,6 +427,9 @@ final class SectionNavigator: ObservableObject {
 final class ReadingProgress: ObservableObject {
     @Published var fraction: Double
     let initialFraction: Double
+    /// Paged layout only (ADR-023): a precise restore point (block + character
+    /// offset) that takes precedence over `initialFraction` when present.
+    var initialAnchor: PagePosition?
 
     init(initialFraction: Double) {
         let clamped = initialFraction.isFinite ? min(max(initialFraction, 0), 1) : 0
@@ -506,4 +530,23 @@ protocol ReadingLayout: View {
         progress: ReadingProgress,
         annotations: AnnotationState
     )
+
+    /// Whether the hosting container should persist `progress.fraction` to
+    /// `FlowScrollPositionStore`. The scrolling flow view does; the paged
+    /// layout keeps its own anchor store instead (ADR-023: a page position is
+    /// a third meaning of "position" and must not overwrite the flow store).
+    static var persistsFlowScrollFraction: Bool { get }
+
+    /// Builds the progress object seeded with where this layout should open.
+    /// `carryFraction` is a position handed over from the other layout when
+    /// the reader just switched modes.
+    @MainActor static func seedProgress(itemId: String, carryFraction: Double?) -> ReadingProgress
+}
+
+extension ReadingLayout {
+    static var persistsFlowScrollFraction: Bool { true }
+
+    @MainActor static func seedProgress(itemId: String, carryFraction: Double?) -> ReadingProgress {
+        ReadingProgress(initialFraction: carryFraction ?? FlowScrollPositionStore.load(itemId: itemId))
+    }
 }

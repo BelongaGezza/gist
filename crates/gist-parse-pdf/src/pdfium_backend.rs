@@ -17,7 +17,7 @@ use gist_model::ParseLimits;
 use pdfium_render::prelude::*;
 
 use crate::layout::{Glyph, RawPage};
-use crate::{PdfError, PdfParser, RawMeta, MAX_GLYPHS_PER_PAGE};
+use crate::{text_budget, PdfError, PdfParser, RawMeta, MAX_GLYPHS_PER_PAGE};
 
 /// Explicit library path (file, or directory containing the library),
 /// set by the host app at startup. Takes priority over the default search.
@@ -174,13 +174,19 @@ impl PdfParser for PdfiumParser {
         if page_count > limits.max_pages {
             return Err(PdfError::ResourceLimitExceeded {
                 limit: format!("max_pages={}", limits.max_pages),
+                kind: gist_model::LimitKind::TooManyPages,
                 attempted: page_count,
             });
         }
 
-        let mut remaining_chars = limits.max_expanded_bytes;
+        let mut remaining_chars = text_budget(limits);
         for index in 0..page_count {
-            let page = match doc.pages().get(index as PdfPageIndex) {
+            // Checked narrowing: pdfium page indices are `u16`. `page_count` is
+            // already <= `limits.max_pages`, but if a caller ever raises
+            // `max_pages` past `u16::MAX` this must reject, never silently wrap
+            // (F36).
+            let page_index = checked_page_index(index, page_count)?;
+            let page = match doc.pages().get(page_index) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::debug!("gist-parse-pdf: page {index} failed to load: {e:?}");
@@ -202,7 +208,12 @@ impl PdfParser for PdfiumParser {
                 let n = chars.len();
                 if n > MAX_GLYPHS_PER_PAGE || n > remaining_chars {
                     return Err(PdfError::ResourceLimitExceeded {
-                        limit: format!("glyphs_per_page={MAX_GLYPHS_PER_PAGE}"),
+                        limit: if n > MAX_GLYPHS_PER_PAGE {
+                            format!("glyphs_per_page={MAX_GLYPHS_PER_PAGE}")
+                        } else {
+                            format!("pdf_text_bytes={}", text_budget(limits))
+                        },
+                        kind: gist_model::LimitKind::ExpandedTooLarge,
                         attempted: n,
                     });
                 }
@@ -234,5 +245,40 @@ impl PdfParser for PdfiumParser {
             title: tag(PdfDocumentMetadataTagType::Title),
             author: tag(PdfDocumentMetadataTagType::Author),
         })
+    }
+}
+
+/// Checked `usize -> PdfPageIndex` (`u16`) conversion. A page index past
+/// `u16::MAX` is a limit error, never a silent wrap onto a different page
+/// (F36).
+fn checked_page_index(index: usize, page_count: usize) -> Result<PdfPageIndex, PdfError> {
+    PdfPageIndex::try_from(index).map_err(|_| PdfError::ResourceLimitExceeded {
+        limit: format!("pdf_page_index<={}", PdfPageIndex::MAX),
+        kind: gist_model::LimitKind::TooManyPages,
+        attempted: page_count,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_index_conversion_is_checked_not_truncating() {
+        assert_eq!(checked_page_index(0, 3).ok(), Some(0));
+        assert_eq!(
+            checked_page_index(PdfPageIndex::MAX as usize, 70_000).ok(),
+            Some(PdfPageIndex::MAX)
+        );
+        // 65 536 would wrap to page 0 under `as u16`.
+        let e = checked_page_index(PdfPageIndex::MAX as usize + 1, 70_000).unwrap_err();
+        assert!(matches!(
+            e,
+            PdfError::ResourceLimitExceeded {
+                kind: gist_model::LimitKind::TooManyPages,
+                attempted: 70_000,
+                ..
+            }
+        ));
     }
 }

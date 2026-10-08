@@ -63,6 +63,19 @@ pre-1.0 work, not a shipped release note.
 - Library view: list with multi-select, ⌘F-focusable search, sort, tag filter, bulk removal
   (whether removal also deletes the sandboxed copy of the original file is a persisted Settings
   default rather than a per-action choice), "Add to Collection," and a tag editor.
+- Library sort by source type, date last read, and progress (alongside date added, title and
+  author), plus a small progress bar and "Last read …" line on library rows (ADR-021). The core
+  stores a "last opened" time (schema v7) that both readers set; progress is derived from the RSVP
+  reading position. Items never opened sort last for "last read".
+- Imports that hit GIST's safety limits (too many pages, too large, too deeply nested, a table too
+  big) now show a specific "Can't Import This File" message naming the file instead of a generic
+  error. PDF text extraction is also capped, so a hostile PDF can no longer drive multi-gigabyte
+  memory use.
+- Merged table cells (DOCX column/row merges, HTML `colspan`/`rowspan`) are now kept: later columns
+  no longer shift, and VoiceOver announces a merged cell once with the rows/columns it covers.
+- An optional paginated (page-turning) reading view, chosen with a Scroll/Pages control in the
+  reader toolbar or Settings → Reading. Scroll remains the default. Your place is remembered
+  separately from the scrolling and RSVP positions.
 - Sidebar navigation across the library and user-created collections.
 - A theme engine: system-follow, light, dark, sepia, and true-black OLED.
 - A flow (continuous document) reading view: virtualized rendering, typography controls (size,
@@ -106,8 +119,29 @@ epub zip-bomb gap in the import paths (both closed the day they were found); FTS
 hardening for search input; a macOS App Sandbox with minimal entitlements; and the encryption-at-
 rest and at-rest-integrity work described above. To report a new vulnerability, see `SECURITY.md`.
 
+### Changed
+
+- **Minimum macOS is now 14.** The project had been building for macOS 26.5 since 2026-09-10 (a
+  workaround for linker warnings, not an API requirement); the intended floor of 14 is restored
+  (decision D1, 2026-10-04). The Rust static library is now built with a macOS 14 deployment
+  target, and the one macOS-15-only API (`searchFocused`, used for the library search field) is
+  availability-guarded.
+
 ### Known limitations
 
+- **The macOS 14 floor is compile-verified only.** It builds and the automated tests pass with a
+  14.0 deployment target, but it has not been run on a real macOS 14 (or 15) machine. Behaviour
+  differences in SwiftUI/AppKit, Keychain, sandbox, Vision OCR, speech or loading the embedded
+  `libpdfium.dylib` on those versions are untested.
+- **Cmd+F on macOS 14:** the library search field is focused by an AppKit fallback that looks the
+  field up in the window toolbar; it is unverified on a real macOS 14 machine and does nothing if
+  the field is not found. On macOS 15 and later it uses the native `searchFocused` API.
+
+- **Library "progress" counts RSVP reading only.** A book you have read only in the Flow view
+  shows a correct "last read" date but 0% progress, and sorts as unstarted under the progress sort
+  (the Flow view and RSVP keep separate position stores). A shared progress value would need a
+  later schema change. See ADR-021. The database schema is now v7: an older GIST build cannot open
+  a library that a newer build has upgraded.
 - **No signed or notarized macOS release exists yet.** The release pipeline
   (`.github/workflows/release-macos.yml`, `tools/build-dmg.sh`) is built and has been exercised
   end-to-end unsigned in this environment; the signed/notarized half is blocked on a human
@@ -118,9 +152,5 @@ rest and at-rest-integrity work described above. To report a new vulnerability, 
   hearing the read-aloud feature, and a real-display Dynamic Type/contrast check on macOS, plus
   the equivalent Windows Narrator/visual pass — has not happened yet.
 - **PDF import is new and lightly tested.** It works end to end (text PDFs and scanned PDFs via OCR), but layout heuristics are tuned on synthetic PDFs only (two-column and simple footnote-free layouts); rotated text, right-to-left scripts, footnotes and tables inside PDFs are not handled, and the signed/notarised build of the embedded pdfium library has not been verified.
-- **A paginated (page-turning) reading view is not implemented** — only the continuous flow view
-  and RSVP exist today; a paginated view is an open question for a future release.
-- **IR/schema forward-compatibility policy is not yet implemented.** The persisted document
-  format (`gist-model::Document`, stored as `<id>.json`) has no version field and no defined
-  behavior for a future, incompatible format change — tracked as an open question and scheduled
-  ahead of the first public beta.
+- **The paginated reading view is new and only logic-tested.** Whether the measured page breaks match what SwiftUI actually draws (a clipped last line or an under-filled page is possible), the page-turn feel, VoiceOver, read-aloud follow-along and performance on very large documents have not been verified on a real display. Tables taller than a page scroll inside their page instead of splitting by row.
+- **IR/schema forward compatibility is implemented but has one deliberate limit.** Stored documents carry an `ir_version` (ADR-019), and a newer-than-understood version is refused with a clear message instead of failing obscurely. Documents containing a table are stored as version 2, so an older GIST build reports "needs a newer version" for them. An older build that opens a library whose database was upgraded to schema v7 will refuse it (`SchemaTooNew`). (This bullet previously said the policy was not implemented; that has been untrue since ADR-019, corrected 2026-10-05.)

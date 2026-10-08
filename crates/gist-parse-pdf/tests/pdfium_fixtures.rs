@@ -193,3 +193,139 @@ fn max_bytes_checked_before_pdfium() {
     let r = parse_pdf(&fixture("plain_text.pdf"), "x", &lim);
     assert!(matches!(r, Err(PdfError::ResourceLimitExceeded { .. })));
 }
+
+// ── F36: PDF-specific text budget ────────────────────────────────────────────
+
+/// Builds an in-memory PDF of `pages` pages that all share one uncompressed
+/// content stream of `lines` lines x `cpl` characters (so the file is about
+/// `lines * cpl` bytes, not `pages` times that).
+fn text_heavy_pdf(pages: usize, lines: usize, cpl: usize, font_size: f32) -> Vec<u8> {
+    let line: String = "lorem ipsum "
+        .chars()
+        .cycle()
+        .take(cpl)
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    let mut content = format!("BT /F1 {font_size} Tf {} TL 20 780 Td\n", font_size * 1.05);
+    for _ in 0..lines {
+        content.push_str(&format!("({line}) Tj T*\n"));
+    }
+    content.push_str("ET");
+    let mut objs: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            (0..pages)
+                .map(|k| format!("{} 0 R", 5 + k))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .into_bytes(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+        .into_bytes(),
+    ];
+    for _ in 0..pages {
+        objs.push(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+              /Resources << /Font << /F1 3 0 R >> >> >>"
+                .to_vec(),
+        );
+    }
+    let mut buf = b"%PDF-1.4\n".to_vec();
+    let mut offs = Vec::new();
+    for (n, body) in objs.iter().enumerate() {
+        offs.push(buf.len());
+        buf.extend_from_slice(format!("{} 0 obj\n", n + 1).as_bytes());
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = buf.len();
+    buf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offs {
+        buf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objs.len() + 1
+        )
+        .as_bytes(),
+    );
+    buf
+}
+
+fn run_bytes(bytes: &[u8], limits: &ParseLimits) -> Option<Result<gist_model::Document, PdfError>> {
+    let r = parse_pdf(bytes, "generated", limits);
+    if let Err(PdfError::LibraryUnavailable(why)) = &r {
+        if std::env::var("GIST_REQUIRE_PDFIUM").as_deref() == Ok("1") {
+            panic!("pdfium required but unavailable: {why}");
+        }
+        eprintln!("SKIP generated pdf: pdfium unavailable ({why})");
+        return None;
+    }
+    Some(r)
+}
+
+#[test]
+fn pdf_text_budget_is_pdf_specific_and_never_exceeds_the_global_limit() {
+    use gist_parse_pdf::{text_budget, MAX_PDF_TEXT_BYTES};
+    let d = ParseLimits::default();
+    assert!(MAX_PDF_TEXT_BYTES < d.max_expanded_bytes);
+    assert_eq!(text_budget(&d), MAX_PDF_TEXT_BYTES);
+    let small = ParseLimits {
+        max_expanded_bytes: 1000,
+        ..ParseLimits::default()
+    };
+    assert_eq!(text_budget(&small), 1000);
+    // Headroom: a very text-dense 2000-page book (6000 chars/page, even at
+    // 4 bytes per char) is far below the budget.
+    const { assert!(2000 * 6000 * 4 < MAX_PDF_TEXT_BYTES) };
+}
+
+#[test]
+fn text_over_the_budget_is_rejected_with_a_typed_limit_error() {
+    // 4 pages x (200 lines x 200 chars) = 160 000 chars, budget 50 000.
+    let pdf = text_heavy_pdf(4, 200, 200, 4.0);
+    let lim = ParseLimits {
+        max_expanded_bytes: 50_000,
+        ..ParseLimits::default()
+    };
+    let Some(r) = run_bytes(&pdf, &lim) else {
+        return;
+    };
+    match r {
+        Err(PdfError::ResourceLimitExceeded { kind, .. }) => {
+            assert_eq!(kind, gist_model::LimitKind::ExpandedTooLarge)
+        }
+        other => panic!("expected a limit error, got {other:?}"),
+    }
+}
+
+#[test]
+fn text_under_the_budget_still_imports_in_full() {
+    // 3 pages x (50 lines x 70 chars): an ordinary text-dense document.
+    let pdf = text_heavy_pdf(3, 50, 70, 10.0);
+    let Some(r) = run_bytes(&pdf, &ParseLimits::default()) else {
+        return;
+    };
+    let d = r.expect("an ordinary document must still import");
+    assert!(text(&d).len() > 3 * 50 * 60, "text unexpectedly short");
+}
+
+#[test]
+fn page_count_bomb_reports_the_too_many_pages_kind() {
+    let Some(r) = run("adversarial/page_count_bomb.pdf", &ParseLimits::default()) else {
+        return;
+    };
+    match r {
+        Err(PdfError::ResourceLimitExceeded { kind, .. }) => {
+            assert_eq!(kind, gist_model::LimitKind::TooManyPages)
+        }
+        other => panic!("expected a limit error, got {other:?}"),
+    }
+}

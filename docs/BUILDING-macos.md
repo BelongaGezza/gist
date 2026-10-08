@@ -13,6 +13,14 @@ covered here.
 - **A full Xcode install, not just Command Line Tools.** `xcode-select -p` should print a path
   inside an `Xcode.app` bundle (e.g. `/Applications/Xcode.app/Contents/Developer`), not
   `CommandLineTools`. `xcodebuild` will fail confusingly otherwise.
+- **Minimum macOS: 14.0** (decision D1, 2026-10-04; previously the project built for 26.5 by
+  accident, see `docs/macos-deployment-target-audit-2026-10-04.md`). It is set in three places that
+  must move together: `apps/apple/project.yml` (`options.deploymentTarget.macOS` and the
+  `GISTmacOS` target's `MACOSX_DEPLOYMENT_TARGET`), `apps/apple/macOS/Info.plist`
+  (`LSMinimumSystemVersion`, a literal), and `tools/build-core-xcframework.sh`
+  (`MACOSX_DEPLOYMENT_TARGET`, so the Rust static library's C objects do not inherit the build
+  machine's OS). Any Xcode/SDK new enough to build with a 14.0 target works. The floor is
+  compile-verified only; it has not been run on a real macOS 14 or 15 machine.
 - **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** — the Xcode project
   (`apps/apple/GIST.xcodeproj`) is generated from `apps/apple/project.yml` and is not committed to
   git.
@@ -86,6 +94,27 @@ signing identity set up and specifically want to test a signed build:
 ```bash
 xcodebuild -scheme GISTmacOS build test CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
 ```
+
+## Localisation
+
+The source language is en-GB and no other language exists. UI strings live in
+`apps/apple/Shared/Localizable.xcstrings`. The build only *emits* extracted keys
+(`SWIFT_EMIT_LOC_STRINGS`); it does not write them back into the catalog, so new
+user-visible strings must be added to the catalog by hand (key = the English text;
+interpolations become `%lld` / `%@`, and a key with two or more arguments also needs an
+`en-GB` `stringUnit` using positional specifiers such as `%1$lld`, matching existing entries).
+
+- Literals passed directly to `Text`, `Button`, `Label`, `.help`, `.accessibilityLabel`, alert
+  titles and so on are localised automatically. Anything built into a plain `String` (enum
+  `label` properties, `String` parameters, `+` concatenation) bypasses localisation: wrap it in
+  `String(localized: "…")` with interpolation, never concatenation.
+- `tools/check-localisation.sh` (bash + perl, no python3) fails when a string literal passed to a
+  known user-facing API is missing from the catalog. It runs in `apple-build.yml`. Limits: it
+  cannot see strings that were already flattened to a `String` variable, does not check that
+  `%lld` / `%@` matches the interpolated type, and does not flag unused catalog keys.
+- Plural forms are currently spelled out with `\(n == 1 ? "" : "s")` interpolations rather than
+  catalog plural variations. That is adequate for English only and must be redone before any
+  other language is added.
 
 ## Known environment caveats
 

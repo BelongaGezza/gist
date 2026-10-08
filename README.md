@@ -67,7 +67,7 @@ gist/
 
 ## Building
 
-Requirements: Rust (version pinned in `rust-toolchain.toml`), and for the macOS app, a full Xcode install plus [XcodeGen](https://github.com/yonaskolb/XcodeGen).
+Requirements: Rust (version pinned in `rust-toolchain.toml`), and for the macOS app, a full Xcode install plus [XcodeGen](https://github.com/yonaskolb/XcodeGen). The macOS app targets **macOS 14 or later** (decided 2026-10-04; compile-verified at that floor, not yet tested on a real macOS 14 machine).
 
 ```bash
 # Rust workspace

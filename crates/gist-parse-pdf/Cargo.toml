@@ -19,3 +19,6 @@ tracing    = { workspace = true }
 #   and `thread_safe` (pdfium itself is not thread-safe; the feature
 #   serialises calls) selected explicitly.
 pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

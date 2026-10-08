@@ -338,13 +338,14 @@ struct FlowViewSwiftUINative: ReadingLayout {
                 }
             }
             .font(.system(size: typography.fontSize, design: typography.fontDesign.fontDesign))
-        case .table(let rows, let headerRow):
+        case .table(let rows, let headerRow, let spans):
             // Highlights/matches are character offsets into the whole
             // table's `plainText`; FlowTableView hands each cell its range so
             // they're clipped to the cell they fall in (TableCellLayout).
             FlowTableView(
                 rows: rows,
                 headerRow: headerRow,
+                spans: spans,
                 fontSize: typography.fontSize,
                 fontDesign: typography.fontDesign.fontDesign
             ) { text, cellRange in

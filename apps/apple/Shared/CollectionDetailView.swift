@@ -76,6 +76,7 @@ struct CollectionDetailView: View {
                 } label: {
                     Label("Sort", systemImage: "arrow.up.arrow.down")
                 }
+                .help(LibraryRowReadingState.limitationHelp)
             }
         }
         .sheet(item: $tagEditorTarget) { target in

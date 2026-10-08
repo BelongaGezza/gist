@@ -5,7 +5,11 @@ pub enum ParseError {
     #[error("utf-8 decode error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
     #[error("resource limit exceeded: {limit} ({attempted} bytes attempted)")]
-    ResourceLimitExceeded { limit: String, attempted: usize },
+    ResourceLimitExceeded {
+        limit: String,
+        attempted: usize,
+        kind: gist_model::LimitKind,
+    },
 }
 
 /// Parse a raw `.txt` byte slice into a [`Document`].
@@ -16,6 +20,7 @@ pub fn parse(bytes: &[u8], stem: &str, limits: &ParseLimits) -> Result<Document,
     if bytes.len() > limits.max_bytes {
         return Err(ParseError::ResourceLimitExceeded {
             limit: format!("max_bytes={}", limits.max_bytes),
+            kind: gist_model::LimitKind::TooLarge,
             attempted: bytes.len(),
         });
     }

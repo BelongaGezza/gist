@@ -195,6 +195,27 @@ confirm it looks right to a human.
 - [ ] Console.app filtered to "GIST" during this whole pass: record any
       errors/faults that appear, even if the UI looked fine.
 
+## 11. Paginated reading view (M7 R8, ADR-023) - NOT YET RUN
+
+Written by an agent without display access; none of this has been verified visually.
+
+- [ ] Default unchanged: a fresh install opens the flow view in Scroll layout.
+- [ ] Reader toolbar shows a Scroll / Pages control; Pages shows one page at a time with "Page n of m" and prev/next buttons.
+- [ ] No text is cut mid-line at the bottom of any page (long paragraph, bold/italic runs, serif and rounded fonts, all three line spacings, sizes 13 and 28). Note any clipped line.
+- [ ] Resize the window (narrow, wide, tall, very small): pages reflow, the page still contains the text you were reading, no blank pages, no hang.
+- [ ] Change font size/design/line spacing in Aa: same place after reflow.
+- [ ] Keys: left/right arrows, up/down arrows, Space, PageUp/PageDown, Home/End turn pages and stop at the first/last page.
+- [ ] Switch Scroll -> Pages -> Scroll mid-book: lands at the same block each time; closing and reopening in Pages restores the page.
+- [ ] A table or list taller than the window sits alone on a page and scrolls inside it; a heading is not stranded at the bottom of a page.
+- [ ] Find: next/previous jump to the page containing the match with the highlight; TOC entries jump to the right page; Annotations "Jump" works.
+- [ ] Highlight / note / bookmark via the block context menu in Pages; they also show in Scroll layout and vice versa.
+- [ ] Read Aloud starts from the current page and the page follows the spoken block.
+- [ ] VoiceOver: page announced as "Page n of m" on turn; page text readable; Next/Previous Page actions available.
+- [ ] Reduce Motion on: no fade on page turn.
+- [ ] All four themes: page text and backgrounds use the theme, nothing hard-coded.
+- [ ] Very large book (over 1 MB of text): repagination after a resize does not freeze the UI for long; note timings.
+- [ ] Library "last read" sort updates after opening a book in Pages mode.
+
 ## Sign-off
 
 - Tester / date / macOS version / hardware:
