@@ -38,6 +38,7 @@ struct SettingsView: View {
 
 private struct ReadingSettingsTab: View {
     @ObservedObject private var settings = ReadingSettings.shared
+    @ObservedObject private var layoutSettings = ReadingLayoutSettings.shared
 
     var body: some View {
         Form {
@@ -59,6 +60,23 @@ private struct ReadingSettingsTab: View {
             )
             .font(.caption)
             .foregroundStyle(.secondary)
+
+            Picker(
+                "Flow view layout",
+                selection: Binding(
+                    get: { layoutSettings.mode },
+                    set: { layoutSettings.setMode($0) }
+                )
+            ) {
+                ForEach(ReadingLayoutMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.radioGroup)
+
+            Text("Scroll is continuous; Pages shows one page at a time. You can also switch in the reader toolbar.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
         .padding()

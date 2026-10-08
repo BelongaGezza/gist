@@ -125,10 +125,10 @@ struct OcrImportSheet: View {
                 .foregroundStyle(.secondary)
             Text("Scan or Import Page Images")
                 .font(.headline)
+            // One literal (not `+`-concatenated): a concatenation is a plain
+            // `String`, which bypasses localisation and the catalog.
             Text(
-                "Choose one or more page photos or scans (JPEG, PNG, HEIC, TIFF). "
-                    + "GIST runs on-device text recognition on each page, then lets you "
-                    + "review and correct the results before adding it to your library."
+                "Choose one or more page photos or scans (JPEG, PNG, HEIC, TIFF). GIST runs on-device text recognition on each page, then lets you review and correct the results before adding it to your library."
             )
             .font(.callout)
             .foregroundStyle(.secondary)

@@ -47,6 +47,36 @@ findings can be triaged and fixed.
 - [ ] Author (A–Z) — items with no author sort first (empty string sorts
       before any real name).
 
+### 2a. Reading-state sorts and row indicator (ADR-021) — NOT yet run
+
+*(Needs a library with a mix of formats, e.g. a .txt, an .epub, a .docx, a
+URL import and, if available, a PDF. Items are never "read" until you open
+them, so do the reading steps first.)*
+
+- [ ] Before reading anything: no row shows a progress bar or "Last read"
+      line (rows look as they did before).
+- [ ] Type — items group by format (docx, epub, pdf, txt, web, …); within a
+      format the newest import is first; any item with an unknown type is
+      last.
+- [ ] Open item A in the **RSVP** reader, play a few words, go Back. Row A
+      now shows a small progress bar, "N% read" and "Last read …"; VoiceOver
+      reads it as one element ("N percent read, last read …").
+- [ ] Open item B in the **Flow** view only, scroll a little, go Back. Row B
+      shows "Last read …" but **no percentage and no bar** (documented
+      limitation: progress counts RSVP reading only). Hover the row or the
+      Sort button — the tooltip says so.
+- [ ] Last Read (Most Recent) — B (most recent), then A, then every
+      never-opened item (in date-added order) at the end.
+- [ ] Last Read (Oldest) — A, then B, and never-opened items are STILL last.
+- [ ] Progress (Most Read) — A first; B and never-opened items (0%) after,
+      keeping date-added order among themselves.
+- [ ] Progress (Least Read) — 0% items first, A last.
+- [ ] Re-open A in RSVP and read further — on return its percentage has
+      increased without needing to quit/relaunch.
+- [ ] Same five sorts also work inside a collection view.
+- [ ] Remove an item that has progress and last-read set — no crash; the
+      other rows are unchanged.
+
 ## 3. Filter (toolbar circle-with-lines icon)
 
 *(Add a tag to at least one item first — see §4 — if you have none yet.)*
