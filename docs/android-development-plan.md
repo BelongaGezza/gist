@@ -1,6 +1,8 @@
 # GIST for Android — Development Plan
 
-**Status:** Draft v1, 2026-10-07.
+**Status:** Draft v1, 2026-10-07; scope amended 2026-10-09 (see the notice below).
+> **Scope decision, 2026-10-09 (owner).** OCR (including camera capture and the review screen), annotations and export are **potential future capability, not planned** on every platform that does not already have them (spec v1.6 §11). Anything below that describes them is retained as design history only and is **not scheduled work**. A document with no text layer (a scanned PDF) must instead fail with the typed `PdfNoTextLayer` limitation; no OCR path is promised.
+
 **Companion Documents:** [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md), [`docs/product-spec-reader-app-v3.md`](./product-spec-reader-app-v3.md), [`docs/iconspecification.md`](./iconspecification.md), and ADRs 024–029.
 **Purpose:** Define the architectural blueprint, platform integration, and phased implementation milestones for the native Android client (`apps/android`).
 
@@ -41,7 +43,7 @@ apps/android/
 │   │       └── storage/            # AndroidStoragePaths, SAF stream helpers
 │   └── src/test/java/              # JUnit / Robolectric tests against real GistCore
 ├── app/                            # Android application module (Jetpack Compose UI)
-│   ├── build.gradle.kts            # Compose BOM, Material 3, CameraX, ML Kit
+│   ├── build.gradle.kts            # Compose BOM, Material 3 (CameraX / ML Kit only if OCR is ever adopted)
 │   ├── src/main/
 │   │   ├── AndroidManifest.xml     # Package definition, INTERNET permission, no broad storage
 │   │   ├── jniLibs/                # Staged native binaries: arm64-v8a, armeabi-v7a, x86_64
@@ -56,8 +58,8 @@ apps/android/
 │   │       ├── reader/
 │   │       │   ├── flow/           # FlowReaderScreen (LazyColumn, typography, nested TOC)
 │   │       │   └── rsvp/           # RsvpReaderScreen (ORP display, Rotary/gesture speed dial)
-│   │       ├── ocr/                # CameraCaptureScreen (CameraX), OcrReviewScreen
-│   │       └── ocr/engine/         # AndroidMlKitOcrEngine (ADR-028)
+│   │       ├── ocr/                # (unplanned future capability) CameraCaptureScreen, OcrReviewScreen
+│   │       └── ocr/engine/         # (unplanned) AndroidMlKitOcrEngine (ADR-028, deferred)
 tools/
 ├── build-core-android.sh           # cargo-ndk build for arm64-v8a, armeabi-v7a, x86_64
 ├── fetch-pdfium-android.sh         # Download & verify SHA-256 pinned libpdfium.so
@@ -76,7 +78,7 @@ tools/
 | **Document Flow** | `LazyVStack` | `ItemsRepeater` | `LazyColumn` (virtualized blocks) |
 | **RSVP Pacing** | `CVDisplayLink` / `Task.sleep` | `DispatcherQueueTimer` monotonic | `Choreographer` / monotonic nano-clock |
 | **Key Custody** | Apple Keychain (`SecItemAdd`) | Windows DPAPI (`content-key.dpapi`) | Android Keystore TEE/StrongBox (`GAK1`) |
-| **OCR Recognition**| Vision framework | `Windows.Media.Ocr` | Bundled Google ML Kit (`com.google.mlkit`) |
+| **OCR Recognition**| Vision framework | `Windows.Media.Ocr` | Not planned (ADR-028 deferred) |
 | **PDF Backend** | Embedded `libpdfium.dylib` | Trait stub / future PDFium | Pinned `libpdfium.so` (`pdfium-render`) |
 
 ---
@@ -89,7 +91,7 @@ tools/
 | [**025 Android FFI binding**](./adr/025-android-ffi-binding.md) | **UniFFI Kotlin bindings + Android NDK** | UniFFI 0.32 has native Kotlin support; zero API drift across platforms; `cargo-ndk` cross-compiles clean `.so` libraries for `arm64-v8a`, `armeabi-v7a`, and `x86_64`. |
 | [**026 Android key custody**](./adr/026-android-key-custody.md) | **Hardware-backed Android Keystore** | AES-256 master key generated in TEE/StrongBox hardware wrapping a random 32-byte content key stored in `content-key.keystore` (`GAK1` magic). Race-safe atomic creation; fail-closed corruption detection. |
 | [**027 Android storage & sandbox**](./adr/027-android-storage-and-sandbox.md) | **Scoped Storage, SAF, and cloud backup exclusion** | All app data in private `context.filesDir`; copy-on-import (ADR-006) preserves external user files; `android:allowBackup="false"` prevents leaking personal reading data to Google Drive. Only `INTERNET` permission requested. |
-| [**028 Android OCR engine**](./adr/028-android-ocr-engine.md) | **Bundled on-device Google ML Kit Text Recognition** | Zero network traffic, 100% on-device, privacy-preserving; works on de-Googled devices; CameraX batch document scanner; full confidence scores. |
+| [**028 Android OCR engine**](./adr/028-android-ocr-engine.md) | **Deferred 2026-10-09 (unplanned future capability).** Design on record: bundled on-device Google ML Kit Text Recognition | Zero network traffic, 100% on-device, privacy-preserving; works on de-Googled devices; CameraX batch document scanner; full confidence scores. |
 | [**029 Android PDF text extraction**](./adr/029-android-pdf-engine.md) | **Pinned prebuilt `libpdfium.so` via `pdfium-render`** | Android framework cannot extract PDF text; `libpdfium.so` dynamically loaded across ABIs; SHA-256 fail-closed build verification; BSD-3 license compliance. |
 
 ---
@@ -223,15 +225,15 @@ In accordance with [`docs/PRIVACY.md`](./PRIVACY.md):
 
 ---
 
-### Phase A4 — Format Parity: PDF, OCR, Web Share & TTS (2–3 weeks)
+### Phase A4 — Format Parity: PDF, Web Share & TTS (OCR removed from scope 2026-10-09)
 
-**Goal:** Complete format ingestion parity on Android (PDF text layer, on-device OCR, system share receiver, and text-to-speech).
+**Goal:** Complete format ingestion parity on Android (PDF text layer, system share receiver, and text-to-speech; no OCR).
 
 - **PDF Ingestion (ADR-029):**
   - Integrate `libpdfium.so` into `jniLibs/`.
   - Pass library path to `gist-parse-pdf` on initialization.
-  - Test PDF imports against test fixtures: extract text layer, preserve reading order, detect scanned PDFs without text layers and prompt OCR.
-- **OCR Engine & Camera Scanner (ADR-028):**
+  - Test PDF imports against test fixtures: extract text layer, preserve reading order, detect scanned PDFs without text layers and report `PdfNoTextLayer` (no OCR path).
+- **~~OCR Engine & Camera Scanner (ADR-028)~~ — not planned; the three bullets below are design history only:**
   - Implement `AndroidMlKitOcrEngine` implementing UniFFI `OcrEngine`.
   - CameraX multi-page document scanner: batch take photos of paper document, display thumbnail filmstrip, deskew/normalize in `gist-imageprep`.
   - OCR Review Screen: display recognized text with confidence-based highlights for low-scoring words, allow inline corrections before committing to library.
@@ -242,7 +244,7 @@ In accordance with [`docs/PRIVACY.md`](./PRIVACY.md):
   - Integrate `android.speech.tts.TextToSpeech` using local on-device TTS engine.
   - Read aloud synchronized with token stream highlighting.
 
-**Exit Criteria:** Text-layer PDF and scanned camera documents import successfully; URL shared from Chrome imports cleanly; 100% offline OCR verified with zero network calls.
+**Exit Criteria:** Text-layer PDFs import successfully and scanned PDFs report `PdfNoTextLayer`; URL shared from Chrome imports cleanly; read-aloud works offline.
 
 ---
 

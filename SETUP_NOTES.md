@@ -16,12 +16,14 @@ One-time setup steps per machine. Mark done by appending `[DONE — machine, dat
 ## Windows
 - Install Git for Windows (provides Git Bash, which runs the `tools/*.sh` scripts and Claude Code hooks).
 - Rust: install rustup with the `x86_64-pc-windows-msvc` target plus Visual Studio Build Tools (C++ workload).
-- WinUI 3 shell (`apps/windows/`, not yet started): .NET SDK and Visual Studio with the Windows App SDK workload.
+- WinUI 3 shell (`apps/windows/`, W1–W5 built): .NET SDK 10 and the Windows App SDK NuGet package; the Visual Studio WinUI workload is optional (see the W0 notes below).
 - Cannot run here: `build-core-xcframework.sh`, `gen-bindings.sh` (Apple slices), `notarize.sh`, XcodeGen, xcodebuild.
 - Do not use `python3` in scripts: the Windows Store stub hangs.
 
 ## Linux
 - Rust toolchain plus system build essentials. No Apple or WinUI targets.
+- GTK4 spike (`spikes/linux-gtk`, excluded from the workspace): GTK4 development packages; see its README. PDFium is not configured on Linux, so PDF import does not work there yet.
+- Android host work (A0 spike, Linux only): JDK 21, Android SDK and NDK r28, `cargo-ndk` (not yet installed anywhere); `tools/gen-bindings-kt.sh` generates Kotlin bindings.
 
 ## Windows — installed/verified 2026-09-20 (W0)
 - [DONE — ProArt13, 2026-09-20] .NET SDK 10.0.401: `winget install --id Microsoft.DotNet.SDK.10`

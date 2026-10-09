@@ -18,8 +18,8 @@ gist/
 ├── apps/
 │   ├── apple/        # SwiftUI (macOS + iOS)
 │   ├── windows/      # WinUI 3 (Windows)
-│   ├── android/      # Kotlin + Jetpack Compose (planned; ADR-024)
-│   └── linux/        # GTK4 (planned)
+│   └── android/      # Kotlin + Jetpack Compose (planned; ADR-024; not yet created)
+├── spikes/           # linux-gtk (GTK4 prototype, runs), pdf-isolation (measured design spike)
 ├── docs/             # Architecture docs, ADRs, build guides
 ├── fixtures/         # Test corpus (public-domain only)
 └── tools/            # Build scripts
@@ -44,7 +44,8 @@ See `docs/adr/` for full decision records.
 - **Android FFI:** upstream UniFFI Kotlin bindings and Android NDK shared libraries are proposed in ADR-025.
 - **PDF:** `pdfium-render` (BSD-3) behind a swappable trait (ADR-002).
 - **Annotation anchoring:** `(block_id, start, len, prefix_hash, quote_hash)` with re-anchoring (ADR-003).
-- **RSVP timing:** pure `(state, elapsed_ms) → token` function; each native shell supplies its own monotonic clock.
+- **RSVP timing:** pure `(state, elapsed_ms) → token` function; each native shell supplies its own monotonic clock and calls it through `FfiRsvpSession` (no per-shell port of the maths). Redraws are wall-clock-anchored, not `CVDisplayLink`/timer-counted.
+- **FFI details:** see `docs/FFI.md`.
 - **Persistence:** SQLite via `rusqlite` (bundled, FTS5). WAL mode. No sync, no backend.
 - **Distribution:** notarised DMG (macOS); Windows MSIX and Android APK/AAB are planned.
 
