@@ -87,7 +87,7 @@ struct RsvpSessionStats {
 
 // ── Rotary dial math ─────────────────────────────────────────────────────────
 
-/// Pure geometry/mapping math backing `RotaryDialView`'s drag gesture, kept
+/// Pure geometry/mapping math backing the retired rotary dial's drag gesture, kept
 /// separate from the view so it's unit-testable without driving a live
 /// `DragGesture`, matching this codebase's pure-logic convention.
 enum RotaryDialMath {
@@ -376,84 +376,44 @@ struct OrpWordView: View {
         }
         .font(.system(size: fontSize, weight: .regular, design: .monospaced))
         .foregroundStyle(theme.foreground)
+        // Fixed height: an empty token (paragraph/section break) renders no
+        // glyphs, which would otherwise collapse the row and make the page jump.
+        .frame(height: fontSize * 1.5)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(word)
     }
 }
 
-/// A rotary speed-dial control for WPM. Drag angle (relative to where the
-/// drag started, via `RotaryDialMath`) maps to a wpm delta; the visual
-/// indicator's rest position is a simple proportional sweep across the
-/// legal 100...1000 range, purely cosmetic. `accessibilityAdjustableAction`
-/// is mandatory here (this is a custom control, not a system one) per the
-/// product spec's accessibility requirement.
-struct RotaryDialView: View {
+/// The reading-speed range offered by the RSVP controls. The core accepts
+/// 100–1000 wpm; the UI deliberately offers the practical 200–700 band.
+enum RsvpSpeedRange {
+    static let min: UInt32 = 200
+    static let max: UInt32 = 700
+}
+
+/// A slider for reading speed (`RsvpSpeedRange`), in 5-wpm steps. Replaced
+/// the rotary dial, whose drag lost direction when the pointer crossed the
+/// dial. Adjustable by VoiceOver like any native slider.
+struct WpmSliderView: View {
     let wpm: UInt32
     let theme: Theme
     let onChange: (UInt32) -> Void
 
-    @State private var dragBaseWpm: UInt32?
-    @State private var dragStartAngle: Double?
-
-    private let diameter: CGFloat = 88
-    private let step: UInt32 = 25
-
     var body: some View {
-        ZStack {
-            Circle()
-                .strokeBorder(theme.foreground.opacity(0.25), lineWidth: 4)
-            Circle()
-                .fill(theme.accent)
-                .frame(width: 10, height: 10)
-                .offset(y: -(diameter / 2 - 10))
-                .rotationEffect(.degrees(indicatorAngleDegrees))
-            Image(systemName: "gauge.medium")
-                .font(.title2)
-                .foregroundStyle(theme.foreground.opacity(0.5))
-        }
-        .frame(width: diameter, height: diameter)
-        .contentShape(Circle())
-        .gesture(
-            DragGesture(minimumDistance: 1)
-                .onChanged { value in
-                    let center = CGPoint(x: diameter / 2, y: diameter / 2)
-                    if dragBaseWpm == nil {
-                        dragBaseWpm = wpm
-                        dragStartAngle = RotaryDialMath.angleDegrees(from: center, to: value.startLocation)
-                    }
-                    guard let base = dragBaseWpm, let startAngle = dragStartAngle else { return }
-                    let currentAngle = RotaryDialMath.angleDegrees(from: center, to: value.location)
-                    let delta = RotaryDialMath.angularDelta(from: startAngle, to: currentAngle)
-                    onChange(RotaryDialMath.wpm(startingFrom: base, rotatedByDegrees: delta))
-                }
-                .onEnded { _ in
-                    dragBaseWpm = nil
-                    dragStartAngle = nil
-                }
+        Slider(
+            value: Binding(
+                get: { Double(min(max(wpm, RsvpSpeedRange.min), RsvpSpeedRange.max)) },
+                // Snap to 5 wpm here rather than via `Slider(step:)`, which draws a
+                // row of tick marks under the track.
+                set: { onChange(UInt32((($0 / 5).rounded() * 5))) }
+            ),
+            in: Double(RsvpSpeedRange.min)...Double(RsvpSpeedRange.max)
         )
-        .accessibilityElement()
-        .accessibilityLabel("Reading speed dial")
+        .controlSize(.small)
+        .tint(theme.accent)
+        .frame(width: 180)
+        .accessibilityLabel("Reading speed")
         .accessibilityValue("\(wpm) words per minute")
-        .accessibilityAdjustableAction { direction in
-            switch direction {
-            case .increment:
-                onChange(min(wpm + step, 1000))
-            case .decrement:
-                onChange(max(wpm - step, 100))
-            @unknown default:
-                break
-            }
-        }
-    }
-
-    /// Purely cosmetic: proportionally sweeps 270 degrees across the
-    /// 100...1000 wpm range, starting at -135 degrees (bottom-left), the
-    /// typical rotary-knob look. Not the drag math itself (see
-    /// `RotaryDialMath`), just where the indicator dot rests for a given
-    /// `wpm`.
-    private var indicatorAngleDegrees: Double {
-        let fraction = (Double(wpm) - 100) / 900
-        return -135 + fraction * 270
     }
 }
 
@@ -472,7 +432,7 @@ struct WpmStepperView: View {
     var body: some View {
         HStack(spacing: 16) {
             Button {
-                onChange(max(wpm - step, 100))
+                onChange(max(wpm - step, RsvpSpeedRange.min))
             } label: {
                 Image(systemName: "minus.circle")
             }
@@ -483,7 +443,7 @@ struct WpmStepperView: View {
                 .frame(minWidth: 90)
 
             Button {
-                onChange(min(wpm + step, 1000))
+                onChange(min(wpm + step, RsvpSpeedRange.max))
             } label: {
                 Image(systemName: "plus.circle")
             }
@@ -495,9 +455,9 @@ struct WpmStepperView: View {
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment:
-                onChange(min(wpm + step, 1000))
+                onChange(min(wpm + step, RsvpSpeedRange.max))
             case .decrement:
-                onChange(max(wpm - step, 100))
+                onChange(max(wpm - step, RsvpSpeedRange.min))
             @unknown default:
                 break
             }
@@ -516,6 +476,7 @@ struct RsvpView: View {
     @EnvironmentObject var core: CoreClient
     @EnvironmentObject var themeManager: ThemeManager
     @StateObject private var player = RsvpPlayer()
+    @State private var controlsHovered = false
 
     /// RSVP is the one place OLED "true black" matters most -- a word
     /// display lit against a black background during a reading session --
@@ -569,46 +530,68 @@ struct RsvpView: View {
         navigationPath.append(.flow(itemId: itemId))
     }
 
+    /// The word owns the screen; every control lives in one compact, dimmed
+    /// bar underneath that fades back while playing (full opacity on hover or
+    /// when paused) so it doesn't compete with the words being read.
     private var playbackContent: some View {
-        VStack(spacing: 20) {
-            OrpWordView(split: player.currentFrame?.orp ?? FfiOrpSplit(before: "", focus: "", after: ""), theme: theme, fontSize: 48)
-                .frame(maxWidth: .infinity)
-                .padding(.top)
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+            OrpWordView(
+                split: player.currentFrame?.orp ?? FfiOrpSplit(before: "", focus: "", after: ""),
+                theme: theme, fontSize: 56
+            )
+            .frame(maxWidth: .infinity)
+            Spacer(minLength: 0)
 
-            if let progressText = player.progressText {
-                Text(progressText)
-                    .font(.caption)
-                    .foregroundStyle(theme.foreground.opacity(0.6))
-                    .monospacedDigit()
-            }
+            controlBar
+                .opacity(player.isPlaying && !controlsHovered ? 0.3 : 1)
+                .animation(.easeInOut(duration: 0.2), value: player.isPlaying)
+                .animation(.easeInOut(duration: 0.2), value: controlsHovered)
+                .onHover { controlsHovered = $0 }
+                .padding(.bottom, 16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.background)
+    }
 
-            // Scrub/seek within the document.
-            VStack(spacing: 4) {
-                Slider(
-                    value: Binding(
-                        get: { player.scrubFraction },
-                        set: { player.seek(toFraction: $0) }
-                    ),
-                    in: 0...1
-                )
-                .tint(theme.accent)
-                .frame(width: 260)
-                .accessibilityLabel("Seek position in document")
+    private var controlBar: some View {
+        VStack(spacing: 8) {
+            Slider(
+                value: Binding(
+                    get: { player.scrubFraction },
+                    set: { player.seek(toFraction: $0) }
+                ),
+                in: 0...1
+            )
+            .controlSize(.small)
+            .tint(theme.accent)
+            .frame(width: 320)
+            .accessibilityLabel("Seek position in document")
 
-                Text(sessionStatsLine)
-                    .font(.caption2)
-                    .foregroundStyle(theme.foreground.opacity(0.5))
-                    .monospacedDigit()
-            }
+            HStack(spacing: 20) {
+                Button {
+                    player.backWords(5)
+                } label: {
+                    Image(systemName: "gobackward.5")
+                        .foregroundStyle(theme.foreground)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back 5 words")
 
-            // WPM controls: numeric readout, rotary dial, accessible stepper.
-            VStack(spacing: 12) {
-                Text("\(player.wpm) WPM")
-                    .font(.caption)
-                    .foregroundStyle(theme.foreground.opacity(0.6))
-                    .monospacedDigit()
-                RotaryDialView(wpm: player.wpm, theme: theme) { player.setWpm($0) }
+                Button {
+                    if player.isPlaying { player.pause() } else { player.play() }
+                } label: {
+                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title3)
+                        .foregroundStyle(theme.accent)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.space, modifiers: [])
+                .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
+
+                WpmSliderView(wpm: player.wpm, theme: theme) { player.setWpm($0) }
                 WpmStepperView(wpm: player.wpm, step: 25) { player.setWpm($0) }
+                    .font(.caption)
             }
 
             Toggle(isOn: Binding(
@@ -616,40 +599,17 @@ struct RsvpView: View {
                 set: { player.setPunctuationPauseEnabled($0) }
             )) {
                 Text("Pause longer at punctuation")
+                    .font(.caption)
             }
             .toggleStyle(.switch)
+            .controlSize(.mini)
             .tint(theme.accent)
-            .frame(width: 260)
 
-            // Transport: back 5 words + play/pause.
-            HStack(spacing: 32) {
-                Button {
-                    player.backWords(5)
-                } label: {
-                    Image(systemName: "gobackward.5")
-                        .font(.title2)
-                        .foregroundStyle(theme.foreground)
-                }
-                .accessibilityLabel("Back 5 words")
-
-                Button {
-                    if player.isPlaying {
-                        player.pause()
-                    } else {
-                        player.play()
-                    }
-                } label: {
-                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.title)
-                        .foregroundStyle(theme.accent)
-                }
-                .keyboardShortcut(.space, modifiers: [])
-                .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
-            }
-            .padding(.bottom)
+            Text([player.progressText, sessionStatsLine].compactMap { $0 }.joined(separator: "  •  "))
+                .font(.caption2)
+                .foregroundStyle(theme.foreground.opacity(0.6))
+                .monospacedDigit()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.background)
     }
 
     // (R5b localisation) Read via `Text(sessionStatsLine)`, which takes the
