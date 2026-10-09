@@ -35,362 +35,10 @@ struct TokenVM: Decodable {
     let kind: TokenKindVM
 }
 
-// ── ORP (Optimal Recognition Point) ─────────────────────────────────────────
-
-/// Splits a word into the text before, at, and after its ORP pivot
-/// character, so the pivot can be rendered distinctly (typically colored)
-/// to anchor eye fixation — the standard RSVP presentation technique.
-///
-/// Ported from `gist_rsvp::orp_index` (crates/gist-rsvp/src/lib.rs): target
-/// position ≈ 30% into the word; prefer a vowel at or after that position,
-/// otherwise use the character at that index. Keep in sync with the Rust
-/// source if that rule changes.
-///
-/// Deliberately operates in `Character` (grapheme-cluster) space rather than
-/// porting Rust's byte-offset return value verbatim — Swift's `Text` views
-/// split on `Character` boundaries anyway, so there is no equivalent "byte
-/// index" this code needs to produce; what matters is landing on the same
-/// pivot *character*, which this does identically to the Rust rule for all
-/// the cases the Rust unit tests cover.
-enum OrpCalculator {
-    private static let vowels: Set<Character> = ["a", "e", "i", "o", "u", "A", "E", "I", "O", "U"]
-
-    /// Character index of the ORP pivot within `word`. Returns `0` for an
-    /// empty string (mirroring the Rust function's early return).
-    static func pivotCharIndex(word: String) -> Int {
-        let chars = Array(word)
-        guard !chars.isEmpty else { return 0 }
-        let target = min(Int((Double(chars.count) * 0.30).rounded()), chars.count - 1)
-        for i in target..<chars.count where vowels.contains(chars[i]) {
-            return i
-        }
-        return target
-    }
-
-    struct Split {
-        let prefix: String
-        let pivot: String
-        let suffix: String
-    }
-
-    /// Splits `word` into (prefix, pivot character, suffix). All three are
-    /// empty for an empty `word`.
-    static func split(_ word: String) -> Split {
-        let chars = Array(word)
-        guard !chars.isEmpty else { return Split(prefix: "", pivot: "", suffix: "") }
-        let idx = pivotCharIndex(word: word)
-        let prefix = String(chars[0..<idx])
-        let pivot = String(chars[idx])
-        let suffix = idx + 1 < chars.count ? String(chars[(idx + 1)...]) : ""
-        return Split(prefix: prefix, pivot: pivot, suffix: suffix)
-    }
-}
-
-// ── Wall-clock-anchored pacing engine ───────────────────────────────────────
-
-/// Wall-clock-anchored RSVP pacing, mirroring `gist_rsvp::RsvpSession`'s
-/// cursor/elapsed model (`token_duration_ms`, `token_at_elapsed`, `pause`,
-/// `resume`, `set_wpm` in crates/gist-rsvp/src/lib.rs) as closely as
-/// possible on the Swift side.
-///
-/// This fixes a known fidelity gap: the original port drove playback with a
-/// sequential `Task.sleep`-per-token loop that trusted each sleep to be
-/// exact and never re-checked against the wall clock, so any scheduling
-/// jitter (or a delayed/coalesced `Task` wake) accumulated as drift over a
-/// long session. This engine instead recomputes, on every tick, which token
-/// index *should* be showing given actual elapsed wall-clock time since the
-/// last `resume` — exactly what `token_at_elapsed` does on the Rust side —
-/// so a late tick "catches up" instead of silently falling behind.
-///
-/// A plain value type (not `@State`/SwiftUI-view-coupled) so the pacing math
-/// is unit-testable without driving a live view, matching this codebase's
-/// existing convention for `LibraryFiltering`/`ReadingProgress`/
-/// `LibrarySortOrder`. It takes wall-clock time as an explicit `at:`
-/// parameter rather than reading `Date()` itself, so tests can simulate
-/// delayed ticks and pause/resume gaps deterministically.
-///
-/// Keep `tokenDurationMs`/`tokenAtElapsed` and the punctuation/numeral
-/// helpers below in sync with `crates/gist-rsvp/src/lib.rs` if pacing rules
-/// change there — there is no per-tick FFI call, so this is a hand-ported
-/// duplicate of that logic, not a live call-through.
-///
-/// **On `CVDisplayLink` vs. this state-driven approach (investigated as
-/// part of the RSVP-view polish pass, 2026-09-26):** at 1000 WPM a plain
-/// word displays for ~60ms, only a handful of frames at 60Hz, and a naive
-/// `Timer`-driven redraw loop can visibly jitter at that rate. That is a
-/// **different** problem from the drift this engine already fixed: drift is
-/// "is the model showing the *correct* word for elapsed time," which is
-/// fully solved above by recomputing from the wall clock on every tick;
-/// jitter is "does the *frame* carrying that correct word hit the screen on
-/// a predictable cadence." Decision: **keep SwiftUI's `@Published`-driven
-/// redraw off this engine; do not add a manual `CVDisplayLink` integration.**
-/// Reasoning:
-///   1. `Task.sleep(nanoseconds:)` is backed by a high-resolution dispatch
-///      timer, accurate to well under a millisecond — far tighter than the
-///      ~16.6ms/frame budget that would be the actual limiting factor
-///      either way, whether driven by `Task.sleep` or a `CVDisplayLink`
-///      callback.
-///   2. AppKit/SwiftUI already composites and presents frames on the
-///      system's own vsync-driven pipeline internally; a manual
-///      `CVDisplayLink` callback would still have to hand its result to
-///      SwiftUI's state system (there is no lower-level "skip SwiftUI and
-///      paint directly" path available to a `Text`-based view), so it
-///      would not shorten the state-change → composited-frame path that
-///      actually determines when pixels change.
-///   3. Because drift is fixed at the model level, a late/coalesced wake
-///      still shows the *correct* word — the residual risk from staying
-///      with `Task.sleep` is at most "this frame's content is right but
-///      arrived a fraction of a frame later than ideal," not "the wrong
-///      word is shown" or "durations compound-drift over a session." That
-///      residual is not perceptible at normal reading distances/rates.
-///   4. A manual `CVDisplayLink` integration is AppKit-only (this file is
-///      already macOS-only, so that's not disqualifying by itself, but it
-///      is real added complexity: a second timing lifecycle to start/stop
-///      in lockstep with play/pause/backgrounding, bridged back into
-///      SwiftUI's state system) for a gain that is unmeasured and, per (1)
-///      and (2), not expected to be perceptible.
-/// Revisit only if real hands-on testing at 800–1000 WPM surfaces visible
-/// per-word jitter that the above reasoning doesn't predict.
-struct RsvpWallClockEngine {
-    /// Index into the token stream marking where the current play window
-    /// starts — mirrors `RsvpSession::cursor`.
-    private(set) var cursor: Int
-
-    /// The wall-clock instant playback last resumed from, or `nil` while
-    /// paused — mirrors `RsvpSession::state` (`Playing` iff non-nil).
-    private(set) var resumeDate: Date?
-
-    /// Total milliseconds spent actually playing (elapsed time while
-    /// `resumeDate` was non-nil), accumulated across every past
-    /// pause/resume/seek/wpm-change cycle but excluding paused gaps —
-    /// mirrors `RsvpSession::elapsed_at_pause`, which this codebase's
-    /// session-stats readout (`RsvpSessionStats`) is built on. Unlike
-    /// discarding and rebuilding a fresh `RsvpWallClockEngine`, mutating
-    /// methods below fold each cycle's elapsed time into this rather than
-    /// losing it, so seeking/back-words/wpm/punctuation-toggle changes
-    /// don't silently reset session stats.
-    private(set) var accumulatedPlayMs: UInt64 = 0
-
-    init(cursor: Int) {
-        self.cursor = cursor
-        self.resumeDate = nil
-    }
-
-    var isPlaying: Bool { resumeDate != nil }
-
-    /// Sentinel `remainingMs` returned while paused, so a caller never
-    /// mistakes "not currently running a clock" for "the next token is due
-    /// in 0ms" and busy-loops.
-    static let notPlayingRemainingMs = UInt64.max
-
-    /// The index that should be displayed right now, and how many
-    /// milliseconds remain before the next token boundary (`0` once the
-    /// last token is reached; `notPlayingRemainingMs` while paused).
-    ///
-    /// Mirrors `RsvpSession::token_at_elapsed`, called with elapsed time
-    /// measured from `resumeDate` to `now` rather than from a
-    /// caller-tracked counter. `punctuationPauseEnabled` defaults to `true`
-    /// (the original, only) behavior, so every pre-existing call site
-    /// keeps compiling and behaving identically.
-    func currentIndex(
-        tokens: [TokenVM], config: RsvpConfigVM, wpm: UInt32, at now: Date,
-        punctuationPauseEnabled: Bool = true
-    ) -> (index: Int, remainingMs: UInt64) {
-        guard let resumeDate else {
-            return (min(cursor, max(tokens.count - 1, 0)), Self.notPlayingRemainingMs)
-        }
-        let elapsedMs = Self.elapsedMs(from: resumeDate, to: now)
-        return Self.tokenAtElapsed(
-            tokens: tokens, config: config, wpm: wpm, cursor: cursor, elapsedMs: elapsedMs,
-            punctuationPauseEnabled: punctuationPauseEnabled
-        )
-    }
-
-    /// Pause playback at `now`, pinning `cursor` to wherever elapsed time
-    /// actually put us — mirrors `RsvpSession::pause`. Also folds the
-    /// elapsed time since the last resume into `accumulatedPlayMs`.
-    mutating func pause(
-        tokens: [TokenVM], config: RsvpConfigVM, wpm: UInt32, at now: Date,
-        punctuationPauseEnabled: Bool = true
-    ) {
-        guard let resumeDate else { return }
-        let elapsedMs = Self.elapsedMs(from: resumeDate, to: now)
-        cursor = Self.tokenAtElapsed(
-            tokens: tokens, config: config, wpm: wpm, cursor: cursor, elapsedMs: elapsedMs,
-            punctuationPauseEnabled: punctuationPauseEnabled
-        ).index
-        accumulatedPlayMs += elapsedMs
-        self.resumeDate = nil
-    }
-
-    /// Resume playback, anchoring the elapsed clock to `now` — mirrors
-    /// `RsvpSession::resume` (paired with the caller resetting its own
-    /// elapsed counter, which here is just `resumeDate`).
-    mutating func resume(at now: Date) {
-        resumeDate = now
-    }
-
-    /// Change wpm mid-playback without breaking pacing continuity: pin
-    /// `cursor` to the index computed under the *old* wpm/punctuation
-    /// settings as of `now`, fold that elapsed span into
-    /// `accumulatedPlayMs`, then reset the elapsed clock to `now` — mirrors
-    /// `RsvpSession::set_wpm`. A no-op while paused, since `cursor` already
-    /// reflects the paused position and there is no running clock to reset.
-    ///
-    /// Also doubles as the repin primitive for a mid-playback
-    /// punctuation-pause toggle (`RsvpPlayer.setPunctuationPauseEnabled`):
-    /// "wpm changed" and "punctuation-pause setting changed" are both just
-    /// "a pacing rule changed, repin under the old rule then restart the
-    /// clock," so passing the *old* `punctuationPauseEnabled` value here
-    /// (default `true`, matching every pre-existing call site) does the
-    /// right thing for either kind of change.
-    mutating func setWpm(
-        tokens: [TokenVM], config: RsvpConfigVM, oldWpm: UInt32, at now: Date,
-        punctuationPauseEnabled: Bool = true
-    ) {
-        guard let resumeDate else { return }
-        let elapsedMs = Self.elapsedMs(from: resumeDate, to: now)
-        cursor = Self.tokenAtElapsed(
-            tokens: tokens, config: config, wpm: oldWpm, cursor: cursor, elapsedMs: elapsedMs,
-            punctuationPauseEnabled: punctuationPauseEnabled
-        ).index
-        accumulatedPlayMs += elapsedMs
-        self.resumeDate = now
-    }
-
-    /// Seek playback to `idx` — shared by scrub/seek and "back N words"
-    /// (both are just a jump to a computed token index, mirroring how
-    /// `RsvpSession::seek`/`back_words` both just reposition `cursor` on
-    /// the Rust side). Unlike discarding and rebuilding a fresh
-    /// `RsvpWallClockEngine(cursor:)`, this preserves `accumulatedPlayMs`
-    /// bookkeeping across the jump. If currently playing, the elapsed clock
-    /// restarts at `now` so the next tick paces correctly from the new
-    /// position; if paused, only the cursor moves.
-    mutating func seek(toIndex idx: Int, tokenCount: Int, at now: Date) {
-        let clamped = min(max(idx, 0), max(tokenCount - 1, 0))
-        if let resumeDate {
-            accumulatedPlayMs += Self.elapsedMs(from: resumeDate, to: now)
-            self.resumeDate = now
-        }
-        cursor = clamped
-    }
-
-    /// Total time spent actually playing so far (excluding paused gaps),
-    /// as of `now` — `accumulatedPlayMs` plus any still-running span since
-    /// the last resume. Backs `RsvpSessionStats`'s elapsed-time readout.
-    func totalElapsedMs(at now: Date) -> UInt64 {
-        guard let resumeDate else { return accumulatedPlayMs }
-        return accumulatedPlayMs + Self.elapsedMs(from: resumeDate, to: now)
-    }
-
-    private static func elapsedMs(from start: Date, to now: Date) -> UInt64 {
-        // `.rounded()` before truncating to `UInt64` -- floating-point
-        // representation error (e.g. a 0.400s interval materializing as
-        // 0.39999999999999997) would otherwise truncate to 399ms instead of
-        // 400ms. Rounding is also the semantically correct choice for "how
-        // many milliseconds elapsed," not just a rounding-error workaround.
-        UInt64((max(0, now.timeIntervalSince(start)) * 1000).rounded())
-    }
-
-    // MARK: Pure pacing — ported from RsvpSession::token_duration_ms / token_at_elapsed
-
-    /// Duration in milliseconds that token `idx` should be displayed —
-    /// ported from `RsvpSession::token_duration_ms`
-    /// (crates/gist-rsvp/src/lib.rs). Keep in sync with the Rust source if
-    /// pacing rules change there.
-    ///
-    /// `punctuationPauseEnabled` (default `true`, matching every
-    /// pre-existing call site's behavior) gates only the *punctuation*
-    /// pauses on word tokens (sentence/comma/numeral) — a paragraph/section
-    /// break's pause is a structural pause, not punctuation, so it always
-    /// applies regardless of this toggle.
-    static func tokenDurationMs(
-        tokens: [TokenVM], config: RsvpConfigVM, wpm: UInt32, idx: Int,
-        punctuationPauseEnabled: Bool = true
-    ) -> UInt64 {
-        guard tokens.indices.contains(idx) else { return 0 }
-        let clampedWpm = min(max(wpm, 100), 1000)
-        let baseMs = 60_000 / UInt64(clampedWpm)
-        let token = tokens[idx]
-
-        let multiplier: Double
-        switch token.kind {
-        case .paragraphBreak, .sectionBreak:
-            multiplier = config.pauseParagraph
-        case .word:
-            if !punctuationPauseEnabled {
-                multiplier = 1.0
-            } else {
-                let text = token.text
-                if isNumeral(text) {
-                    let punct = endsSentence(text) ? config.pauseSentence
-                        : (endsClause(text) ? config.pauseComma : 1.0)
-                    multiplier = max(config.pauseNumeral, punct)
-                } else if endsSentence(text) {
-                    multiplier = config.pauseSentence
-                } else if endsClause(text) {
-                    multiplier = config.pauseComma
-                } else {
-                    multiplier = 1.0
-                }
-            }
-        }
-        return UInt64((Double(baseMs) * multiplier).rounded())
-    }
-
-    /// Walk forward from `cursor` summing token durations (recomputed at
-    /// the *current* `wpm` every call, never cached) until the accumulated
-    /// duration exceeds `elapsedMs` — ported from
-    /// `RsvpSession::token_at_elapsed`. This is what makes the engine
-    /// wall-clock-anchored: a late or coalesced tick still lands on the
-    /// token actually due right now instead of drifting behind by however
-    /// much a chain of sequential sleeps has overrun.
-    static func tokenAtElapsed(
-        tokens: [TokenVM], config: RsvpConfigVM, wpm: UInt32, cursor: Int, elapsedMs: UInt64,
-        punctuationPauseEnabled: Bool = true
-    ) -> (index: Int, remainingMs: UInt64) {
-        guard !tokens.isEmpty else { return (0, 0) }
-        var accumulated: UInt64 = 0
-        var idx = max(cursor, 0)
-        while idx < tokens.count {
-            let dur = tokenDurationMs(
-                tokens: tokens, config: config, wpm: wpm, idx: idx,
-                punctuationPauseEnabled: punctuationPauseEnabled
-            )
-            if accumulated + dur > elapsedMs {
-                return (idx, accumulated + dur - elapsedMs)
-            }
-            accumulated += dur
-            idx += 1
-        }
-        // Clamp to the last token.
-        return (max(tokens.count - 1, 0), 0)
-    }
-
-    private static func endsSentence(_ text: String) -> Bool {
-        let trimmed = text.reversed().drop {
-            !($0.isLetter || $0.isNumber) && $0 != "." && $0 != "!" && $0 != "?"
-        }
-        guard let last = trimmed.first else { return false }
-        return last == "." || last == "!" || last == "?"
-    }
-
-    private static func endsClause(_ text: String) -> Bool {
-        guard let last = text.last else { return false }
-        return last == "," || last == ";" || last == ":"
-    }
-
-    private static func isNumeral(_ text: String) -> Bool {
-        !text.isEmpty
-            && text.allSatisfy { ($0.isASCII && $0.isNumber) || $0 == "." || $0 == "," }
-            && text.contains { $0.isASCII && $0.isNumber }
-    }
-}
-
 // ── Scrub/seek + back-words pure math ───────────────────────────────────────
 
 /// Pure fraction↔index conversion for a scrub/seek slider over the token
-/// stream. Kept separate from `RsvpWallClockEngine` (which owns *time*, not
+/// stream. Kept separate from `RsvpPlayer` (which owns *time*, not
 /// *position* math) so it's trivially unit-testable, matching this
 /// codebase's `LibraryFiltering`/`ReadingProgress` convention.
 enum RsvpScrubMath {
@@ -414,31 +62,12 @@ enum RsvpScrubMath {
     }
 }
 
-/// Pure "jump back N words" index math, ported from
-/// `RsvpSession::back_words` (crates/gist-rsvp/src/lib.rs): walk backward
-/// from `from`, counting only `.word` tokens (paragraph/section breaks are
-/// skipped, not counted), until `n` words have been skipped or the start of
-/// the stream is reached.
-enum RsvpBackWords {
-    static func index(from: Int, n: Int, tokens: [TokenVM]) -> Int {
-        guard !tokens.isEmpty else { return 0 }
-        var target = min(max(from, 0), tokens.count - 1)
-        var skipped = 0
-        while target > 0 && skipped < n {
-            target -= 1
-            if tokens[target].kind == .word {
-                skipped += 1
-            }
-        }
-        return target
-    }
-}
 
 // ── Session stats ────────────────────────────────────────────────────────────
 
 /// A point-in-time snapshot of session progress for a small stats readout:
 /// words read so far, elapsed play time (excluding paused gaps, backed by
-/// `RsvpWallClockEngine.totalElapsedMs`), and the reading pace actually
+/// the engine's `statsAtElapsed`), and the reading pace actually
 /// achieved (which can differ from the target `wpm` once punctuation pauses
 /// and back-word rewinds are factored in). Pure data computed on demand from
 /// `RsvpPlayer`'s live state — not its own `@Published` property, since
@@ -453,25 +82,6 @@ struct RsvpSessionStats {
     var formattedElapsed: String {
         let totalSeconds = Int(elapsedMs / 1000)
         return String(format: "%d:%02d", totalSeconds / 60, totalSeconds % 60)
-    }
-}
-
-/// Pure helpers backing `RsvpSessionStats`.
-enum RsvpStats {
-    /// Number of `.word` tokens strictly before `index` (i.e. already
-    /// displayed) — paragraph/section breaks never count as a "word read."
-    static func wordsShown(tokens: [TokenVM], upTo index: Int) -> Int {
-        guard index > 0 else { return 0 }
-        let end = min(index, tokens.count)
-        return tokens[0..<end].filter { $0.kind == .word }.count
-    }
-
-    /// Words-per-minute actually achieved given `wordsShown` words in
-    /// `elapsedMs` milliseconds of actual play time. `0` while no time has
-    /// elapsed, rather than dividing by zero.
-    static func achievedWpm(wordsShown: Int, elapsedMs: UInt64) -> Double {
-        guard elapsedMs > 0 else { return 0 }
-        return Double(wordsShown) / (Double(elapsedMs) / 60_000.0)
     }
 }
 
@@ -514,12 +124,31 @@ enum RotaryDialMath {
 
 // ── Playback engine ──────────────────────────────────────────────────────────
 
-/// Drives RSVP playback client-side from a session fetched once via FFI.
-/// `gist_rsvp::RsvpSession` is a pure, timer-free pacing engine by design
-/// (see that crate's doc comment: "the SwiftUI shell drives it... by calling
-/// token_at_elapsed on every frame") — this is that shell half, built on
-/// `RsvpWallClockEngine` above so playback stays anchored to actual elapsed
-/// wall-clock time rather than a chain of sequential sleeps.
+/// Drives RSVP playback from a live `FfiRsvpSession` -- the Rust pacing
+/// engine (`gist_rsvp::RsvpSession`) itself, not a Swift copy of it. All
+/// pacing arithmetic (per-token durations, punctuation pauses, ORP split,
+/// back-words, session stats) happens in Rust; this class only owns the
+/// *clock* and the SwiftUI-facing published state.
+///
+/// **Wall-clock anchoring.** `resumeDate` is the instant playback last
+/// resumed. Every tick asks the engine for `frameAtElapsed(now - resumeDate)`
+/// and sleeps until the frame's `nextBoundaryMs`, so a late or coalesced
+/// wake lands on the token actually due now instead of compounding drift.
+///
+/// **Mutate-while-playing.** `seek`/`backWords`/`setWpm`/the punctuation
+/// toggle do not bank elapsed play time in the engine (only `pause` does),
+/// so every mutation here goes through `mutate`: `pause(elapsed)` → mutate
+/// at elapsed 0 → `resume()` → re-anchor `resumeDate`. Without that,
+/// `statsAtElapsed` would under-count time before the mutation.
+///
+/// **On `CVDisplayLink` (investigated 2026-09-26, decision unchanged):**
+/// `Task.sleep` is backed by a high-resolution timer far tighter than a
+/// 16.6 ms frame; SwiftUI still has to composite whatever a display-link
+/// callback hands it; and drift is solved at the model level, so a late wake
+/// shows the correct word slightly late rather than a wrong word. A manual
+/// `CVDisplayLink` would add a second timing lifecycle for an unmeasured,
+/// likely imperceptible gain. Revisit only if hands-on testing at 800–1000
+/// WPM shows visible per-word jitter.
 @MainActor
 final class RsvpPlayer: ObservableObject {
     @Published private(set) var isLoaded = false
@@ -527,28 +156,24 @@ final class RsvpPlayer: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var wpm: UInt32 = 250
     /// Whether punctuation-based pacing pauses (sentence/comma/numeral) are
-    /// applied. Paragraph/section-break pauses are structural, not
-    /// punctuation, and always apply regardless of this toggle — see
-    /// `RsvpWallClockEngine.tokenDurationMs`.
+    /// applied. Paragraph/section-break pauses are structural and always
+    /// apply -- enforced by the Rust engine (`Config::pause_on_punctuation`).
     @Published private(set) var punctuationPauseEnabled = true
+    /// The frame for `currentIndex`: token text, kind and its pre-split ORP.
+    @Published private(set) var currentFrame: FfiRsvpFrame?
 
-    private var session: RsvpSessionVM?
-    private var engine = RsvpWallClockEngine(cursor: 0)
+    private var session: FfiRsvpSession?
+    private(set) var tokenCount = 0
+    /// Wall-clock instant playback last resumed from; `nil` while paused.
+    private var resumeDate: Date?
     private var tickTask: Task<Void, Never>?
     private var core: CoreClient?
     private var itemId: String?
 
-    var currentToken: TokenVM? {
-        guard let session, session.tokens.indices.contains(currentIndex) else { return nil }
-        return session.tokens[currentIndex]
-    }
-
     var progressText: String? {
-        guard let session, !session.tokens.isEmpty else { return nil }
-        return "\(currentIndex + 1) / \(session.tokens.count)"
+        guard tokenCount > 0 else { return nil }
+        return "\(currentIndex + 1) / \(tokenCount)"
     }
-
-    var tokenCount: Int { session?.tokens.count ?? 0 }
 
     /// Fraction (0...1) of the document consumed so far, for a scrub
     /// slider's displayed position.
@@ -556,14 +181,16 @@ final class RsvpPlayer: ObservableObject {
         RsvpScrubMath.fraction(forIndex: currentIndex, tokenCount: tokenCount)
     }
 
-    /// A snapshot of session progress for the stats readout. See
-    /// `RsvpSessionStats`'s doc comment for why this isn't `@Published`.
+    /// A snapshot of session progress for the stats readout. Not
+    /// `@Published`: nothing needs it to redraw independently of the
+    /// position tick that already republishes `currentIndex`.
     var stats: RsvpSessionStats {
-        guard let session else { return RsvpSessionStats(wordsShown: 0, elapsedMs: 0, achievedWpm: 0) }
-        let wordsShown = RsvpStats.wordsShown(tokens: session.tokens, upTo: currentIndex)
-        let elapsedMs = engine.totalElapsedMs(at: Date())
-        let achieved = RsvpStats.achievedWpm(wordsShown: wordsShown, elapsedMs: elapsedMs)
-        return RsvpSessionStats(wordsShown: wordsShown, elapsedMs: elapsedMs, achievedWpm: achieved)
+        guard let session,
+              let s = try? session.statsAtElapsed(elapsedMs: elapsedMs(at: Date()))
+        else { return RsvpSessionStats(wordsShown: 0, elapsedMs: 0, achievedWpm: 0) }
+        return RsvpSessionStats(
+            wordsShown: Int(s.wordsShown), elapsedMs: s.durationMs, achievedWpm: Double(s.estimatedWpm)
+        )
     }
 
     func load(
@@ -573,13 +200,18 @@ final class RsvpPlayer: ObservableObject {
         guard session == nil else { return }
         self.core = core
         self.itemId = itemId
-        guard let loaded = await core.startRsvp(itemId: itemId, wpm: initialWpm) else { return }
-        session = loaded
-        wpm = loaded.config.wpm
-        punctuationPauseEnabled = initialPunctuationPauseEnabled
-        let startIndex = min(loaded.cursor, max(loaded.tokens.count - 1, 0))
-        currentIndex = startIndex
-        engine = RsvpWallClockEngine(cursor: startIndex)
+        guard let opened = await core.openRsvpSession(itemId: itemId, wpm: initialWpm) else { return }
+        do {
+            try opened.setPauseOnPunctuation(enabled: initialPunctuationPauseEnabled, elapsedMs: 0)
+            tokenCount = Int(try opened.tokenCount())
+            wpm = try opened.wpm()
+            punctuationPauseEnabled = initialPunctuationPauseEnabled
+            session = opened
+            refreshPosition()
+        } catch {
+            core.error = "\(error)"
+            return
+        }
         isLoaded = true
         // ADR-021: stamp "last read" once per open, fire-and-forget (a
         // failure must never interrupt reading; saveProgress is unaffected).
@@ -587,9 +219,10 @@ final class RsvpPlayer: ObservableObject {
     }
 
     func play() {
-        guard !isPlaying, let session, currentIndex < session.tokens.count - 1 else { return }
+        guard !isPlaying, let session, tokenCount > 0, currentIndex < tokenCount - 1 else { return }
+        guard (try? session.resume()) != nil else { return }
         isPlaying = true
-        engine.resume(at: Date())
+        resumeDate = Date()
         scheduleNextTick()
     }
 
@@ -598,25 +231,16 @@ final class RsvpPlayer: ObservableObject {
         isPlaying = false
         tickTask?.cancel()
         tickTask = nil
-        guard let session else { return }
-        let now = Date()
-        engine.pause(
-            tokens: session.tokens, config: session.config, wpm: wpm, at: now,
-            punctuationPauseEnabled: punctuationPauseEnabled
-        )
-        currentIndex = engine.currentIndex(
-            tokens: session.tokens, config: session.config, wpm: wpm, at: now,
-            punctuationPauseEnabled: punctuationPauseEnabled
-        ).index
+        if let session {
+            try? session.pause(elapsedMs: elapsedMs(at: Date()))
+        }
+        resumeDate = nil
+        refreshPosition()
     }
 
-    /// Change reading speed mid-session. Mirrors `RsvpSession::set_wpm`:
-    /// pins the pacing engine's cursor to wherever elapsed time (computed
-    /// under the *old* wpm) actually put us, then resets the elapsed clock
-    /// — so a token already partway through its display under the old
-    /// speed doesn't silently get a new, different duration retroactively,
-    /// and a speed change mid-tick doesn't cause the next tick to overshoot
-    /// or stall.
+    /// Change reading speed mid-session. The engine pins the position under
+    /// the *old* speed before applying the new one, so a speed change never
+    /// jumps the reader. Clamped to 100–1000 by the core as well.
     func setWpm(_ newWpm: UInt32) {
         let clamped = min(max(newWpm, 100), 1000)
         guard clamped != wpm else { return }
@@ -624,75 +248,40 @@ final class RsvpPlayer: ObservableObject {
             wpm = clamped
             return
         }
-        let now = Date()
-        engine.setWpm(
-            tokens: session.tokens, config: session.config, oldWpm: wpm, at: now,
-            punctuationPauseEnabled: punctuationPauseEnabled
-        )
-        wpm = clamped
-        currentIndex = engine.currentIndex(
-            tokens: session.tokens, config: session.config, wpm: wpm, at: now,
-            punctuationPauseEnabled: punctuationPauseEnabled
-        ).index
-        if isPlaying {
-            scheduleNextTick()
-        }
+        mutate { try session.setWpm(wpm: clamped, elapsedMs: 0) }
+        wpm = (try? session.wpm()) ?? clamped
     }
 
-    /// Toggles punctuation-based pacing pauses. Mid-playback, this pins the
-    /// cursor under the *old* setting before resetting the clock — the same
-    /// repin-then-restart shape as `setWpm`, since both are just "a pacing
-    /// rule changed" (see `RsvpWallClockEngine.setWpm`'s doc comment, which
-    /// this reuses directly rather than duplicating the logic).
+    /// Toggles punctuation-based pacing pauses; pins the position under the
+    /// old setting first, like `setWpm`.
     func setPunctuationPauseEnabled(_ enabled: Bool) {
         guard enabled != punctuationPauseEnabled else { return }
-        if let session, isPlaying {
-            let now = Date()
-            engine.setWpm(
-                tokens: session.tokens, config: session.config, oldWpm: wpm, at: now,
-                punctuationPauseEnabled: punctuationPauseEnabled
-            )
+        guard let session else {
             punctuationPauseEnabled = enabled
-            currentIndex = engine.currentIndex(
-                tokens: session.tokens, config: session.config, wpm: wpm, at: now,
-                punctuationPauseEnabled: punctuationPauseEnabled
-            ).index
-            scheduleNextTick()
-        } else {
-            punctuationPauseEnabled = enabled
+            return
         }
+        mutate { try session.setPauseOnPunctuation(enabled: enabled, elapsedMs: 0) }
+        punctuationPauseEnabled = enabled
     }
 
-    /// Seeks to a specific token index — shared by scrub/seek and "back N
-    /// words" (both are just a jump to a computed index). Preserves session
-    /// stats bookkeeping via `RsvpWallClockEngine.seek`.
+    /// Seeks to a specific token index -- shared by scrub/seek.
     func seek(toIndex idx: Int) {
-        guard let session, !session.tokens.isEmpty else { return }
-        let now = Date()
-        engine.seek(toIndex: idx, tokenCount: session.tokens.count, at: now)
-        currentIndex = engine.currentIndex(
-            tokens: session.tokens, config: session.config, wpm: wpm, at: now,
-            punctuationPauseEnabled: punctuationPauseEnabled
-        ).index
-        if isPlaying {
-            scheduleNextTick()
-        }
+        guard let session, tokenCount > 0 else { return }
+        let clamped = UInt64(min(max(idx, 0), tokenCount - 1))
+        mutate { try session.seek(index: clamped) }
     }
 
-    /// Seeks to a fraction (0...1) of the document — backs a scrub slider.
+    /// Seeks to a fraction (0...1) of the document -- backs a scrub slider.
     func seek(toFraction fraction: Double) {
-        guard let session, !session.tokens.isEmpty else { return }
-        let idx = RsvpScrubMath.index(forFraction: fraction, tokenCount: session.tokens.count)
-        seek(toIndex: idx)
+        guard tokenCount > 0 else { return }
+        seek(toIndex: RsvpScrubMath.index(forFraction: fraction, tokenCount: tokenCount))
     }
 
-    /// Jumps back `n` word tokens (skipping paragraph/section breaks),
-    /// mirroring `RsvpSession::back_words`. Defaults to 5, matching the
-    /// "back 5 words" transport control.
+    /// Jumps back `n` word tokens (paragraph/section breaks skipped, not
+    /// counted); done by the engine. Defaults to 5 ("back 5 words").
     func backWords(_ n: Int = 5) {
         guard let session else { return }
-        let target = RsvpBackWords.index(from: currentIndex, n: n, tokens: session.tokens)
-        seek(toIndex: target)
+        mutate { try session.backWords(n: UInt64(max(n, 0)), elapsedMs: 0) }
     }
 
     func stopAndPersist() async {
@@ -701,31 +290,58 @@ final class RsvpPlayer: ObservableObject {
         await core.saveProgress(itemId: itemId, tokenIndex: currentIndex)
     }
 
-    /// Recomputes the display index from actual elapsed wall-clock time on
-    /// every wake, then sleeps exactly until the next token boundary rather
-    /// than a fixed tick interval. Because the index is always re-derived
-    /// from `resumeDate` (not accumulated from prior sleeps), a wake that
-    /// arrives late — a delayed/coalesced `Task`, a paused debugger, a
-    /// slow simulator — self-corrects on the very next iteration instead of
-    /// compounding drift over the session. See `RsvpWallClockEngine`'s doc
-    /// comment for why this stays `Task.sleep`/`@Published`-state-driven
-    /// rather than moving to a manual `CVDisplayLink` callback.
+    // MARK: Internals
+
+    /// Milliseconds of play since `resumeDate`; `0` while paused.
+    private func elapsedMs(at now: Date) -> UInt64 {
+        guard let resumeDate else { return 0 }
+        // `.rounded()`: a 0.400 s interval can materialise as
+        // 0.39999999999999997 and would otherwise truncate to 399 ms.
+        return UInt64((max(0, now.timeIntervalSince(resumeDate)) * 1000).rounded())
+    }
+
+    /// Applies an engine mutation that takes its position at elapsed 0:
+    /// while playing, bank the elapsed time with `pause`, mutate, `resume`,
+    /// and re-anchor the clock; while paused, just mutate.
+    private func mutate(_ body: () throws -> Void) {
+        guard let session else { return }
+        let wasPlaying = isPlaying
+        if wasPlaying {
+            try? session.pause(elapsedMs: elapsedMs(at: Date()))
+            resumeDate = nil
+        }
+        do { try body() } catch { core?.error = "\(error)" }
+        if wasPlaying {
+            try? session.resume()
+            resumeDate = Date()
+        }
+        refreshPosition()
+        if wasPlaying { scheduleNextTick() }
+    }
+
+    /// Re-reads the frame at the engine's cursor (elapsed 0) -- used
+    /// whenever playback is not mid-run.
+    private func refreshPosition() {
+        guard let session, let frame = try? session.frameAtElapsed(elapsedMs: 0) else { return }
+        currentFrame = frame
+        currentIndex = Int(frame.index)
+    }
+
+    /// Recomputes the frame from actual elapsed wall-clock time on every
+    /// wake, then sleeps exactly until the frame's `nextBoundaryMs`.
     private func scheduleNextTick() {
         tickTask?.cancel()
         tickTask = Task { [weak self] in
             while let self, self.isPlaying, let session = self.session {
-                let now = Date()
-                let (idx, remainingMs) = self.engine.currentIndex(
-                    tokens: session.tokens, config: session.config, wpm: self.wpm, at: now,
-                    punctuationPauseEnabled: self.punctuationPauseEnabled
-                )
-                guard remainingMs != RsvpWallClockEngine.notPlayingRemainingMs else { return }
-                self.currentIndex = idx
-                if idx >= session.tokens.count - 1 {
+                let elapsed = self.elapsedMs(at: Date())
+                guard let frame = try? session.frameAtElapsed(elapsedMs: elapsed) else { return }
+                self.currentFrame = frame
+                self.currentIndex = Int(frame.index)
+                if frame.isLast {
                     self.pause()
                     return
                 }
-                let sleepMs = max(remainingMs, 1)
+                let sleepMs = max(frame.nextBoundaryMs > elapsed ? frame.nextBoundaryMs - elapsed : 1, 1)
                 try? await Task.sleep(nanoseconds: sleepMs * 1_000_000)
                 if Task.isCancelled { return }
             }
@@ -741,19 +357,21 @@ final class RsvpPlayer: ObservableObject {
 /// prefix/suffix frame widths below keep the pivot roughly centered across
 /// words of different lengths, which a proportional font can't guarantee.
 struct OrpWordView: View {
-    let word: String
+    /// Pre-split by the Rust engine (`FfiOrpSplit`) -- the pivot is chosen in
+    /// core, never recomputed in Swift.
+    let split: FfiOrpSplit
     let theme: Theme
     let fontSize: CGFloat
 
-    private var split: OrpCalculator.Split { OrpCalculator.split(word) }
+    private var word: String { split.before + split.focus + split.after }
 
     var body: some View {
         HStack(spacing: 0) {
-            Text(split.prefix)
+            Text(split.before)
                 .frame(width: fontSize * 5, alignment: .trailing)
-            Text(split.pivot)
+            Text(split.focus)
                 .foregroundStyle(theme.accent)
-            Text(split.suffix)
+            Text(split.after)
                 .frame(width: fontSize * 5, alignment: .leading)
         }
         .font(.system(size: fontSize, weight: .regular, design: .monospaced))
@@ -953,7 +571,7 @@ struct RsvpView: View {
 
     private var playbackContent: some View {
         VStack(spacing: 20) {
-            OrpWordView(word: player.currentToken?.text ?? "", theme: theme, fontSize: 48)
+            OrpWordView(split: player.currentFrame?.orp ?? FfiOrpSplit(before: "", focus: "", after: ""), theme: theme, fontSize: 48)
                 .frame(maxWidth: .infinity)
                 .padding(.top)
 

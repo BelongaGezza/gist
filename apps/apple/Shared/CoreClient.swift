@@ -566,6 +566,20 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    /// Opens a live Rust RSVP pacing session (`FfiRsvpSession`) for `itemId`,
+    /// restoring saved progress. `RsvpPlayer` drives it from a wall clock; all
+    /// pacing, ORP and stats arithmetic stays in `gist-rsvp`. Returns `nil`
+    /// on failure and sets `error`.
+    func openRsvpSession(itemId: String, wpm: UInt32) async -> FfiRsvpSession? {
+        guard let core else { return nil }
+        do {
+            return try core.openRsvpSession(itemId: itemId, wpm: wpm)
+        } catch {
+            self.error = "\(error)"
+            return nil
+        }
+    }
+
     /// Fetches a document's full block structure (headings/paragraphs/
     /// images/lists) for the flow-view prototypes — as opposed to
     /// `startRsvp`'s flat token stream. Same one-shot-fetch-then-decode

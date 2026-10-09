@@ -74,3 +74,10 @@ This entry is **not** deleted, because its ask was a *visual* confirmation and p
 **Reason:** keep the Windows flow reader's annotation anchoring aligned with Rust/Swift for merged tables.
 **Related commit/PR:** M7 role R7 (branch worktree-agent-a86e55a250667a5b0), ADR-019 addendum 2.
 **Action:** On a Windows session: add a `FlowDocumentDecoderTests` case decoding the golden block above (assert `Rows` and that unknown `spans` does not throw) and a flattening assertion equal to the golden text; import `fixtures/docx/with_merged_cells.docx` and confirm the table renders with 3 columns aligned. Delete this entry once verified.
+
+## Pending Windows Change — 2026-10-09 (Rust: `Config::pause_on_punctuation` + `FfiRsvpSession.set_pause_on_punctuation`/`pause_on_punctuation`)
+**File:** `apps/windows/GIST.Core/Generated/` (gitignored) and, optionally, the RSVP settings UI.
+**Change required:** regenerate the C# bindings (`tools/gen-bindings-cs` equivalent) so the two new `FfiRsvpSession` methods exist; build and run the Windows tests. Additive only — nothing existing changed. Optional follow-up: surface a "Pause longer at punctuation" toggle in the W4 RSVP reader like Apple's, using the same mutate-while-playing sequence (`pause(elapsed)` → `setPauseOnPunctuation(enabled, 0)` → `resume()` → re-anchor).
+**Reason:** added from a macOS session so Apple could finish adopting the FFI pacing session without keeping a Swift copy of the pacing table. `Config` gained a `#[serde(default)]` field (old JSON still decodes; `start_rsvp`'s JSON gains one key, which C#/Swift decoders ignore).
+**Related commit/PR:** branch `feat/apple-rsvp-ffi-adoption`.
+**Action:** regenerate bindings, `dotnet build`/test on Windows; confirm the `windows-build` CI leg is green on the PR.
