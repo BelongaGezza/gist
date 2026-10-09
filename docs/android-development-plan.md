@@ -125,7 +125,7 @@ Add `.github/workflows/android-build.yml` triggered on changes to `apps/android/
 
 ### 4.3 Monotonic Clock & RSVP Frame Pacing
 
-RSVP reading flashes words at up to 1000 WPM (60 ms per word). Hand-rolled `Thread.sleep` or unanchored coroutine delays suffer from timer drift and frame jitter:
+RSVP reading flashes words at up to 700 WPM in the UI (about 86 ms per word; the core still accepts up to 1000 WPM, 60 ms). Hand-rolled `Thread.sleep` or unanchored coroutine delays suffer from timer drift and frame jitter:
 1. Android displays run at variable refresh rates (60 Hz, 90 Hz, 120 Hz).
 2. The Android RSVP player anchors to `android.os.SystemClock.elapsedRealtimeNanos()` and coordinates with `android.view.Choreographer` (or Compose's `withFrameNanos`).
 3. Each frame computes elapsed session time and requests the current token from `gist-rsvp` via the FFI monotonic contract, eliminating timer drift.
@@ -217,15 +217,15 @@ In accordance with [`docs/PRIVACY.md`](./PRIVACY.md):
 - **RSVP Reader (`RsvpReaderScreen`):**
   - Optimal Recognition Point (ORP) rendering: center word at the focal character in high-contrast typography.
   - Controls: prominent play/pause button (tap anywhere or spacebar on Bluetooth keyboards); seek backward/forward 10 tokens.
-  - Speed Dial: custom touch-rotary dial / slider supporting 100–1000 WPM in real-time with haptic feedback (`HapticFeedbackConstants.CLOCK_TICK`).
+  - Speed Dial: custom touch-rotary dial / slider supporting the 200–700 WPM UI band (spec v1.6 §5.1.1) in real-time with haptic feedback (`HapticFeedbackConstants.CLOCK_TICK`).
   - Monotonic frame-synced loop via `Choreographer` preventing timer drift.
   - Save progress token index to `reading_progress` table on pause or exit.
 
-**Exit Criteria:** Flow reader smoothly scrolls long fixtures (e.g. 20-page benchmark text); RSVP reader operates at 1000 WPM without dropped frames; reading position restores accurately on reopening.
+**Exit Criteria:** Flow reader smoothly scrolls long fixtures (e.g. 20-page benchmark text); RSVP reader operates at 700 WPM without dropped frames; reading position restores accurately on reopening.
 
 ---
 
-### Phase A4 — Format Parity: PDF, Web Share & TTS (OCR removed from scope 2026-10-09)
+### Phase A4 — Format Parity: PDF, Web Share & TTS (1–2 weeks; was 2–3 before OCR and camera capture were removed from scope 2026-10-09)
 
 **Goal:** Complete format ingestion parity on Android (PDF text layer, system share receiver, and text-to-speech; no OCR).
 
