@@ -1,8 +1,10 @@
 # GIST for Linux — Development Plan
 
-**Status:** Draft, 2026-10-06; proposed, not adopted.  
+**Status:** Draft, 2026-10-06; proposed, not adopted; scope amended 2026-10-09 (see the notice below).  
 **Purpose:** Add a Linux desktop shell while continuing the already-planned Apple M7 and Windows W6 work. This plan is deliberately incremental: it starts Linux compatibility and risk-reduction work in parallel, but does not make Linux a blocker for the v1.0 Apple release or the Windows work.  
-**Current product boundary:** `docs/product-spec-reader-app-v3.md` currently lists Windows, iOS and macOS as in scope and says Linux is a possible future phase. Adopting this plan requires updating that boundary and the roadmap; until then, Linux work is exploratory.
+**Current product boundary:** spec v1.6 (2026-10-09) lists Linux as post-v1.0 and not committed; Linux work remains exploratory until this plan is adopted.
+> **Scope decision, 2026-10-09 (owner).** OCR, annotations and export are **potential future capability, not planned** on every platform that does not already have them (spec v1.6 §11). Linux therefore has no OCR adapter, no annotation UI and no export in any planned phase; references below are design history. Scanned or image-only input must fail with the typed `PdfNoTextLayer` / unsupported-format limitation.
+
 
 ---
 
@@ -13,11 +15,11 @@ Treat Linux as a **post-v1.0 desktop target**. Start the reversible engineering 
 The first Linux release should provide the same core local-reading workflow as the other desktop shells:
 
 - Open/import supported files and HTTPS URLs; browse, search, sort, filter, tag and organise the library.
-- Read in Flow and RSVP modes, with progress, annotations, themes and keyboard/accessibility support.
+- Read in Flow and RSVP modes, with progress, themes and keyboard/accessibility support.
 - Keep data local; preserve copy-on-import, checksum and per-item encryption behaviour; never silently downgrade encrypted data to plaintext.
 - Use Linux desktop conventions for file dialogs, settings, application identity, key storage and packaging.
 
-Feature parity is a target for the Linux release, not a precondition for beginning. Missing native dependencies (especially PDF/OCR/keyring support) must be exposed as typed, explicit limitations, not hidden behind generic errors or unverified claims.
+Feature parity is a target for the Linux release, not a precondition for beginning. Missing native dependencies (especially PDF and keyring support) must be exposed as typed, explicit limitations, not hidden behind generic errors or unverified claims.
 
 ### Recommended technical direction (subject to L0 spikes)
 
@@ -37,7 +39,7 @@ Use XDG Base Directory locations for data/config/cache, GTK file choosers throug
 | D4 | Key custody and encryption availability | Use a maintained Secret Service integration (or a supported keyring abstraction whose selected backend is verified on GNOME and KDE). Never write the AES key as plaintext or silently fall back to a new key. If no usable key service exists, keep unencrypted items usable where possible, clearly report that encrypted items cannot be opened, and disable new encryption with an actionable message. Decide whether a user-approved plaintext-only mode is acceptable. |
 | D5 | Distribution format | Prototype Flatpak first, including portals and Secret Service access in the sandbox. Decide later whether to publish a Flathub build and/or provide a signed tarball/AppImage/deb; avoid maintaining several channels before one works reliably. |
 | D6 | PDF support | The current pinned PDFium fetcher produces a macOS dylib only. Linux PDF support therefore needs its own pinned, hash-verified Linux binary and packaging/signing review, or an explicitly chosen system-library policy. Do not use an unpinned system library or claim PDF support until the Linux load/import path is tested. |
-| D7 | OCR and read-aloud engines | Spike a local Linux OCR implementation (Tesseract is the first candidate) and a speech-dispatcher/desktop TTS path. Keep recognition and speech on-device. Record required packages, licences, language-data availability, offline behaviour and fallback UX before including them in a release claim. |
+| D7 | Read-aloud engine (OCR removed from scope 2026-10-09) | Spike a speech-dispatcher/desktop TTS path. Keep speech on-device. Record required packages, licences, offline behaviour and fallback UX before including it in a release claim. |
 | D8 | Icon policy | Replace the current Linux icon note's light/dark monochrome launcher-art rule with freedesktop-compatible full-colour app icons plus a separate symbolic monochrome in-app icon set. Confirm the existing source art and licensing before generating assets. |
 
 ---
@@ -86,11 +88,11 @@ Effort estimates are rough single-engineer effort, not commitments. Parallel wor
 - Add a minimal `gist-ffi`/`gist-core` Linux build smoke and verify the direct `gist-core` path works with real SQLite and temporary storage.
 - Build tiny GTK4 and Avalonia spikes: import a fixture, show a native window, and read a document. Compare accessibility tree, text selection/rendering, theme integration, test automation, runtime size, contributor prerequisites and long-term dependency risk. Decide D2 from evidence.
 - Prototype XDG paths, GTK file-picker portal access, app-data migration, Secret Service access from an ordinary desktop session and from a Flatpak sandbox. Exercise key create/read/concurrent access and missing/corrupt/unavailable service cases. No real user key or library is involved.
-- Verify Linux PDFium availability, supported architectures, dynamic loading and redistributable licence notices; separately measure OCR/TTS package and language-data requirements. No PDF/OCR feature is promised by this gate.
+- Verify Linux PDFium availability, supported architectures, dynamic loading and redistributable licence notices; separately measure TTS package requirements. No PDF feature is promised by this gate.
 - Define Linux security boundaries (file access, URL import, logs, encryption, native parser crash risk) and write the architecture ADR plus the D1–D8 outcomes.
 - Add the Linux CI job in a non-required state, pinned by immutable action SHAs with `permissions: contents: read`.
 
-**Exit:** ADR accepted; clean Linux core gates pass; toolkit, minimum runtime, key-service failure policy and first package format are evidenced; explicit yes/no for PDF and OCR in the first preview. If GTK or keyring/Flatpak cannot meet the gates, stop and revise the design before L1.
+**Exit:** ADR accepted; clean Linux core gates pass; toolkit, minimum runtime, key-service failure policy and first package format are evidenced; explicit yes/no for PDF in the first preview. If GTK or keyring/Flatpak cannot meet the gates, stop and revise the design before L1.
 
 ### L1 — App shell, storage and CoreClient (2–3 weeks)
 
@@ -115,23 +117,23 @@ Effort estimates are rough single-engineer effort, not commitments. Parallel wor
 
 ### L3 — Flow and RSVP reading (2–4 weeks)
 
-- Port the Flow reader over the canonical document JSON/model, including headings, lists, images where supported, tables, TOC, search/highlighting, typography, themes, position restore, annotations and progress.
+- Port the Flow reader over the canonical document JSON/model, including headings, lists, images where supported, tables, TOC, search/highlighting, typography, themes, position restore and progress.
 - Make long-document rendering bounded and responsive. Reuse W5's pathological-document fixtures and add Linux-specific measurements; test chunk boundaries, combining sequences, emoji, RTL text and very long unbroken content.
 - Drive RSVP from the Rust pacing/session API with a monotonic clock; do not hand-port token-duration or punctuation rules. Verify pause/resume, seek, WPM changes and persisted position across restart.
 - Add keyboard navigation, screen-reader labels and system text scaling. Verify GTK accessibility metadata by inspection and automation, then run a real Orca pass; automated assertions alone do not close the accessibility gate.
-- Add integration tests that open fixture-derived documents in both reading modes and validate section ordering, annotation anchoring and progress semantics against Rust's golden results.
+- Add integration tests that open fixture-derived documents in both reading modes and validate section ordering and progress semantics against Rust's golden results.
 
 **Exit:** both reading modes function end-to-end; normal and pathological performance is measured on Linux; no high-severity accessibility/security issues remain; a person completes the reader checklist with Orca and keyboard-only use.
 
-### L4 — Import parity: PDF, OCR, web and speech (2–4 weeks; feature gate)
+### L4 — Import parity: PDF, web and speech (OCR removed from scope 2026-10-09; 2–4 weeks; feature gate)
 
 - Reuse the existing TXT/ePub/DOCX/URL parsers and SSRF-safe Rust fetcher. Test file-picker and portal behaviour without adding shell-specific fetch code.
 - For PDF, add an independently pinned Linux PDFium asset/build path (SHA-256 checked, fail closed, safe archive extraction, included licence texts); verify dynamic-library loading inside the selected package and run the existing parser corpus/fuzzer. If D6 cannot be closed, PDF stays explicitly unavailable on Linux rather than loading an arbitrary system library.
-- For scans/images, implement the selected local `OcrEngine` adapter into the existing Rust OCR orchestration and reuse the OCR review/edit-before-commit workflow. Keep raw input caps, cancellation, page limits, and image-preprocessing guarantees. Confirm no image data leaves the device.
+- ~~Scans/images via a local `OcrEngine` adapter~~ — unplanned future capability. Scanned PDFs and images report the typed no-text-layer / unsupported limitation.
 - For TTS, use the selected local Linux speech service and report missing voices/services clearly; do not add network speech.
 - Add tests for unavailable backends, encrypted PDFs, image-only-PDF routing, limits, cancellation, non-English text and offline operation.
 
-**Exit:** every feature included in the Linux release has an end-to-end test in the packaged environment; unsupported formats/backends have typed explanations; binary provenance/licensing and no-network OCR/TTS claims are independently reviewed.
+**Exit:** every feature included in the Linux release has an end-to-end test in the packaged environment; unsupported formats/backends have typed explanations; binary provenance/licensing and no-network TTS claims are independently reviewed.
 
 ### L5 — Accessibility, packaging, release and independent review (2–3 weeks)
 
@@ -181,4 +183,4 @@ This draft becomes binding only after the user approves D1–D8 (or records alte
 4. Add `apps/linux/`, CI, Dependabot package ecosystems, notices and Linux manual QA checklist only after L0 decides the toolkit/package direction.
 5. Create a short-lived topic branch/PR from current `main`; do not push directly to `main`. Rebase against the current integration tip before each role, verify the full integrated tree and have an independent reviewer inspect it before updating closure claims.
 
-**Rough effort:** L0 1–2, L1 2–3, L2 2–4, L3 2–4, L4 2–4, L5 2–3 engineer-weeks (about 11–20 engineer-weeks total; L4 can be narrowed if PDF/OCR/TTS are deferred). Calendar time depends on team capacity and the decision gates. The first useful GTK library/reader preview can precede full Linux import parity; a supported Linux release should not be declared until L5 is complete.
+**Rough effort:** L0 1–2, L1 2–3, L2 2–4, L3 2–4, L4 2–4, L5 2–3 engineer-weeks (about 11–20 engineer-weeks total; L4 can be narrowed if PDF/TTS are deferred). Calendar time depends on team capacity and the decision gates. The first useful GTK library/reader preview can precede full Linux import parity; a supported Linux release should not be declared until L5 is complete.

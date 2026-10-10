@@ -1058,6 +1058,27 @@ impl FfiRsvpSession {
         })
     }
 
+    /// Turn sentence/clause/numeral pauses on or off. The position current
+    /// at `elapsed_ms` is pinned **under the old setting** first, so the
+    /// toggle never jumps the reader. Paragraph/section-break pauses are
+    /// structural and unaffected. The caller must reset its elapsed counter
+    /// afterwards.
+    pub fn set_pause_on_punctuation(
+        &self,
+        enabled: bool,
+        elapsed_ms: u64,
+    ) -> Result<(), GistError> {
+        ffi_catch!({
+            self.lock().set_pause_on_punctuation(enabled, elapsed_ms);
+            Ok(())
+        })
+    }
+
+    /// Whether punctuation pauses are currently applied.
+    pub fn pause_on_punctuation(&self) -> Result<bool, GistError> {
+        ffi_catch!({ Ok(self.lock().config.pause_on_punctuation) })
+    }
+
     // ── Stats ─────────────────────────────────────────────────────────────
 
     /// Live stats at `elapsed_ms`: words actually shown, play time
@@ -2027,6 +2048,20 @@ mod tests {
             session.token_at_elapsed(120).unwrap(),
             7,
             "120 ms/word at 500 wpm"
+        );
+    }
+
+    #[test]
+    fn set_pause_on_punctuation_pins_then_applies_over_ffi() {
+        let (_dir, core, id) = rsvp_fixture(TWELVE_WORDS);
+        let session = core.open_rsvp_session(id, 600).unwrap();
+        assert!(session.pause_on_punctuation().unwrap());
+        session.resume().unwrap();
+        session.set_pause_on_punctuation(false, 250).unwrap();
+        assert!(!session.pause_on_punctuation().unwrap());
+        assert_eq!(
+            session.cursor().unwrap(),
+            session.token_at_elapsed(0).unwrap()
         );
     }
 

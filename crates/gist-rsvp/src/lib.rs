@@ -24,6 +24,15 @@ pub struct Config {
     pub pause_numeral: f32,
     /// Words per flash (1–3).  Default 1.
     pub chunk_size: usize,
+    /// Whether sentence/clause/numeral pauses apply to word tokens. When
+    /// `false`, every word gets the base duration; paragraph/section-break
+    /// pauses are structural and always apply. Default `true`.
+    #[serde(default = "default_pause_on_punctuation")]
+    pub pause_on_punctuation: bool,
+}
+
+fn default_pause_on_punctuation() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -35,6 +44,7 @@ impl Default for Config {
             pause_paragraph: 2.2,
             pause_numeral: 1.4,
             chunk_size: 1,
+            pause_on_punctuation: true,
         }
     }
 }
@@ -74,6 +84,7 @@ struct ScheduleKey {
     pause_paragraph: u32,
     pause_numeral: u32,
     chunk_size: usize,
+    pause_on_punctuation: bool,
     token_count: usize,
     cursor: usize,
 }
@@ -250,6 +261,10 @@ impl RsvpSession {
             TokenKind::ParagraphBreak | TokenKind::SectionBreak => self.config.pause_paragraph,
             TokenKind::Word => {
                 let text = token.text.as_str();
+                if !self.config.pause_on_punctuation {
+                    // Punctuation pacing is off: plain base duration.
+                    1.0
+                } else
                 // Numerals take priority for their multiplier, then punctuation.
                 if is_numeral(text) {
                     // Combine with sentence/clause if the numeral also ends a sentence.
@@ -456,6 +471,7 @@ impl RsvpSession {
             pause_paragraph: self.config.pause_paragraph.to_bits(),
             pause_numeral: self.config.pause_numeral.to_bits(),
             chunk_size: self.config.chunk_size,
+            pause_on_punctuation: self.config.pause_on_punctuation,
             token_count: self.tokens.len(),
             cursor: self.cursor,
         }
@@ -509,6 +525,17 @@ impl RsvpSession {
     pub fn set_wpm(&mut self, wpm: u32, elapsed_ms: u64) {
         self.cursor = self.token_at_elapsed(elapsed_ms);
         self.config.wpm = wpm.clamp(100, 1000);
+    }
+
+    /// Turn sentence/clause/numeral pauses on or off mid-playback. Like
+    /// [`set_wpm`](RsvpSession::set_wpm), the position current at
+    /// `elapsed_ms` is pinned **under the old setting** first, so toggling
+    /// never jumps the reader.
+    ///
+    /// The caller must reset its elapsed counter after this call.
+    pub fn set_pause_on_punctuation(&mut self, enabled: bool, elapsed_ms: u64) {
+        self.cursor = self.token_at_elapsed(elapsed_ms);
+        self.config.pause_on_punctuation = enabled;
     }
 
     // ── Stats ─────────────────────────────────────────────────────────────────
@@ -890,6 +917,77 @@ mod tests {
         assert_eq!(session.config.wpm, 100);
         session.set_wpm(9999, 0);
         assert_eq!(session.config.wpm, 1000);
+    }
+
+    // ── Punctuation-pause toggle ──────────────────────────────────────────
+
+    #[test]
+    fn punctuation_pauses_off_gives_words_the_base_duration_but_keeps_break_pauses() {
+        let tokens = vec![
+            word_token("end."),
+            word_token("a,"),
+            word_token("1,000"),
+            word_token("plain"),
+            Token {
+                text: String::new(),
+                kind: TokenKind::ParagraphBreak,
+                ..word_token("x")
+            },
+        ];
+        let mut session = RsvpSession::new(
+            tokens,
+            Config {
+                wpm: 600, // 100 ms base
+                ..Config::default()
+            },
+        );
+        assert_eq!(session.token_duration_ms(0), 180);
+        assert_eq!(session.token_duration_ms(1), 130);
+        assert_eq!(session.token_duration_ms(2), 140);
+
+        session.set_pause_on_punctuation(false, 0);
+        for i in 0..4 {
+            assert_eq!(session.token_duration_ms(i), 100, "token {i}");
+        }
+        assert_eq!(
+            session.token_duration_ms(4),
+            220,
+            "break pause is structural"
+        );
+    }
+
+    #[test]
+    fn set_pause_on_punctuation_pins_the_cursor_under_the_old_setting() {
+        let tokens = vec![
+            word_token("one."),
+            word_token("two"),
+            word_token("three"),
+            word_token("four"),
+        ];
+        let mut session = RsvpSession::new(
+            tokens,
+            Config {
+                wpm: 600,
+                ..Config::default()
+            },
+        );
+        session.resume();
+        // With pauses on: "one." lasts 180 ms, so 250 ms is token 1. With
+        // them off it would be token 2 -- a cursor of 2 would mean the new
+        // setting was applied before the position was pinned.
+        session.set_pause_on_punctuation(false, 250);
+        assert_eq!(session.cursor, 1);
+        assert!(!session.config.pause_on_punctuation);
+        assert_eq!(session.token_at_elapsed(0), 1);
+        assert_eq!(session.token_at_elapsed(100), 2, "100 ms/word now");
+    }
+
+    #[test]
+    fn config_json_without_the_toggle_defaults_it_on() {
+        let json = r#"{"wpm":300,"pause_sentence":1.8,"pause_comma":1.3,
+            "pause_paragraph":2.2,"pause_numeral":1.4,"chunk_size":1}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.pause_on_punctuation);
     }
 
     // ── Memoised schedule (W4 role R1) ────────────────────────────────────

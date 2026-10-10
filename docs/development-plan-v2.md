@@ -5,6 +5,8 @@
 **Supersedes:** development-plan-v1.md  
 **Changes from v1:** Security review v1 (2026-09-08) findings fully integrated. All finding references are tagged `[Fx]` or `[Ax]` for traceability. Crate names updated to `gist-*` throughout (matching the live codebase). Milestone plan restructured to make security hardening explicit work, not assumed.
 
+> **Reconciliation notice (2026-10-09).** This document is a dated log that was last rewritten wholesale in September 2026; sections §1–§4 and the M2/M3/M4 text in §5 describe the plan as of 2026-09-12 to 2026-09-25 and are kept as history, with dated "Update" notes added after the fact. They are **not** a current-status report. Current state lives in `CLAUDE.md` (milestone register and security register), `PLATFORM_VERIFICATION.md` and the per-milestone role plans (`docs/m3-agent-roles.md` to `docs/m7-agent-roles.md`, `docs/w4-agent-roles.md`, `docs/w5-agent-roles.md`). This pass added: status corrections where a section would otherwise mislead (§1.1, §2.6, §2.7, §3 headers, M2 "Not started" list), and a new **§5 M8** that gives every unimplemented requirement of `docs/product-spec-reader-app-v3.md` a scheduled home (spec §12, IDs `SC-01`–`SC-24`) so none stays orphaned in a closed milestone.
+
 **Last updated:** 2026-09-12 — M2 milestone section rewritten from a generic feature list to an accurate progress snapshot (import + RSVP wired; search/URL-import/removal/library/theme/flow-view not yet wired or not started); verified against the current codebase, not just prior notes. Same-day architect review re-ran `cargo test`/`clippy -D warnings`/`fmt --check`/`cargo deny check bans licenses sources` against the latest commit (all still green), found one new architecture-vs-code gap — ADR-006 (copy-on-import) was unimplemented, recorded as `[A5]` — and then implemented it the same day: `gist-store::store_original_copy`, `Metadata.source_copy_ref`, schema v3→v4, `remove_items` now deletes the sandboxed copy instead of the user's real file. `[A5]`/`R12` closed; see §2.2/§2.10 and ADR-006. Also corrected a stale fixture count (24 → 23, matching `fixtures/`).
 
 **Same-day follow-up (2026-09-12, second pass):** an independent security consultant audit of the Rust core, import pipelines, FFI boundary, and CI/supply-chain posture landed against this same commit. 12 new findings (`[F14]`–`[F25]`) and 2 new architecture items (`[A6]`, `[A7]`) integrated into §0 (new §0.9/§0.10), §1.3, §2.2/§2.4/§2.5/§2.7/§2.8/§2.10/§2.11, §3.2/§3.3, §5 (new immediate-actions table plus M2/M3/M4 exit-criterion additions), §6 (new risks R13–R15), §7 (Q11 broadened to cover confidentiality, not just integrity), and §8. No code changed in this pass — planning and tracking only.
@@ -106,7 +108,7 @@ gist/
 │   ├── gist-parse-txt/         # ✅
 │   ├── gist-parse-epub/        # ✅ DRM detection + ParseLimits
 │   ├── gist-parse-docx/        # ✅ style-resolution + tracked-changes
-│   ├── gist-parse-pdf/         # ⏳ stub — pdfium build tooling deferred
+│   ├── gist-parse-pdf/         # ✅ real (M6, 2026-10-04): pdfium-render on a pinned prebuilt libpdfium (ADR-002)
 │   ├── gist-imageprep/         # ✅ greyscale + resize + PNG re-encode
 │   ├── gist-web/               # ✅ ureq/rustls + robots.txt + readability
 │   ├── gist-rsvp/              # ✅ pacing engine, pure, no I/O
@@ -141,8 +143,9 @@ gist/
 │   ├── ARCHITECTURE.md
 │   ├── BUILDING-macos.md
 │   ├── FFI.md
-│   ├── PRIVACY.md              # documents source_ref path storage [F12] ⏳ M4
-│   └── adr/                    # Architecture Decision Records ✅ ADRs 001–010
+│   ├── PRIVACY.md              # documents source_ref path storage [F12] ✅ done 2026-09-28
+│   │                           # NOTE: FFI.md was a zero-byte file until 2026-10-09; now a short map
+│   └── adr/                    # Architecture Decision Records ✅ ADRs 001–029 (listing below is the original 001–010 only)
 │       ├── 001-ffi-uniffi.md
 │       ├── 002-pdf-backend-pdfium.md
 │       ├── 003-annotation-anchoring.md
@@ -158,7 +161,8 @@ gist/
     ├── core-quality.yml        # ✅ SHA-pinned, cargo-deny
     ├── parser-corpus.yml       # ✅ nightly + on parse-crate push; ubuntu+macos matrix
     ├── fuzz.yml                # ✅ nightly; 120s per target; crash artifact upload
-    └── release-macos.yml       # ✅ guard step (exits non-zero until implemented)
+    ├── release-macos.yml       # ✅ real pipeline (M4 R7); signed/notarised half never run (no credentials)
+    ├── apple-build.yml, windows-build.yml  # added later (plus .github/dependabot.yml); see CLAUDE.md CI section
 ```
 
 **Crate boundary rule:** `gist-model` has no I/O dependencies. It must compile to `wasm32-unknown-unknown` — cheapest possible insurance on the future web-client option.
@@ -312,11 +316,11 @@ Phase C:          ├──> web
 
 ---
 
-### 2.6 `gist-parse-pdf` — PDF · **XL** ⚠️ Deferred
+### 2.6 `gist-parse-pdf` — PDF · **XL** ✅ Done in M6 (2026-10-04; text below is the original M1-era deferral, kept as history)
 
 **Crates:** `pdfium-render` — deferred due to `libpdfium` per-arch binary build tooling requirement.
 
-**Status:** stub only (1 line). Parser is kept behind a swappable trait so the backend decision can change without an API break.
+**Status:** *(historical)* stub only. **Now real** — see `CLAUDE.md` M6 row and spec §3.1's status note. Still open from the spec: footnotes, images, watermarks, rotated/RTL text (`SC-11`).
 
 **Pre-implementation requirements:** `ParseLimits` struct defined ✅. ADR-002 written ✅. Build tooling for `libpdfium` per arch (arm64, x86_64) still needed.
 
@@ -334,6 +338,8 @@ Phase C:          ├──> web
 - `OcrEngine` trait defined in `gist-core` (not `gist-ffi`) to avoid circular deps. `[A2]` ✅ ADR-009 ✅
 
 **Remaining M3 work:** `imageproc` (Hough deskew, Otsu threshold), `rayon` parallel multi-page, post-processing of OCR results into ordered blocks with `ocrConfidence[]`.
+
+> **Orphan found 2026-10-09:** M3 closed (2026-09-26) without doing any of the line above. The OCR pipeline shipped with greyscale + resize + PNG only, and `ocrConfidence[]` was never added to the model. These are now `SC-08` (deskew / contrast) and `SC-09` (confidence in the IR) in §5 M8.
 
 **Open — `[A7]` Architecture (audit 2026-09-12):** unlike `gist-parse-txt`/`-epub`/`-docx`/`-web`, there is no `ParseLimits`-style size/dimension cap defined yet for raw image bytes crossing the ADR-009 `OcrEngine` callback boundary. Needs a short ADR-009 addendum before M3 OCR wiring begins — see §3.3.
 
@@ -419,6 +425,8 @@ Phase C:          ├──> web
 ---
 
 ## 3. macOS UI Shell — Phased Build Plan
+
+> **Status note (2026-10-09):** every ⏳ marker in §3.1–§3.11 is stale. §3.1–§3.9 and §3.11 are built (M2/M3, macOS); §3.10 is closed (`A3`). The sections are kept for their scope text. Items they promised that were **not** built are in §5 M8, not here: notably §3.2's grid view and "smart views" (`SC-12`, `SC-13`), sort persistence (`SC-14`), cover thumbnails and progress rings (`SC-12`), and §3.6's `CVDisplayLink` (replaced by a wall-clock engine, `SC-20`).
 
 ### 3.1 App skeleton + core bridge · **M** ⏳ M2
 `GistApp` scene, window management, `CoreClient` actor wrapping FFI (single touch-point), app-support directory setup, error-presentation surface.
@@ -587,7 +595,7 @@ Same pattern as the Pre-M1 table above: these were exploitable or nearly so *tod
 - Multi-format import wired end-to-end: `.fileImporter` → `CoreClient.importFile` → `GistCore.import_file` (txt/epub/docx), with a dedicated DRM alert (`ParseError::DrmProtected` surfaced as a structured error, not string-matched) ✅
 - RSVP playback wired to `gist_rsvp` via `CoreClient.startRsvp`/`saveProgress` ✅ — not on the original M2 list, pulled forward because the vertical slice needed it. **Known fidelity gap carried into M3:** the Swift pacing loop (`RsvpPlayer` in `RsvpView.swift`) is a hand-ported, `Task.sleep`-per-token re-implementation of `token_duration_ms` — there's no per-tick FFI call — and unlike the Rust engine (wall-clock-anchored via `token_at_elapsed`) it doesn't re-sync to wall clock, so timing can drift over a long session. Track this as an explicit M3 RSVP-polish item, not a regression to fix now.
 
-**Not started / blocking the exit criterion:**
+**Not started / blocking the exit criterion:** *(historical, as of 2026-09-12 — every bullet below except the grid/smart-view part of the first one was subsequently built; see `CLAUDE.md`'s M2 row)*
 - Library grid/list with sort (name / source type / date added / date last read / progress), collections/tags/smart views — `LibraryView.swift` is currently a flat unsorted `List` (99 lines), `SidebarView.swift` an 11-line placeholder. The schema/CRUD half of this is now done: `gist-store` (schema v3, 2026-09-12) has `collections`/`item_collections`/`tags`/`item_tags` tables (all join rows `ON DELETE CASCADE` from `library_items`) and `Store` methods `create_collection`/`list_collections`/`add_item_to_collection`/`remove_item_from_collection`/`list_items_in_collection`/`add_tag`/`remove_tag`/`list_tags_for_item`, covered by tests including a cascade-delete check. Deliberately out of scope for that change and still not started: `gist-core`/`gist-ffi` wiring (no FFI export exists yet) and all UI — smart-views/filter query logic also deferred to whatever composes on top of these primitives.
 - **Full-text search has no path to the UI.** `gist-store::search_items` (FTS5 MATCH) is now wired end-to-end through `Core::search_items` and `GistCore::search_items` (✅ 2026-09-12, tested), but there is still no Swift call site: `CoreClient` has no `searchItems` wrapper and `LibraryView` has no search field. The remaining work here is UI-only.
 - **Item removal backend is now done, including the `[A5]` fix; the UI still isn't.** `Store::remove_items`, `Core::remove_items(ids, delete_source_files)`, and `GistCore::remove_items` (FFI) all landed 2026-09-12 — transactional multi-id DB delete, then best-effort file cleanup after commit, with tests covering single/bulk removal and both `delete_source_files` states (see §2.2/§2.10/§2.11). Same-day, ADR-006 (copy-on-import) was implemented for real, closing `[A5]`: `delete_source_files: true` now deletes the sandboxed copy GIST made at import time, never the user's original file at its real location. Same shape as the search-wiring gap above: `apps/apple/Generated/gist_ffi.swift` needs a `./tools/gen-bindings.sh` run before Swift sees any of this, and there's no UI call site yet — `CoreClient` has no `removeItems` wrapper, and `LibraryView`/context-menu/confirmation-sheet from §3.2 don't exist. What remains here is UI-only; the removal confirmation dialogue (spec §4) can now truthfully describe what "delete source file" does.
@@ -658,6 +666,23 @@ Scoped in `docs/m6-agent-roles.md` (adopted 2026-10-03). Gaps found after M5: PD
 ### M7 — v1.0 completeness, PDF hardening, v1.1 items · **adopted 2026-10-04**
 
 **Status 2026-10-05: agent-executable roles R1, R3, R4, R5, R6, R7, R8 and the independent review are done and merged on `integration/m7-2026-10-04` (R2 dropped, R9 paused); see the CLAUDE.md M7 row for results and what remains. Q9 is resolved: minimum macOS 14.0.** Scoped in `docs/m7-agent-roles.md`. Found by checking the spec's v1.0 promises and decided policies against source: three v1.0 library sort keys are missing (source type, date last read, progress); the deployment target (26.5) contradicts Q9 (macOS 14) — Q9 below is **under review pending the R5 audit** and is not changed yet; PDF layout is tuned on synthetic files only and, by decision, will stay that way for M7 (no real-document corpus); `F33`/`F36` and an untyped resource-limit error are open. Includes the v1.1 items (merged-cell tables, paginated view). iOS is paused. v1.0 waits for M7's R1 and the independent review.
+
+### M8 — Spec conformance backlog · **unscheduled, proposed 2026-10-09**
+
+**Why this exists.** A reconciliation of `docs/product-spec-reader-app-v3.md` against the source found 24 requirements that the spec states but no milestone built and no plan carries forward (spec §12, `SC-01`–`SC-24`). Several were marked ✅ in this document ("`gist-parse-txt` ✅ Complete", "`gist-imageprep` ✅ Skeleton complete" with "remaining M3 work" that M3 never did). M7's gap-finding pass checked sort keys, the deployment target and PDF, but not the rest of the spec. This section is their home. **M8 was confirmed by the owner on 2026-10-09; nothing in it is started. Group-to-version targets are still proposals.** Decided the same day: `SC-09` dropped, `SC-20` band = 200–700 WPM, OCR/annotations/export unplanned on platforms without them. Run it through the same `docs/mN-agent-roles.md` process when adopted.
+
+| Group | Items | Notes |
+|---|---|---|
+| **A. Import fidelity (v1.0)** | `SC-01` TXT encoding detection + prompt (deps already declared); `SC-03` surface the DOCX tracked-changes flag (replace the `source_type` string hack with a real `Metadata` field, which needs an ADR-019 additive-field check); `SC-06` web byline / publish date / retrieved date, populate `import_date` and `language` | Rust-only plus one Swift alert; verifiable here |
+| **B. Library completeness (v1.0)** | `SC-12` grid view + cover generation; `SC-13` smart collections; `SC-14` persisted, per-view sort with key + direction control; `SC-15` word count and reading time (needs `word_count` on `FfiLibraryItem`) | Smart collections can use schema v7's `last_opened_at` and RSVP progress; no new schema |
+| **C. Reading controls (v1.0)** | `SC-17` paragraph spacing, text width, justification, hyphenation, curated fonts; `SC-19` carry position when exiting RSVP to the flow view (the shells keep separate stores; a fraction hand-off is enough for v1.0, a shared progress column is schema v8 for v1.1); `SC-20` measure frame timing across the 200–700 WPM band (band decided 2026-10-09) | Measurement only |
+| **D. Verification gates (v1.0)** | `SC-21` live VoiceOver, read-aloud, Dynamic Type, and the colour-never-sole-state audit (macOS); Windows W6 pass | Human only; already tracked in `docs/qa-manual-clickthrough-*.md` and `docs/v1.0-release-checklist.md` |
+| **E. Deferred to v1.1** | `SC-02` re-flow; `SC-04` images; `SC-05` NCX/nav; `SC-07` share sheet / extension / drag-and-drop; `SC-08` deskew + contrast; `SC-11` PDF footnotes, images, watermarks; `SC-16` per-item size + keep-text-only; `SC-18` configurable progress display | `SC-09` closed 2026-10-09 (dropped from spec) |
+| **F. Platform follow-ons** | `SC-10` camera capture and `SC-24` iOS URL fetch (with iOS); `SC-22` Windows TTS, paginated view, PDF (owner decision pending; OCR, annotations and export are unplanned future capability, decided 2026-10-09); `SC-23` Windows localisation | Blocked on the iOS shell and on Windows scope |
+
+**Also open and not spec items:** `F33` (pdfium isolation: accepted for v1.0 on 2026-10-09 per ADR-022; the portable helper process is a post-v1.0 milestone, not yet planned in detail), the `F39`–`F78` Low/Info findings in `CLAUDE.md`'s register, and the human-gated `docs/v1.0-release-checklist.md`.
+
+**Exit criterion for "spec conformance":** every `SC-nn` is either implemented and tested, or the spec text is amended to say it is out of scope, with the decision dated in spec §10. No item may be left unmarked.
 
 **Total: ~25 weeks / ~6 months** to public macOS v1.0.
 *(+2 weeks from v1 plan for security hardening sprint in M1)*

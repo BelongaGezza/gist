@@ -32,9 +32,11 @@ pre-1.0 work, not a shipped release note.
 - Copy-on-import (ADR-006): file-based imports get a content-addressed local copy, so removing a
   library item — even with "delete original" selected — never touches the user's real file at its
   real location.
-- An RSVP (word-at-a-time) pacing engine and a flowing/virtualized document reading model. Each
-  platform shell mirrors the Rust pacing engine's cursor/elapsed math client-side, wall-clock-
-  driven rather than timer-driven, to avoid playback drift.
+- An RSVP (word-at-a-time) pacing engine and a flowing/virtualized document reading model. Every
+  shell now drives playback from the shared Rust engine through `FfiRsvpSession` (ORP split,
+  per-token timing, punctuation pauses, back-words, stats), anchored to the wall clock rather than a
+  timer so it does not drift. macOS adopted this on 2026-10-09; its earlier hand-ported Swift copy of
+  the pacing maths is deleted.
 - Full-text search (SQLite FTS5), library item removal (single/bulk), collections and tags CRUD,
   sort and tag-filter queries.
 - PDF import (macOS): text PDFs are extracted via a pinned, hash-verified build of pdfium
@@ -81,8 +83,10 @@ pre-1.0 work, not a shipped release note.
 - A flow (continuous document) reading view: virtualized rendering, typography controls (size,
   font design, line spacing), a heading-nested table of contents, in-document search, scroll-
   position persistence, and keyboard/trackpad navigation.
-- An RSVP reading view: optimal-recognition-point (ORP) highlighting, a rotary WPM dial, scrub/
-  seek and back-5-words controls, a punctuation-pause toggle, session stats, and exit-to-flow-view.
+- An RSVP reading view: optimal-recognition-point (ORP) highlighting, a WPM slider (200–700 in the
+  UI, 5-WPM steps; it replaced the original rotary dial, whose drag lost direction at the centre),
+  scrub/seek and back-5-words controls, a punctuation-pause toggle, session stats, and a "Continue in
+  Flow View" action (which opens the flow view at its own saved position, not the RSVP position).
 - Annotation UI: highlight/note/bookmark composer sheets, a sidebar with jump-to and export, and
   badges for annotations whose anchor has drifted since the source document changed.
 - A multi-page OCR review screen (on-device recognition, editable per-page text, low-confidence
@@ -128,6 +132,13 @@ rest and at-rest-integrity work described above. To report a new vulnerability, 
   availability-guarded.
 
 ### Known limitations
+
+- **Several product-spec requirements are not built.** `docs/product-spec-reader-app-v3.md` §12
+  lists 24 (`SC-01`–`SC-24`). The ones a user is most likely to notice: TXT must be UTF-8; the DOCX
+  "has tracked changes" notice is never shown; embedded images are dropped; web imports carry no
+  byline or dates; no grid view, covers or smart collections; the sort choice is forgotten on
+  restart; no paragraph spacing, text-width, justification or hyphenation controls; no word count or
+  reading time; no deskew in OCR. Linux and Android have plans and spikes only.
 
 - **The macOS 14 floor is compile-verified only.** It builds and the automated tests pass with a
   14.0 deployment target, but it has not been run on a real macOS 14 (or 15) machine. Behaviour
