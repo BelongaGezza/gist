@@ -1,7 +1,7 @@
 # ADR 028 — Android OCR engine: Bundled on-device Google ML Kit Text Recognition
 
 **Date:** 2026-10-07
-**Status:** Proposed
+**Status:** Deferred 2026-10-09. OCR on Android (and on any platform without it) is unplanned future capability per the owner's scope decision; this ADR is retained as the design to start from if that changes. Do not implement without a new decision.
 
 ## Context
 
