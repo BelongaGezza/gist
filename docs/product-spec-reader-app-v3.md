@@ -462,7 +462,7 @@ This register exists because the build plans (M0–M7) were derived from status 
 | SC-12 | 4 | Grid view; cover/thumbnail generation | List only; `cover_path` never populated | v1.0 |
 | SC-13 | 4 | Smart collections (Unread, In progress, Finished, Web articles) | Sidebar has Library and user collections only | v1.0 |
 | SC-14 | 4 | Persist sort key and direction across restarts; key selector + direction toggle | Sort is `@State` only; combined-choice menu | v1.0 |
-| SC-15 | 4 | Word count and estimated reading time displayed | `word_count` stored, not on the FFI item record | v1.0 |
+| SC-15 | 4 | Word count and estimated reading time displayed | Rust done 2026-10-11 (ADR-030, schema v8, `FfiLibraryItem.word_count`, `estimateReadingSeconds`); Swift/C# display pending | v1.0 |
 | SC-16 | 4 | Per-item file size; keep-only-extracted-text option | Only a library-wide usage breakdown exists | v1.1 |
 | SC-17 | 5.2 | Curated font set, paragraph spacing, margins/text width, justification, hyphenation | Size, 3 font designs, 3 line spacings only; fixed 700 pt column | v1.0 |
 | SC-18 | 5.3 | Configurable progress display (bar / percentage / page-of-total) | Percentage only (flow); page x of y (paginated) | v1.1 |
