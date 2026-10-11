@@ -18,6 +18,11 @@ pub fn sanitize_meta_text(raw: &str, max_chars: usize) -> Option<String> {
     let mut count = 0usize;
     let mut pending_space = false;
     for c in raw.chars() {
+        // Bidi embedding/override/isolate controls (Cf, so not `is_control`)
+        // could reorder surrounding UI text when a byline is displayed.
+        if matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
+            continue;
+        }
         if c.is_whitespace() || c.is_control() {
             pending_space = !out.is_empty();
             continue;
@@ -158,6 +163,19 @@ mod tests {
         assert_eq!(sanitize_meta_text(&multi, 10).unwrap().chars().count(), 10);
         let spaced = "a ".repeat(500);
         assert!(sanitize_meta_text(&spaced, 50).unwrap().chars().count() <= 50);
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_overrides_but_keeps_marks_and_joiners() {
+        assert_eq!(
+            sanitize_meta_text("Jane \u{202E}eod\u{202C} \u{2066}x\u{2069}", 200).as_deref(),
+            Some("Jane eod x")
+        );
+        // LRM/ZWNJ are legitimate in names (e.g. Persian) and are kept.
+        assert_eq!(
+            sanitize_meta_text("می\u{200C}خواهم", 200).as_deref(),
+            Some("می\u{200C}خواهم")
+        );
     }
 
     #[test]
