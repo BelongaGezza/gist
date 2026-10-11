@@ -75,7 +75,7 @@ This is the core differentiator and needs the most precision. Five source types 
 - Paragraph detection from blank-line/line-break heuristics, with a manual "re-flow" option for poorly formatted plain text.
 - File size enforced against the resource limit before reading.
 
-> **Status: Partial.** Paragraph detection (blank-line heuristics, CRLF/CR normalisation) and the size limit are implemented. **Not implemented:** encoding detection and the ambiguity prompt. `gist-parse-txt` declares `encoding_rs` and `chardetng` but does not use them; input must be valid UTF-8 and anything else fails with a UTF-8 error (`SC-01`). The manual "re-flow" option does not exist (`SC-02`).
+> **Status: Partial.** Paragraph detection (blank-line heuristics, CRLF/CR normalisation) and the size limit are implemented. Encoding detection is implemented in the core (BOM, UTF-16 with and without BOM, UTF-8, legacy single-byte and CJK code pages via `chardetng`), with a detected-encoding report (`uncertain`/`lossy` flags) and an explicit-override entry point exposed over FFI (`detect_text_encoding`, `import_file_with_encoding`). **Not implemented:** the ambiguity prompt in the apps (logged in `PENDING_APPLE_CHANGES.md`; nothing on Windows), so until then a weak guess is imported silently (`SC-01`, core half done). The manual "re-flow" option does not exist (`SC-02`).
 
 ### 3.4 DOCX
 - Extract text via the document's own structure (headings, paragraphs, lists, tables) rather than a blind text dump, so heading levels map onto the app's internal document model.
@@ -448,7 +448,7 @@ This register exists because the build plans (M0–M7) were derived from status 
 
 | ID | Spec § | Requirement not met | Evidence | Target |
 |---|---|---|---|---|
-| SC-01 | 3.3 | TXT encoding detection (UTF-16, legacy code pages) with ambiguity prompt | `gist-parse-txt` calls `std::str::from_utf8`; `encoding_rs`/`chardetng` declared, unused | v1.0 |
+| SC-01 | 3.3 | TXT encoding detection (UTF-16, legacy code pages) with ambiguity prompt | Core done 2026-10-11 (`detect_text_encoding`, `import_file_with_encoding`, tests, fixtures); app-side prompt not built, so the row stays open until it is | v1.0 |
 | SC-02 | 3.3 | Manual "re-flow" for poorly formatted text | No code | v1.1 |
 | SC-03 | 3.4 | Tell the user a DOCX has unresolved tracked changes | Flag stored as `source_type = "docx:tracked-changes"`; nothing reads it | v1.0 |
 | SC-04 | 3.1, 3.2, 3.4, 3.6 | Extract embedded images; optional inline retention; per-user preference | `Block::Image` exists; no parser emits it | v1.1 |

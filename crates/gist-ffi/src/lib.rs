@@ -69,8 +69,50 @@ pub enum GistError {
     /// Any other limit.
     #[error("this document exceeds GIST's import limits")]
     ResourceLimitOther,
+    /// The caller named a text encoding GIST does not recognise.
+    #[error("unsupported text encoding")]
+    UnsupportedTextEncoding,
     #[error("internal error")]
     InternalPanic,
+}
+
+/// How a text file's encoding was determined (mirrors
+/// `gist_core::EncodingSource`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiEncodingSource {
+    Bom,
+    Utf8,
+    Detected,
+    Override,
+}
+
+/// Detected (or overridden) text encoding for a plain-text file. A UI should
+/// offer the user an encoding choice when `uncertain` or `lossy` is true.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiTextEncodingInfo {
+    /// Canonical name, e.g. `"UTF-8"`, `"UTF-16LE"`, `"windows-1252"`; also
+    /// valid as the `encoding` argument of `import_file_with_encoding`.
+    pub name: String,
+    pub source: FfiEncodingSource,
+    pub uncertain: bool,
+    pub lossy: bool,
+}
+
+impl From<gist_core::EncodingInfo> for FfiTextEncodingInfo {
+    fn from(i: gist_core::EncodingInfo) -> Self {
+        use gist_core::EncodingSource as S;
+        FfiTextEncodingInfo {
+            name: i.name,
+            source: match i.source {
+                S::Bom => FfiEncodingSource::Bom,
+                S::Utf8 => FfiEncodingSource::Utf8,
+                S::Detected => FfiEncodingSource::Detected,
+                S::Override => FfiEncodingSource::Override,
+            },
+            uncertain: i.uncertain,
+            lossy: i.lossy,
+        }
+    }
 }
 
 /// Maps the importers' typed [`gist_model::LimitKind`] to the matching flat
@@ -95,6 +137,9 @@ impl From<gist_core::CoreError> for GistError {
             return limit_kind_to_error(kind);
         }
         match e {
+            gist_core::CoreError::Parse(gist_core::TxtParseError::UnknownEncoding) => {
+                GistError::UnsupportedTextEncoding
+            }
             gist_core::CoreError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
                 GistError::ChecksumMismatch { path }
             }
@@ -110,6 +155,7 @@ impl From<gist_core::ImportError> for GistError {
             gist_core::ImportError::PdfEncrypted => GistError::PdfEncrypted,
             gist_core::ImportError::PdfNoTextLayer => GistError::PdfNoTextLayer,
             gist_core::ImportError::PdfUnavailable(_) => GistError::PdfUnavailable,
+            gist_core::ImportError::UnknownEncoding => GistError::UnsupportedTextEncoding,
             gist_core::ImportError::ResourceLimitExceeded { kind, .. } => limit_kind_to_error(kind),
             gist_core::ImportError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
                 GistError::ChecksumMismatch { path }
@@ -1216,6 +1262,42 @@ impl GistCore {
         })
     }
 
+    /// Like `import_file`, but names the text encoding (WHATWG label such as
+    /// `"windows-1251"`) for plain-text files; `None` auto-detects. Ignored
+    /// for other formats. An unrecognised label is
+    /// `GistError::UnsupportedTextEncoding`.
+    pub fn import_file_with_encoding(
+        &self,
+        path: String,
+        encoding: Option<String>,
+    ) -> Result<String, GistError> {
+        ffi_catch!({
+            self.inner
+                .import_file_with_encoding(
+                    &PathBuf::from(path),
+                    &gist_core::NullObserver,
+                    encoding.as_deref(),
+                )
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Report the encoding a plain-text file would be imported with (or the
+    /// named one) without importing it, so the UI can prompt when
+    /// `uncertain` or `lossy` (SC-01).
+    pub fn detect_text_encoding(
+        &self,
+        path: String,
+        encoding: Option<String>,
+    ) -> Result<FfiTextEncodingInfo, GistError> {
+        ffi_catch!({
+            self.inner
+                .detect_text_encoding(&PathBuf::from(path), encoding.as_deref())
+                .map(FfiTextEncodingInfo::from)
+                .map_err(GistError::from)
+        })
+    }
+
     /// Fetch and import readable content from `url`. See `gist_core::Core::import_url`.
     pub fn import_url(&self, url: String) -> Result<String, GistError> {
         ffi_catch!({
@@ -1817,6 +1899,44 @@ mod tests {
             .import_file(big.to_string_lossy().into_owned())
             .unwrap_err();
         assert!(matches!(err, GistError::ResourceLimitTooLarge), "{err:?}");
+    }
+
+    /// SC-01 over FFI: detection report, explicit override, and the typed
+    /// unknown-label error.
+    #[test]
+    fn text_encoding_detect_and_override_over_ffi() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let core = GistCore::new(
+            dir.join("db.sqlite").to_string_lossy().into_owned(),
+            dir.join("store").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let p = dir.join("koi.txt");
+        std::fs::write(&p, [0xF0, 0xD2, 0xC9, 0xD7, 0xC5, 0xD4]).unwrap();
+        let path = p.to_string_lossy().into_owned();
+
+        let auto = core.detect_text_encoding(path.clone(), None).unwrap();
+        assert_eq!(auto.source, FfiEncodingSource::Detected);
+        assert!(auto.uncertain, "six bytes of evidence must be uncertain");
+
+        let forced = core
+            .detect_text_encoding(path.clone(), Some("koi8-r".into()))
+            .unwrap();
+        assert_eq!(forced.name, "KOI8-R");
+        assert_eq!(forced.source, FfiEncodingSource::Override);
+
+        assert!(core
+            .import_file_with_encoding(path.clone(), Some("koi8-r".into()))
+            .is_ok());
+        assert!(matches!(
+            core.import_file_with_encoding(path.clone(), Some("bogus".into())),
+            Err(GistError::UnsupportedTextEncoding)
+        ));
+        assert!(matches!(
+            core.detect_text_encoding(path, Some("bogus".into())),
+            Err(GistError::UnsupportedTextEncoding)
+        ));
     }
 
     fn corrupt_file(path: &std::path::Path) {
