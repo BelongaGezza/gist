@@ -493,7 +493,8 @@ fn sqlite_path(db_path: &Path) -> PathBuf {
 // block.
 // v7 added `library_items.last_opened_at` and `idx_tokens_item_idx`
 // (ADR-021, reading-state model).
-const SCHEMA_VERSION: i64 = 7;
+// v8 added `library_items.word_count` (ADR-030, SC-15).
+const SCHEMA_VERSION: i64 = 8;
 
 // ── LibraryItem (lightweight row, not the full Document) ──────────────────
 
@@ -528,6 +529,18 @@ pub struct LibraryItem {
     /// only in the flow view has no RSVP position, so this is `0.0` for it
     /// even when `last_opened_at` is set (accepted limitation, D2).
     pub progress_fraction: f64,
+    /// Number of `TokenKind::Word` tokens in the item's token stream (ADR-030,
+    /// SC-15) — the same units the RSVP reader plays and the `tokens` table
+    /// indexes. Stored in `library_items.word_count` (schema v8).
+    pub word_count: u32,
+}
+
+/// Estimated reading time in whole seconds for `word_count` words at `wpm`
+/// words per minute (rounded up; `wpm` clamped to 100..=1000 like
+/// `gist-rsvp`). `0` words is `0` seconds.
+pub fn estimate_reading_seconds(word_count: u32, wpm: u32) -> u32 {
+    let wpm = u64::from(wpm.clamp(100, 1000));
+    (u64::from(word_count) * 60).div_ceil(wpm) as u32
 }
 
 /// SELECT list + FROM/JOIN shared by every library-row query (ADR-021). The
@@ -543,7 +556,8 @@ const LIBRARY_ITEM_SELECT: &str = "SELECT li.id, li.title, li.authors, li.source
         COALESCE(CASE WHEN COALESCE(rp.token_index, 0) > 0
              THEN MIN(1.0, rp.token_index * 1.0 / MAX(
                     (SELECT MAX(t.token_idx) FROM tokens t WHERE t.item_id = li.id), 1))
-             END, 0.0)
+             END, 0.0),
+        li.word_count
      FROM library_items li
      LEFT JOIN reading_progress rp ON rp.item_id = li.id";
 
@@ -568,6 +582,7 @@ fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryIte
         source_type,
         last_opened_at: row.get(7)?,
         progress_fraction: row.get::<_, f64>(9)?.clamp(0.0, 1.0),
+        word_count: row.get::<_, i64>(10)?.clamp(0, i64::from(u32::MAX)) as u32,
     })
 }
 
@@ -972,6 +987,22 @@ impl Store {
             tracing::info!("gist-store: migrated schema to version 7 (last_opened_at)");
         }
 
+        // v7 → v8: `word_count` (ADR-030, SC-15). Backfilled in the same
+        // transaction from the `tokens` table, which indexes exactly the Word
+        // tokens: a `COUNT(*)` per item answered from the covering
+        // `idx_tokens_item_idx` index, so no document blob is ever loaded.
+        if version < 8 {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE library_items ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0;
+                 UPDATE library_items SET word_count =
+                     (SELECT COUNT(*) FROM tokens t WHERE t.item_id = library_items.id);
+                 PRAGMA user_version = 8;
+                 COMMIT;",
+            )?;
+            tracing::info!("gist-store: migrated schema to version 8 (word_count)");
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
             storage_dir: storage_dir.to_owned(),
@@ -1090,6 +1121,12 @@ impl Store {
         // cover_path is not in M0 Metadata.
         let source_path: Option<&str> = meta.source_ref.as_deref();
         let source_copy_path: Option<&str> = meta.source_copy_ref.as_deref();
+        // Same definition as the `tokens` index below and the RSVP reader (ADR-030).
+        let word_count = doc
+            .token_stream
+            .iter()
+            .filter(|t| t.kind == gist_model::TokenKind::Word)
+            .count() as i64;
         let now_ms = now_millis();
 
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
@@ -1098,8 +1135,9 @@ impl Store {
         tx.execute(
             "INSERT OR REPLACE INTO library_items
              (id, title, authors, source_path, source_url, doc_path, cover_path,
-              created_at, updated_at, metadata_json, source_copy_path, content_encrypted)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              created_at, updated_at, metadata_json, source_copy_path, content_encrypted,
+              word_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 doc.id,
                 meta.title,
@@ -1113,6 +1151,7 @@ impl Store {
                 meta_json,
                 source_copy_path,
                 content_encrypted,
+                word_count,
             ],
         )?;
 
@@ -4710,6 +4749,73 @@ mod tests {
         let mut meta = gist_model::Metadata::minimal(title);
         meta.source_type = source_type.to_string();
         gist_model::Document::new(meta, vec![section])
+    }
+
+    #[test]
+    fn word_count_is_stored_listed_and_matches_the_tokens_table() {
+        let (_dir, store) = open_test_store();
+        let doc = doc_with_words("Counted", "txt", 37);
+        store.insert_item(&doc).unwrap();
+        let item = store.get_item_by_id(&doc.id).unwrap().unwrap();
+        assert_eq!(item.word_count, 37);
+        assert_eq!(store.list_items(0, 10).unwrap()[0].word_count, 37);
+        let conn = store.conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tokens WHERE item_id = ?1",
+                params![doc.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 37);
+    }
+
+    #[test]
+    fn migration_v7_to_v8_backfills_word_count_from_tokens_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let storage = dir.path().join("s");
+        let ids: Vec<(String, u32)> = {
+            let store = Store::open(&db, &storage).unwrap();
+            [5u32, 120, 0]
+                .iter()
+                .map(|&n| {
+                    let doc = doc_with_words("t", "txt", n as usize);
+                    store.insert_item(&doc).unwrap();
+                    (doc.id, n)
+                })
+                .collect()
+        };
+        {
+            // Rewind to a genuine v7 shape.
+            let c = Connection::open(&db).unwrap();
+            c.execute_batch(
+                "ALTER TABLE library_items DROP COLUMN word_count; PRAGMA user_version = 7;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&db, &storage).unwrap();
+        for (id, n) in &ids {
+            let item = store.get_item_by_id(id).unwrap().unwrap();
+            assert_eq!(item.word_count, *n, "backfill for {id}");
+            // Existing items still open.
+            assert!(store.get_item(id).unwrap().is_some());
+        }
+        let v: i64 = Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 8);
+    }
+
+    #[test]
+    fn estimate_reading_seconds_rounds_up_and_clamps_wpm() {
+        assert_eq!(estimate_reading_seconds(0, 250), 0);
+        assert_eq!(estimate_reading_seconds(250, 250), 60);
+        assert_eq!(estimate_reading_seconds(1, 250), 1);
+        // wpm below the floor behaves as 100; above the ceiling as 1000.
+        assert_eq!(estimate_reading_seconds(100, 0), 60);
+        assert_eq!(estimate_reading_seconds(1000, 99_999), 60);
     }
 
     #[test]

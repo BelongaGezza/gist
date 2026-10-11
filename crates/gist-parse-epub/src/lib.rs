@@ -159,6 +159,13 @@ fn parse_opf(
         .and_then(|n| n.text())
         .map(|s| s.to_string());
 
+    // SC-06: best-effort language from `dc:language` (sanitised, bounded).
+    let language = doc
+        .descendants()
+        .find(|n| n.has_tag_name("language"))
+        .and_then(|n| n.text())
+        .and_then(gist_model::metadata_util::normalize_language_tag);
+
     // Build manifest: id → href
     let mut manifest: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for node in doc.descendants() {
@@ -198,8 +205,12 @@ fn parse_opf(
         source_ref: None,
         source_copy_ref: None,
         import_date: None,
-        language: None,
+        language,
         word_count: 0, // recomputed by Document::new
+        tracked_changes: false,
+        published_date: None,
+        retrieved_date: None,
+        canonical_url: None,
     };
 
     Ok((metadata, spine_items))
@@ -1039,5 +1050,52 @@ mod tests {
         let (rows, spans) = merged_table(&blocks);
         assert_eq!(rows, vec![vec!["a", "b"], vec!["c", ""]]);
         assert_eq!(spans.len(), 1, "c truncated to 1 column: {spans:?}");
+    }
+
+    // ── SC-06: dc:language ───────────────────────────────────────────────
+
+    fn epub_with_language(lang_element: &str) -> Vec<u8> {
+        use std::io::Write;
+        let container = r#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+        let opf = format!(
+            r#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:title>T</dc:title>{lang_element}</metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#
+        );
+        let ch =
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Hello world.</p></body></html>"#;
+        let mut out = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+            let o = zip::write::SimpleFileOptions::default();
+            for (name, body) in [
+                ("META-INF/container.xml", container),
+                ("content.opf", opf.as_str()),
+                ("c1.xhtml", ch),
+            ] {
+                w.start_file(name, o).unwrap();
+                w.write_all(body.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn dc_language_is_captured_and_normalised() {
+        let z = epub_with_language("<dc:language>en_GB</dc:language>");
+        let d = parse(&z, "t", &ParseLimits::default()).unwrap();
+        assert_eq!(d.metadata.language.as_deref(), Some("en-GB"));
+    }
+
+    #[test]
+    fn hostile_or_missing_dc_language_is_none() {
+        for el in [
+            "",
+            "<dc:language></dc:language>",
+            "<dc:language>not a language!</dc:language>",
+            &format!("<dc:language>{}</dc:language>", "x".repeat(100_000)),
+        ] {
+            let d = parse(&epub_with_language(el), "t", &ParseLimits::default()).unwrap();
+            assert_eq!(d.metadata.language, None, "{:.40}", el);
+        }
     }
 }

@@ -17,7 +17,8 @@ the ADRs and `CLAUDE.md`'s "Security policies". It was an empty file until 2026-
   and `stats_*` with their own monotonic clock; there is no timer in Rust and no second copy of the
   pacing maths in any shell (Apple since 2026-10-09, Windows since W4).
 - **Operation groups on `GistCore`:** import (`import_txt`, `import_file`, `import_url`,
-  `import_image_with_ocr`), library (`list_items` paged, `search_items`, `remove_items`,
+  `import_image_with_ocr`, plus `import_file_with_encoding` / `detect_text_encoding` for TXT
+  encoding override and the ambiguity report, SC-01), library (`list_items` paged, `search_items`, `remove_items`,
   `remove_items_detailed`, `sweep_orphaned_files`), collections and tags, reading state
   (`start_rsvp`, `open_rsvp_session`, `save_progress`, `mark_item_opened`, `get_document_json`),
   annotations (CRUD plus `reanchor_annotations`), and security (`encrypt_items`,

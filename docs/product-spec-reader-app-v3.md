@@ -75,7 +75,7 @@ This is the core differentiator and needs the most precision. Five source types 
 - Paragraph detection from blank-line/line-break heuristics, with a manual "re-flow" option for poorly formatted plain text.
 - File size enforced against the resource limit before reading.
 
-> **Status: Partial.** Paragraph detection (blank-line heuristics, CRLF/CR normalisation) and the size limit are implemented. **Not implemented:** encoding detection and the ambiguity prompt. `gist-parse-txt` declares `encoding_rs` and `chardetng` but does not use them; input must be valid UTF-8 and anything else fails with a UTF-8 error (`SC-01`). The manual "re-flow" option does not exist (`SC-02`).
+> **Status: Partial.** Paragraph detection (blank-line heuristics, CRLF/CR normalisation) and the size limit are implemented. Encoding detection is implemented in the core (BOM, UTF-16 with and without BOM, UTF-8, legacy single-byte and CJK code pages via `chardetng`), with a detected-encoding report (`uncertain`/`lossy` flags) and an explicit-override entry point exposed over FFI (`detect_text_encoding`, `import_file_with_encoding`). **Not implemented:** the ambiguity prompt in the apps (logged in `PENDING_APPLE_CHANGES.md`; nothing on Windows), so until then a weak guess is imported silently (`SC-01`, core half done). The manual "re-flow" option does not exist (`SC-02`).
 
 ### 3.4 DOCX
 - Extract text via the document's own structure (headings, paragraphs, lists, tables) rather than a blind text dump, so heading levels map onto the app's internal document model.
@@ -236,7 +236,7 @@ All application state is stored on-device only. There is no sync, no account sys
 - **Backup:** users may back up their device through standard OS mechanisms (iCloud device backup on iOS, Time Machine on macOS, Windows Backup) — this is outside the app's remit and requires no app-level implementation.
 - **Export:** users can export their library data (annotations, highlights, progress) as Markdown or plain text (§5.4) to any location they choose via standard OS file-save dialogs.
 
-> **Status: Partial.** Persistence is SQLite (WAL, foreign keys, FTS5), currently **schema v7**, with transactional migrations and a `SchemaTooNew` refusal. Stored document blobs are wrapped in an `ir_version` envelope with a typed `IrVersionTooNew` refusal (ADR-019). Original copies are content-addressed under `originals/` (ADR-006). Two things beyond the v1.5 text: BLAKE3 checksum sidecars verified on read (ADR-013) and opt-in **per-item** AES-256-GCM encryption at rest (ADR-011/014; new imports remain plaintext by default). Annotations export as Markdown; **exporting progress is not implemented** (`SC-19`). Preferences are stored per device (`UserDefaults` on macOS).
+> **Status: Partial.** Persistence is SQLite (WAL, foreign keys, FTS5), currently **schema v8** (v8 adds `word_count`, ADR-030), with transactional migrations and a `SchemaTooNew` refusal. Stored document blobs are wrapped in an `ir_version` envelope with a typed `IrVersionTooNew` refusal (ADR-019). Original copies are content-addressed under `originals/` (ADR-006). Two things beyond the v1.5 text: BLAKE3 checksum sidecars verified on read (ADR-013) and opt-in **per-item** AES-256-GCM encryption at rest (ADR-011/014; new imports remain plaintext by default). Annotations export as Markdown; **exporting progress is not implemented** (`SC-19`). Preferences are stored per device (`UserDefaults` on macOS).
 
 ---
 
@@ -448,12 +448,12 @@ This register exists because the build plans (M0–M7) were derived from status 
 
 | ID | Spec § | Requirement not met | Evidence | Target |
 |---|---|---|---|---|
-| SC-01 | 3.3 | TXT encoding detection (UTF-16, legacy code pages) with ambiguity prompt | `gist-parse-txt` calls `std::str::from_utf8`; `encoding_rs`/`chardetng` declared, unused | v1.0 |
+| SC-01 | 3.3 | TXT encoding detection (UTF-16, legacy code pages) with ambiguity prompt | Core done 2026-10-11 (`detect_text_encoding`, `import_file_with_encoding`, tests, fixtures); **macOS done 2026-10-11 (M8 R4):** uncertain/lossy detection opens an encoding picker (curated WHATWG labels, lossy warning for the chosen label), cancel imports nothing, typed `UnsupportedTextEncoding`; `ImportMetadataTests` (real core, `fixtures/txt/encodings`). Windows prompt pending (row stays open until then) | v1.0 |
 | SC-02 | 3.3 | Manual "re-flow" for poorly formatted text | No code | v1.1 |
-| SC-03 | 3.4 | Tell the user a DOCX has unresolved tracked changes | Flag stored as `source_type = "docx:tracked-changes"`; nothing reads it | v1.0 |
+| SC-03 | 3.4 | Tell the user a DOCX has unresolved tracked changes | Rust half done 2026-10-11: real `Metadata.tracked_changes` field + FFI `get_item_metadata`; **macOS done 2026-10-11 (M8 R4):** after a DOCX import `CoreClient` reads the flag and posts a dismissible, non-blocking banner; the Item Info sheet also states it; tested with a purpose-built `<w:ins>` DOCX (`tracked_changes_min.docx`; `with_tracked_changes.docx` is not used). Windows notice pending (row stays open until then) | v1.0 |
 | SC-04 | 3.1, 3.2, 3.4, 3.6 | Extract embedded images; optional inline retention; per-user preference | `Block::Image` exists; no parser emits it | v1.1 |
 | SC-05 | 3.2 | Chapter structure from NCX / EPUB 3 `nav` | Only XHTML headings are used | v1.1 |
-| SC-06 | 3.6, 7 | Byline, publish date, retrieved date, canonical URL for web items; `import_date`, `language` | `gist-web` sets `author: None`, `import_date: None`; no parser sets `language` | v1.0 |
+| SC-06 | 3.6, 7 | Byline, publish date, retrieved date, canonical URL for web items; `import_date`, `language` | Rust half done 2026-10-11: web captures byline, `published_date`, `retrieved_date`, `canonical_url`, `<html lang>`; all importers stamp `import_date`; epub sets `language` from `dc:language` (txt/docx/pdf: `None`); **macOS done 2026-10-11 (M8 R4):** "Item Info…" context-menu sheet (Library and Collection views) shows byline, published/retrieved/imported dates, language and canonical URL; the URL is text unless http(s), where it is an explicit click-to-open link (never auto-opened). The library list still does not carry these fields (the sheet fetches `getItemMetadata` on demand). Windows pending (row stays open until then) | v1.0 |
 | SC-07 | 3.6, 8.5 | Share-sheet / browser-extension "Send to GIST"; drag-and-drop and Services-menu import | No `onDrop`/Services code; paste-URL and file picker only | v1.1 |
 | SC-08 | 3.5 | OCR deskew and contrast normalisation | `prepare_image` is greyscale + resize + PNG only; `imageproc`/`rayon` work listed as "remaining M3" was not done | v1.1 |
 | SC-09 | 7, 3.5 | ~~`ocrConfidence[]` in the document model~~ | **Closed 2026-10-09:** dropped from the spec; future capability, unplanned | Closed |
@@ -462,7 +462,7 @@ This register exists because the build plans (M0–M7) were derived from status 
 | SC-12 | 4 | Grid view; cover/thumbnail generation | List only; `cover_path` never populated | v1.0 |
 | SC-13 | 4 | Smart collections (Unread, In progress, Finished, Web articles) | Sidebar has Library and user collections only | v1.0 |
 | SC-14 | 4 | Persist sort key and direction across restarts; key selector + direction toggle | Sort is `@State` only; combined-choice menu | v1.0 |
-| SC-15 | 4 | Word count and estimated reading time displayed | `word_count` stored, not on the FFI item record | v1.0 |
+| SC-15 | 4 | Word count and estimated reading time displayed | Rust done 2026-10-11 (ADR-030, schema v8, `FfiLibraryItem.word_count`, `estimateReadingSeconds`); **macOS done 2026-10-11 (M8 R4):** rows show "N words · ≈ M min" (seconds computed once per load at the Settings default WPM, hidden for 0 words, VoiceOver sentence); C# display pending (row stays open until then) | v1.0 |
 | SC-16 | 4 | Per-item file size; keep-only-extracted-text option | Only a library-wide usage breakdown exists | v1.1 |
 | SC-17 | 5.2 | Curated font set, paragraph spacing, margins/text width, justification, hyphenation | Size, 3 font designs, 3 line spacings only; fixed 700 pt column | v1.0 |
 | SC-18 | 5.3 | Configurable progress display (bar / percentage / page-of-total) | Percentage only (flow); page x of y (paginated) | v1.1 |
