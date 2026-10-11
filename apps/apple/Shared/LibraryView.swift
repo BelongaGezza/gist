@@ -157,6 +157,7 @@ struct LibraryView: View {
     @State private var showNewCollectionAlert = false
     @State private var newCollectionName = ""
     @State private var tagEditorTarget: TagEditorTarget?
+    @State private var infoTarget: TagEditorTarget?
     @State private var sortOrder: LibrarySortOrder = .dateAddedNewest
     /// The tag currently filtering the list, or `nil` for no filter. Mutually
     /// exclusive with an active search (picking a tag clears `searchText`
@@ -200,6 +201,7 @@ struct LibraryView: View {
                     .sheet(item: $tagEditorTarget) { target in
                         TagEditorView(itemId: target.id, itemTitle: target.title)
                     }
+                    .modifier(ImportMetadataPresentations(core: core, infoTarget: $infoTarget))
                     .sheet(isPresented: $showOcrImportSheet) {
                         OcrImportSheet()
                     }
@@ -690,6 +692,9 @@ struct LibraryView: View {
                     }
                     Button("Manage Tags…") {
                         tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)
+                    }
+                    Button("Item Info…") {
+                        infoTarget = TagEditorTarget(id: item.id, title: item.title)
                     }
                     if !item.contentEncrypted {
                         Button("Encrypt…") {

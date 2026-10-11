@@ -20,6 +20,16 @@ struct LibraryRowContent: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if let caption = ReadingTimeFormat.caption(
+                    wordCount: item.wordCount, seconds: item.readingSeconds)
+                {
+                    Text(caption)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(
+                            ReadingTimeFormat.accessibilityLabel(
+                                wordCount: item.wordCount, seconds: item.readingSeconds) ?? caption)
+                }
                 if LibraryRowReadingState.hasReadingState(item) {
                     readingStateLine
                 }

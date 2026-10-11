@@ -20,6 +20,7 @@ struct CollectionDetailView: View {
     @State private var isLoading = false
     @State private var selection = Set<String>()
     @State private var tagEditorTarget: TagEditorTarget?
+    @State private var infoTarget: TagEditorTarget?
     @State private var showRemoveConfirm = false
     @State private var sortOrder: LibrarySortOrder = .dateAddedNewest
 
@@ -82,6 +83,13 @@ struct CollectionDetailView: View {
         .sheet(item: $tagEditorTarget) { target in
             TagEditorView(itemId: target.id, itemTitle: target.title)
         }
+        .sheet(item: $infoTarget) { target in
+            ItemInfoView(
+                itemTitle: target.title,
+                info: core.itemInfo(itemId: target.id),
+                onClose: { infoTarget = nil }
+            )
+        }
         .alert(
             selection.count == 1
                 ? "Remove 1 item from \u{201C}\(collection.name)\u{201D}?"
@@ -140,6 +148,9 @@ struct CollectionDetailView: View {
                     }
                     Button("Manage Tags\u{2026}") {
                         tagEditorTarget = TagEditorTarget(id: item.id, title: item.title)
+                    }
+                    Button("Item Info\u{2026}") {
+                        infoTarget = TagEditorTarget(id: item.id, title: item.title)
                     }
                     Divider()
                     Button("Remove from Collection", role: .destructive) {
