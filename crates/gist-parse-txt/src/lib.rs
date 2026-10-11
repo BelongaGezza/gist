@@ -285,6 +285,10 @@ fn build_document(text: &str, stem: &str) -> Document {
         import_date: None,
         language: None,
         word_count: 0, // Document::new recomputes this
+        tracked_changes: false,
+        published_date: None,
+        retrieved_date: None,
+        canonical_url: None,
     };
 
     Document::new(metadata, vec![section])

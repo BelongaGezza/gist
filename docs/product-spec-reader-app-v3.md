@@ -450,10 +450,10 @@ This register exists because the build plans (M0–M7) were derived from status 
 |---|---|---|---|---|
 | SC-01 | 3.3 | TXT encoding detection (UTF-16, legacy code pages) with ambiguity prompt | Core done 2026-10-11 (`detect_text_encoding`, `import_file_with_encoding`, tests, fixtures); app-side prompt not built, so the row stays open until it is | v1.0 |
 | SC-02 | 3.3 | Manual "re-flow" for poorly formatted text | No code | v1.1 |
-| SC-03 | 3.4 | Tell the user a DOCX has unresolved tracked changes | Flag stored as `source_type = "docx:tracked-changes"`; nothing reads it | v1.0 |
+| SC-03 | 3.4 | Tell the user a DOCX has unresolved tracked changes | Rust half done 2026-10-11: real `Metadata.tracked_changes` field + FFI `get_item_metadata`; **no UI reads it yet** (open until the notice ships) | v1.0 |
 | SC-04 | 3.1, 3.2, 3.4, 3.6 | Extract embedded images; optional inline retention; per-user preference | `Block::Image` exists; no parser emits it | v1.1 |
 | SC-05 | 3.2 | Chapter structure from NCX / EPUB 3 `nav` | Only XHTML headings are used | v1.1 |
-| SC-06 | 3.6, 7 | Byline, publish date, retrieved date, canonical URL for web items; `import_date`, `language` | `gist-web` sets `author: None`, `import_date: None`; no parser sets `language` | v1.0 |
+| SC-06 | 3.6, 7 | Byline, publish date, retrieved date, canonical URL for web items; `import_date`, `language` | Rust half done 2026-10-11: web captures byline, `published_date`, `retrieved_date`, `canonical_url`, `<html lang>`; all importers stamp `import_date`; epub sets `language` from `dc:language` (txt/docx/pdf: `None`); **no UI shows them yet**, and the library list does not carry them (open) | v1.0 |
 | SC-07 | 3.6, 8.5 | Share-sheet / browser-extension "Send to GIST"; drag-and-drop and Services-menu import | No `onDrop`/Services code; paste-URL and file picker only | v1.1 |
 | SC-08 | 3.5 | OCR deskew and contrast normalisation | `prepare_image` is greyscale + resize + PNG only; `imageproc`/`rayon` work listed as "remaining M3" was not done | v1.1 |
 | SC-09 | 7, 3.5 | ~~`ocrConfidence[]` in the document model~~ | **Closed 2026-10-09:** dropped from the spec; future capability, unplanned | Closed |
