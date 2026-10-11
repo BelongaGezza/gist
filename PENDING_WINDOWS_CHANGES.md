@@ -93,3 +93,9 @@ This entry is **not** deleted, because its ask was a *visual* confirmation and p
 **Reason:** keep the Windows decoder tolerant and queue the SC-03/SC-06 UI.
 **Related commit/PR:** branch worktree-agent-a9db5a49d682ea802.
 **Action:** on Windows add a `FlowDocumentDecoderTests` case decoding a document whose `metadata` includes the new keys (assert no throw); delete this entry once verified.
+
+## Pending Windows Change — 2026-10-11 (SC-01 encoding prompt, SC-03 notice)
+**File:** apps/windows/** (C# / XAML)
+**Change required:** (1) On `.txt` import, call the FFI `detect_text_encoding`; if `uncertain` or `lossy`, show a picker (guess + curated list) and import via `import_file_with_encoding`; cancel imports nothing; handle `GistError.UnsupportedTextEncoding` as a typed case. (2) After a DOCX import, read `get_item_metadata`; if `tracked_changes`, show a non-blocking notice. macOS reference: `apps/apple/Shared/ImportMetadataViews.swift`, `CoreClient.swift`.
+**Reason:** spec §12 SC-01 and SC-03 stay open until Windows ships these. Not buildable or testable from macOS.
+**Action:** implement on Windows, verify, delete this entry.
