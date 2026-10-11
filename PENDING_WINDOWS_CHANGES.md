@@ -81,3 +81,9 @@ This entry is **not** deleted, because its ask was a *visual* confirmation and p
 **Reason:** added from a macOS session so Apple could finish adopting the FFI pacing session without keeping a Swift copy of the pacing table. `Config` gained a `#[serde(default)]` field (old JSON still decodes; `start_rsvp`'s JSON gains one key, which C#/Swift decoders ignore).
 **Related commit/PR:** branch `feat/apple-rsvp-ffi-adoption`.
 **Action:** regenerate bindings, `dotnet build`/test on Windows; confirm the `windows-build` CI leg is green on the PR.
+
+## Pending Windows Change — 2026-10-11
+**File:** `apps/windows/**` library row view-model / C# FFI wrapper
+**Change required:** Surface `FfiLibraryItem.word_count` and `estimate_reading_seconds(word_count, wpm)` (SC-15, ADR-030) as "N words, ~M min" on library rows; the generated C# bindings need regenerating.
+**Reason:** SC-15; Rust side done, no UI yet.
+**Action:** Implement and build on Windows.

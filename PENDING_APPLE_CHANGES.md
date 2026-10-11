@@ -25,3 +25,9 @@ this file when it contains entries.
 **Reason:** blocks `LibraryFiltering`/`LibrarySelection`/sort and `ThemeManager` suites from ever running in this kind of session, since XCTest runs suites in sequence and never reaches them. Also leaves a few orphaned, uniquely-UUID-suffixed test Keychain items behind when a hung run is killed instead of completing tearDown (harmless — isolated from the real production key by the existing test seam — but `security dump-keychain | grep 'com.gist.macos.encryption-at-rest.TEST-'` found 4 after this session's two interrupted runs).
 **Action:** when running the full suite unattended, expect to need a human present to click through a Keychain prompt the first time (or run interactively in Xcode once to pre-authorize). Periodically clean up stray `...TEST-<uuid>` Keychain items. No code action needed.
 
+
+## Pending Apple Change — 2026-10-11 — SC-15 word count / reading time
+**File:** `apps/apple/Shared/LibraryView.swift`, `LibraryRowContent`, `CoreClient.swift` (`LibraryItemVM`)
+**Change required:** After `./tools/gen-bindings.sh`, map the new `FfiLibraryItem.wordCount` (UInt32) into `LibraryItemVM` and show "N words · ~M min" on each row, using `estimateReadingSeconds(wordCount:wpm:)` with the user's RSVP WPM setting. Optionally add a word-count sort key. Schema is now v8 (ADR-030).
+**Reason:** SC-15; Rust side is complete.
+**Action:** Edit on macOS, add a `CoreClient` round-trip test, `xcodebuild test`.

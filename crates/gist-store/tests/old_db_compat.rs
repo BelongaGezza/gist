@@ -81,10 +81,22 @@ fn old_v5_library_opens_reads_and_searches() {
     let (_dir, db, storage) = fixture_copy("library_v5_rusqlite031.db");
     let store = Store::open(&db, &storage).expect("an existing v5 library must still open");
 
-    // Two versions behind current (v6 added the ADR-003 `annotations` table, v7 ADR-021 `last_opened_at`)
+    // Two versions behind current (v6 added the ADR-003 `annotations` table, v7 ADR-021 `last_opened_at`, v8 ADR-030 `word_count`)
     // — migrates forward cleanly, and in particular the version-ceiling
     // check must not trip.
-    assert_eq!(user_version(&db), 7);
+    assert_eq!(user_version(&db), 8);
+    // v8 backfill: word_count equals the number of indexed word tokens.
+    for it in store.list_items(0, 100).unwrap() {
+        let w: i64 = Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM tokens WHERE item_id = ?1",
+                [&it.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(i64::from(it.word_count), w, "{:?}", it.title);
+    }
 
     assert_eq!(
         titles(&store),
@@ -283,14 +295,14 @@ fn removing_an_old_row_still_cascades_and_clears_the_old_fts_entries() {
 // ── fixture B: a v3-era library, so the migrations themselves are exercised ──
 
 #[test]
-fn old_v3_library_migrates_forward_to_v7() {
+fn old_v3_library_migrates_forward_to_v8() {
     let (_dir, db, storage) = fixture_copy("library_v3_rusqlite031.db");
     assert_eq!(user_version(&db), 3, "fixture must start at v3");
 
     let store = Store::open(&db, &storage).expect("a v3 library must migrate, not fail");
     assert_eq!(
         user_version(&db),
-        7,
+        8,
         "must have migrated to the current version"
     );
 
@@ -342,7 +354,7 @@ fn old_v3_library_migrates_forward_to_v7() {
     // Re-opening an already-migrated file is a no-op, not a second migration.
     drop(store);
     let store = Store::open(&db, &storage).unwrap();
-    assert_eq!(user_version(&db), 7);
+    assert_eq!(user_version(&db), 8);
     assert_eq!(store.list_items(0, 10).unwrap().len(), 1);
 }
 
