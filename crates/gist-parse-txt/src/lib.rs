@@ -81,6 +81,10 @@ pub fn parse(bytes: &[u8], stem: &str, limits: &ParseLimits) -> Result<Document,
         import_date: None,
         language: None,
         word_count: 0, // Document::new recomputes this
+        tracked_changes: false,
+        published_date: None,
+        retrieved_date: None,
+        canonical_url: None,
     };
 
     Ok(Document::new(metadata, vec![section]))

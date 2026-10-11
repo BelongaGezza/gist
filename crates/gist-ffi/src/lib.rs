@@ -313,6 +313,48 @@ pub struct FfiCollection {
     pub created_at: i64,
 }
 
+/// IR-level document metadata (SC-03/SC-06). Additive record: read via
+/// [`GistCore::get_item_metadata`]; the same fields are also present in
+/// `get_document_json`'s `metadata` object.
+#[derive(uniffi::Record)]
+pub struct FfiDocumentMetadata {
+    pub title: String,
+    pub author: Option<String>,
+    pub source_type: String,
+    /// DOCX has unresolved tracked changes (SC-03).
+    pub tracked_changes: bool,
+    /// RFC 3339 UTC; `None` for items imported before SC-06.
+    pub import_date: Option<String>,
+    pub language: Option<String>,
+    /// Web: `YYYY-MM-DD`.
+    pub published_date: Option<String>,
+    /// Web: RFC 3339 UTC fetch time.
+    pub retrieved_date: Option<String>,
+    pub canonical_url: Option<String>,
+}
+
+impl From<gist_model::Metadata> for FfiDocumentMetadata {
+    fn from(m: gist_model::Metadata) -> Self {
+        // Pre-SC-03 rows used `source_type = "docx:tracked-changes"`.
+        let legacy_tracked = m.source_type == "docx:tracked-changes";
+        FfiDocumentMetadata {
+            title: m.title,
+            author: m.author,
+            source_type: if legacy_tracked {
+                "docx".to_string()
+            } else {
+                m.source_type
+            },
+            tracked_changes: m.tracked_changes || legacy_tracked,
+            import_date: m.import_date,
+            language: m.language,
+            published_date: m.published_date,
+            retrieved_date: m.retrieved_date,
+            canonical_url: m.canonical_url,
+        }
+    }
+}
+
 // ── Annotations (ADR-003) ────────────────────────────────────────────────────
 
 /// Mirrors `gist_core::AnnotationKind` (re-exported from `gist-model`) as a
@@ -1332,6 +1374,18 @@ impl GistCore {
         ffi_catch!({ self.inner.get_document(&item_id).map_err(GistError::from) })
     }
 
+    /// IR-level metadata for one item: tracked-changes flag, byline, import /
+    /// publish / retrieved dates, canonical URL, language (SC-03/SC-06).
+    /// Reads the IR blob, so call it for an opened item, not per library row.
+    pub fn get_item_metadata(&self, item_id: String) -> Result<FfiDocumentMetadata, GistError> {
+        ffi_catch!({
+            self.inner
+                .get_item_metadata(&item_id)
+                .map(FfiDocumentMetadata::from)
+                .map_err(GistError::from)
+        })
+    }
+
     /// Remove one or more items from the library (single-item context menu
     /// or bulk multi-select both go through this one call). Deletes the DB
     /// rows transactionally first, then best-effort cleans up the internal
@@ -1869,6 +1923,40 @@ mod tests {
             "expected a real read of corrupted content to surface \
              GistError::ChecksumMismatch, got {read_result:?}"
         );
+    }
+
+    #[test]
+    fn get_item_metadata_exposes_import_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = GistCore::new(
+            dir.path().join("test.db").to_string_lossy().into_owned(),
+            storage.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let txt = dir.path().join("a.txt");
+        std::fs::write(&txt, b"plain text").unwrap();
+        let id = core
+            .import_file(txt.to_string_lossy().into_owned())
+            .unwrap();
+        let m = core.get_item_metadata(id).unwrap();
+        assert!(!m.tracked_changes);
+        assert_eq!(m.source_type, "txt");
+        assert!(m.import_date.is_some());
+        assert!(matches!(
+            core.get_item_metadata("missing".into()),
+            Err(GistError::Core(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_tracked_changes_source_type_maps_to_flag() {
+        let mut m = gist_model::Metadata::minimal("old");
+        m.source_type = "docx:tracked-changes".into();
+        let f = FfiDocumentMetadata::from(m);
+        assert!(f.tracked_changes);
+        assert_eq!(f.source_type, "docx");
     }
 
     #[test]

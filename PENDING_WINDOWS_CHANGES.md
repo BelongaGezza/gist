@@ -81,3 +81,10 @@ This entry is **not** deleted, because its ask was a *visual* confirmation and p
 **Reason:** added from a macOS session so Apple could finish adopting the FFI pacing session without keeping a Swift copy of the pacing table. `Config` gained a `#[serde(default)]` field (old JSON still decodes; `start_rsvp`'s JSON gains one key, which C#/Swift decoders ignore).
 **Related commit/PR:** branch `feat/apple-rsvp-ffi-adoption`.
 **Action:** regenerate bindings, `dotnet build`/test on Windows; confirm the `windows-build` CI leg is green on the PR.
+
+## Pending Windows Change — 2026-10-11 (SC-03 / SC-06: IR `Metadata` gains fields; new FFI `get_item_metadata`)
+**File:** `apps/windows/GIST.Core/Flow/FlowDocumentDecoder.cs` (must tolerate), `apps/windows/GIST.Core/Generated/` (gitignored); optional UI. **No Windows code was edited.**
+**Change required:** none for correctness. `Document.metadata` JSON (in `get_document_json`) gains additive keys `tracked_changes` (bool), `published_date`, `retrieved_date`, `canonical_url`, and `import_date`/`language` are now populated for new imports; DOCX `source_type` is always `docx`. A decoder that ignores unknown keys is unaffected. Optional: regenerate bindings for `GistCore.get_item_metadata` / `FfiDocumentMetadata` and show a tracked-changes notice for DOCX (spec §3.4) and web byline/dates.
+**Reason:** keep the Windows decoder tolerant and queue the SC-03/SC-06 UI.
+**Related commit/PR:** branch worktree-agent-a9db5a49d682ea802.
+**Action:** on Windows add a `FlowDocumentDecoderTests` case decoding a document whose `metadata` includes the new keys (assert no throw); delete this entry once verified.

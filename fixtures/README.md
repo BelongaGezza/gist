@@ -81,6 +81,7 @@ Network fetching is tested via integration/fuzz separately.
 | `minimal_body.html` | Bare `<html><body><p>Hello world</p></body></html>`. | Extraction returns "Hello world". |
 | `no_article.html` | Page with `<main>` element but no `<article>`. | Extraction falls back to `<main>` content. |
 | `table_article.html` | Synthetic (M6 R3, 2026-10-03). `<article>` with `h1`, paragraph, the same 3x4 table as the epub/docx fixtures, paragraph. | `extract_content` returns 4 blocks incl. one `Block::Table` (header row, empty cell preserved). Before M6 R3 each cell became a separate paragraph. |
+| `article_with_metadata.html` | Synthetic (SC-06, 2026-10-11). `<html lang="en-GB">`, `meta author`, `article:published_time`, `link rel=canonical`; invented names/URLs on `example.org`. | author "Alex Example", published `2024-03-09`, canonical URL, language `en-GB`. |
 | `merged_cells_article.html` | Synthetic (M7 R7, 2026-10-05). `<article>` with the same `colspan`/`rowspan` table as the epub fixture. | Same grid and 3 spans as the epub fixture. |
 | `adversarial/empty_body.html` | `<html><body></body></html>` — no content nodes. | Returns empty string or empty block list; must not panic. |
 | `adversarial/script_heavy.html` | Many `<script>` and `<style>` tags in head and body, interspersed with article content. | All `<script>` and `<style>` elements stripped; prose content preserved. |

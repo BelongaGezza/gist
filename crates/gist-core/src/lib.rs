@@ -1,5 +1,16 @@
 use std::path::{Path, PathBuf};
 
+/// Current UTC time as an RFC 3339 string, for `Metadata::import_date`
+/// (SC-06). A clock before the epoch degrades to the epoch, never panics.
+fn now_rfc3339() -> String {
+    gist_model::metadata_util::format_rfc3339_utc(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+}
+
 /// Lower-cased file extension with no leading dot (empty string if none).
 /// Shared by every import path that needs to name a sandboxed copy of the
 /// original file (ADR-006).
@@ -965,6 +976,7 @@ impl Core {
         // Stamp source path (informational) and the sandboxed copy path
         // (authoritative for any future file-based operation, e.g. removal).
         doc.metadata.source_ref = Some(path.to_string_lossy().into_owned());
+        doc.metadata.import_date = Some(now_rfc3339());
         doc.metadata.source_copy_ref = Some(copy_path);
 
         // Rebuild token stream (Document::new already did this, but we
@@ -1074,6 +1086,17 @@ impl Core {
     /// structure rather than RSVP's flat token stream — e.g. the flow-view
     /// prototypes (M2, Q8). Read-only: doesn't touch progress or rebuild the
     /// token stream. Mirrors `start_rsvp`'s "look up, then serialise" shape.
+    /// SC-03/SC-06: the IR-level metadata of one item (tracked-changes flag,
+    /// byline, dates, canonical URL, language). Read from the IR blob, not
+    /// SQL, so it costs a document read; call per opened item, not per row.
+    pub fn get_item_metadata(&self, item_id: &str) -> Result<gist_model::Metadata, CoreError> {
+        let doc = self
+            .store
+            .get_item(item_id)?
+            .ok_or_else(|| CoreError::NotFound(item_id.to_owned()))?;
+        Ok(doc.metadata)
+    }
+
     pub fn get_document(&self, item_id: &str) -> Result<String, CoreError> {
         let doc = self
             .store
@@ -1203,6 +1226,7 @@ impl Core {
         // Stamp source path (informational) and the sandboxed copy path
         // (authoritative for any future file-based operation, e.g. removal).
         doc.metadata.source_ref = Some(path.to_string_lossy().into_owned());
+        doc.metadata.import_date = Some(now_rfc3339());
         doc.metadata.source_copy_ref = Some(copy_path);
         doc.token_stream = doc.build_token_stream();
 
@@ -1251,6 +1275,7 @@ impl Core {
         // but stamp explicitly here too so the pipeline step matches
         // import_file's pattern and doesn't rely on gist-web's internals).
         doc.metadata.source_ref = Some(url.to_owned());
+        doc.metadata.import_date = Some(now_rfc3339());
         doc.token_stream = doc.build_token_stream();
 
         let id = doc.id.clone();
@@ -1942,6 +1967,7 @@ impl Core {
                 .join(", "),
         );
         metadata.source_copy_ref = Some(copy_path);
+        metadata.import_date = Some(now_rfc3339());
 
         let doc = gist_model::Document::new(metadata, sections);
         let id = doc.id.clone();
@@ -2486,6 +2512,47 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, tagged_id);
         assert!(items.iter().all(|i| i.id != untagged_id));
+    }
+
+    /// SC-03/SC-06: imports stamp `import_date`; a DOCX with revision markup
+    /// surfaces `tracked_changes` through `get_item_metadata` (the IR blob
+    /// round trip), while `source_type` stays plain `docx`.
+    #[test]
+    fn import_stamps_date_and_surfaces_tracked_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&dir.path().join("test.db"), &storage).unwrap();
+
+        let txt = dir.path().join("a.txt");
+        std::fs::write(&txt, b"plain text").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+        let m = core.get_item_metadata(&id).unwrap();
+        let d = m.import_date.expect("import_date stamped");
+        assert!(
+            d.len() == 20 && d.ends_with('Z') && d.starts_with("20"),
+            "{d}"
+        );
+        assert!(!m.tracked_changes);
+
+        // (The synthetic tracked-changes fixture lacks styles.xml, which the
+        // DOCX parser requires, so persist a parsed-shape document directly.)
+        let mut meta = gist_model::Metadata::minimal("rev");
+        meta.source_type = "docx".into();
+        meta.tracked_changes = true;
+        meta.published_date = Some("2024-01-02".into());
+        let doc = Document::new(meta, vec![]);
+        let id = doc.id.clone();
+        core.store.insert_item(&doc).unwrap();
+        let m = core.get_item_metadata(&id).unwrap();
+        assert!(m.tracked_changes);
+        assert_eq!(m.source_type, "docx");
+        assert_eq!(m.published_date.as_deref(), Some("2024-01-02"));
+
+        assert!(matches!(
+            core.get_item_metadata("no-such-id"),
+            Err(CoreError::NotFound(_))
+        ));
     }
 
     /// ADR-021: a real import reports source type, is never-opened until a
