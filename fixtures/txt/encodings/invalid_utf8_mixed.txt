@@ -1,0 +1,3 @@
+Valid start, then stray bytes ÿşı in the middle, then more text.
+
+Second paragraph € follows.
