@@ -105,7 +105,13 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
     let html = String::from_utf8_lossy(&body_bytes);
 
     // 7-8. Extract content and build Document.
-    build_document_limited(&html, raw_url, limits)
+    let retrieved = gist_model::metadata_util::format_rfc3339_utc(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    );
+    build_document_at(&html, raw_url, limits, Some(&retrieved))
 }
 
 // ── Agent builder ─────────────────────────────────────────────────────────────
@@ -351,12 +357,35 @@ pub(crate) fn build_document(
 
 /// As [`build_document`], with the full `ParseLimits` (nesting depth and the
 /// table row/column caps).
+#[cfg(test)]
 pub(crate) fn build_document_limited(
     html: &str,
     url: &str,
     limits: &ParseLimits,
 ) -> Result<Document, ParseError> {
-    let (title, blocks) = extract_content_limited(html, limits)?;
+    build_document_at(html, url, limits, None)
+}
+
+/// As [`build_document_limited`], additionally stamping `retrieved_at` (an
+/// RFC 3339 UTC timestamp) and the page-declared metadata (SC-06): byline,
+/// publish date, canonical URL and language. A publish date later than the
+/// retrieval date (plus a day of timezone slack) is discarded.
+pub(crate) fn build_document_at(
+    html: &str,
+    url: &str,
+    limits: &ParseLimits,
+    retrieved_at: Option<&str>,
+) -> Result<Document, ParseError> {
+    let parsed = Html::parse_document(html);
+    let (title, blocks) = extract_from_parsed(&parsed, limits)?;
+    let page = extract_page_meta(&parsed);
+    let published_date = page.published_date.filter(|p| match retrieved_at {
+        // YYYY-MM-DD compares lexicographically; allow one day of slack.
+        Some(r) => r
+            .get(..10)
+            .is_none_or(|today| p.as_str() <= next_day_bound(today).as_str()),
+        None => true,
+    });
 
     let section = Section {
         id: "s0".to_string(),
@@ -366,13 +395,17 @@ pub(crate) fn build_document_limited(
 
     let metadata = Metadata {
         title,
-        author: None,
+        author: page.byline,
         source_type: "web".to_string(),
         source_ref: Some(url.to_string()),
         source_copy_ref: None,
         import_date: None,
-        language: None,
+        language: page.language,
         word_count: 0, // Document::new recomputes this
+        tracked_changes: false,
+        published_date,
+        retrieved_date: retrieved_at.map(str::to_owned),
+        canonical_url: page.canonical_url,
     };
 
     Ok(Document::new(metadata, vec![section]))
@@ -400,7 +433,181 @@ pub fn extract_content_limited(
     limits: &ParseLimits,
 ) -> Result<(String, Vec<Block>), ParseError> {
     let document = Html::parse_document(html);
+    extract_from_parsed(&document, limits)
+}
 
+/// Page-declared metadata (SC-06), every value already sanitised/bounded.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PageMeta {
+    pub byline: Option<String>,
+    pub published_date: Option<String>,
+    pub canonical_url: Option<String>,
+    pub language: Option<String>,
+}
+
+/// Cap on `<meta>` elements inspected, so a hostile page with millions of
+/// them cannot make this pass expensive.
+const MAX_META_ELEMENTS: usize = 500;
+
+/// Add one calendar day to a validated `YYYY-MM-DD` string (used as timezone
+/// slack when rejecting far-future publish dates). `None` on malformed input.
+fn next_day_bound(date: &str) -> String {
+    let b = date.as_bytes();
+    let parse = |r: std::ops::Range<usize>| date.get(r).and_then(|s| s.parse::<u32>().ok());
+    let (Some(mut y), Some(mut m), Some(mut d)) = (parse(0..4), parse(5..7), parse(8..10)) else {
+        return date.to_owned();
+    };
+    if b.len() < 10 {
+        return date.to_owned();
+    }
+    let leap = (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400);
+    let dim = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    d += 1;
+    if d > dim {
+        d = 1;
+        m += 1;
+        if m > 12 {
+            m = 1;
+            y += 1;
+        }
+    }
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Extract byline, publish date, canonical URL and language from a parsed
+/// page. Never fails: anything missing or malformed is simply `None`.
+pub(crate) fn extract_page_meta(document: &Html) -> PageMeta {
+    use gist_model::metadata_util::{
+        normalize_language_tag, normalize_published_date, sanitize_meta_text, MAX_META_TEXT_CHARS,
+        MAX_META_URL_BYTES,
+    };
+
+    // (lowercased key, content) for the first MAX_META_ELEMENTS <meta>s.
+    let mut metas: Vec<(String, &str)> = Vec::new();
+    if let Ok(sel) = Selector::parse("meta") {
+        for el in document.select(&sel).take(MAX_META_ELEMENTS) {
+            let v = el.value();
+            let key = v
+                .attr("name")
+                .or_else(|| v.attr("property"))
+                .or_else(|| v.attr("itemprop"))
+                .or_else(|| v.attr("http-equiv"));
+            if let (Some(k), Some(c)) = (key, v.attr("content")) {
+                metas.push((k.trim().to_ascii_lowercase(), c));
+            }
+        }
+    }
+    let first = |keys: &[&str], f: &dyn Fn(&str) -> Option<String>| -> Option<String> {
+        keys.iter().find_map(|k| {
+            metas
+                .iter()
+                .filter(|(mk, _)| mk == k)
+                .find_map(|(_, c)| f(c))
+        })
+    };
+
+    // Byline. `article:author` is frequently a profile URL, so skip URLs.
+    let not_url = |c: &str| {
+        let t = c.trim_start();
+        if t.starts_with("http://") || t.starts_with("https://") {
+            None
+        } else {
+            sanitize_meta_text(c, MAX_META_TEXT_CHARS)
+        }
+    };
+    let mut byline = first(
+        &[
+            "author",
+            "article:author",
+            "byl",
+            "byline",
+            "parsely-author",
+            "dc.creator",
+        ],
+        &not_url,
+    );
+    if byline.is_none() {
+        if let Ok(sel) = Selector::parse(r#"a[rel~="author"], [itemprop="author"]"#) {
+            byline = document.select(&sel).take(5).find_map(|el| {
+                // Bounded read: never materialise a huge text node.
+                let s: String = el.text().flat_map(str::chars).take(1000).collect();
+                sanitize_meta_text(&s, MAX_META_TEXT_CHARS)
+            });
+        }
+    }
+
+    // Publish date.
+    let mut published_date = first(
+        &[
+            "article:published_time",
+            "og:article:published_time",
+            "datepublished",
+            "date",
+            "pubdate",
+            "publishdate",
+            "dc.date",
+            "dc.date.issued",
+        ],
+        &normalize_published_date,
+    );
+    if published_date.is_none() {
+        if let Ok(sel) = Selector::parse("time[datetime]") {
+            published_date = document.select(&sel).take(20).find_map(|el| {
+                el.value()
+                    .attr("datetime")
+                    .and_then(normalize_published_date)
+            });
+        }
+    }
+
+    // Canonical URL: absolute http(s), no embedded credentials, bounded.
+    let canonical_url = Selector::parse(r#"link[rel~="canonical"]"#)
+        .ok()
+        .and_then(|sel| {
+            document.select(&sel).take(5).find_map(|el| {
+                let href = el.value().attr("href")?.trim();
+                if href.len() > MAX_META_URL_BYTES {
+                    return None;
+                }
+                let u = Url::parse(href).ok()?;
+                let ok = matches!(u.scheme(), "http" | "https")
+                    && u.host_str().is_some()
+                    && u.username().is_empty()
+                    && u.password().is_none();
+                (ok && u.as_str().len() <= MAX_META_URL_BYTES).then(|| u.as_str().to_owned())
+            })
+        });
+
+    // Language: <html lang>, then meta.
+    let language = document
+        .root_element()
+        .value()
+        .attr("lang")
+        .and_then(normalize_language_tag)
+        .or_else(|| {
+            first(
+                &["content-language", "language", "og:locale"],
+                &normalize_language_tag,
+            )
+        });
+
+    PageMeta {
+        byline,
+        published_date,
+        canonical_url,
+        language,
+    }
+}
+
+fn extract_from_parsed(
+    document: &Html,
+    limits: &ParseLimits,
+) -> Result<(String, Vec<Block>), ParseError> {
     // Title from <title>.
     let title = Selector::parse("title")
         .ok()
@@ -1142,5 +1349,179 @@ mod tests {
             .collect::<Vec<_>>()
         );
         assert!(spans.iter().all(|s| s.rowspan <= 2));
+    }
+
+    // ── SC-06: byline / dates / canonical / language ─────────────────────
+
+    fn doc_at(html: &str, retrieved: Option<&str>) -> Document {
+        build_document_at(
+            html,
+            "https://example.com/x",
+            &ParseLimits::default(),
+            retrieved,
+        )
+        .unwrap()
+    }
+
+    const RICH: &str = r#"<!doctype html><html lang="en_GB"><head><title>T</title>
+        <meta name="author" content="  Jane   Q.
+         Public ">
+        <meta property="article:published_time" content="2024-05-06T07:08:09+02:00">
+        <link rel="canonical" href="https://example.com/canonical?a=1">
+        </head><body><article><p>Body text here.</p></article></body></html>"#;
+
+    #[test]
+    fn captures_byline_published_canonical_language_retrieved() {
+        let d = doc_at(RICH, Some("2026-10-11T01:02:03Z"));
+        let m = &d.metadata;
+        assert_eq!(m.author.as_deref(), Some("Jane Q. Public"));
+        assert_eq!(m.published_date.as_deref(), Some("2024-05-06"));
+        assert_eq!(
+            m.canonical_url.as_deref(),
+            Some("https://example.com/canonical?a=1")
+        );
+        assert_eq!(m.language.as_deref(), Some("en-GB"));
+        assert_eq!(m.retrieved_date.as_deref(), Some("2026-10-11T01:02:03Z"));
+        assert_eq!(m.source_type, "web");
+    }
+
+    #[test]
+    fn fixture_article_with_metadata() {
+        let html = include_str!("../../../fixtures/web/article_with_metadata.html");
+        let m = doc_at(html, Some("2026-10-11T00:00:00Z")).metadata;
+        assert_eq!(m.author.as_deref(), Some("Alex Example"));
+        assert_eq!(m.published_date.as_deref(), Some("2024-03-09"));
+        assert_eq!(
+            m.canonical_url.as_deref(),
+            Some("https://example.org/articles/synthetic")
+        );
+        assert_eq!(m.language.as_deref(), Some("en-GB"));
+    }
+
+    #[test]
+    fn page_without_metadata_leaves_everything_none() {
+        let d = doc_at(
+            "<html><body><p>hi</p></body></html>",
+            Some("2026-10-11T00:00:00Z"),
+        );
+        let m = &d.metadata;
+        assert_eq!(
+            (&m.author, &m.published_date, &m.canonical_url, &m.language),
+            (&None, &None, &None, &None)
+        );
+    }
+
+    #[test]
+    fn article_author_url_is_skipped_and_rel_author_used() {
+        let html = r#"<html><head><meta property="article:author" content="https://fb.com/jane"></head>
+            <body><a rel="author" href="/a">John Roe</a><p>x</p></body></html>"#;
+        assert_eq!(
+            doc_at(html, None).metadata.author.as_deref(),
+            Some("John Roe")
+        );
+    }
+
+    #[test]
+    fn time_element_is_a_fallback_date() {
+        let html = r#"<html><body><time datetime="2020-02-29">leap</time><p>x</p></body></html>"#;
+        assert_eq!(
+            doc_at(html, None).metadata.published_date.as_deref(),
+            Some("2020-02-29")
+        );
+    }
+
+    #[test]
+    fn meta_content_language_fallback() {
+        let html = r#"<html><head><meta http-equiv="Content-Language" content="fr-CA"></head><body><p>x</p></body></html>"#;
+        assert_eq!(
+            doc_at(html, None).metadata.language.as_deref(),
+            Some("fr-CA")
+        );
+    }
+
+    #[test]
+    fn far_future_publish_date_is_dropped_but_tomorrow_is_kept() {
+        let mk = |d: &str| {
+            format!(
+                r#"<html><head><meta name="date" content="{d}"></head><body><p>x</p></body></html>"#
+            )
+        };
+        let r = Some("2026-10-11T23:00:00Z");
+        assert_eq!(doc_at(&mk("9999-12-31"), r).metadata.published_date, None);
+        assert_eq!(doc_at(&mk("2026-10-13"), r).metadata.published_date, None);
+        assert_eq!(
+            doc_at(&mk("2026-10-12"), r)
+                .metadata
+                .published_date
+                .as_deref(),
+            Some("2026-10-12")
+        );
+        // Month/year rollover of the slack day.
+        assert_eq!(
+            doc_at(&mk("2027-01-01"), Some("2026-12-31T10:00:00Z"))
+                .metadata
+                .published_date
+                .as_deref(),
+            Some("2027-01-01")
+        );
+    }
+
+    #[test]
+    fn malformed_dates_and_hostile_values_are_rejected_or_bounded() {
+        for bad in [
+            "not a date",
+            "2024-13-45",
+            "2023-02-29",
+            "",
+            "0000-00-00",
+            "<script>",
+        ] {
+            let html = format!(
+                r#"<html><head><meta name="date" content="{bad}"></head><body><p>x</p></body></html>"#
+            );
+            assert_eq!(doc_at(&html, None).metadata.published_date, None, "{bad}");
+        }
+        // Huge byline / language / canonical.
+        let big = "A".repeat(2_000_000);
+        let html = format!(
+            r#"<html lang="{big}"><head><meta name="author" content="{big}"><link rel="canonical" href="https://e.com/{big}"></head><body><p>x</p></body></html>"#
+        );
+        let m = doc_at(&html, None).metadata;
+        assert_eq!(m.author.as_deref().map(|a| a.chars().count()), Some(200));
+        assert_eq!(m.language, None);
+        assert_eq!(m.canonical_url, None);
+    }
+
+    #[test]
+    fn canonical_rejects_non_http_credentials_and_relative() {
+        for href in [
+            "javascript:alert(1)",
+            "ftp://example.com/a",
+            "/relative/path",
+            "https://user:pw@example.com/a",
+            "file:///etc/passwd",
+        ] {
+            let html = format!(
+                r#"<html><head><link rel="canonical" href="{href}"></head><body><p>x</p></body></html>"#
+            );
+            assert_eq!(doc_at(&html, None).metadata.canonical_url, None, "{href}");
+        }
+    }
+
+    #[test]
+    fn many_meta_elements_are_bounded() {
+        // The author meta sits past the 500-element cap, so it is ignored.
+        let mut html = String::from("<html><head>");
+        for _ in 0..MAX_META_ELEMENTS {
+            html.push_str(r#"<meta name="x" content="y">"#);
+        }
+        html.push_str(r#"<meta name="author" content="Late"></head><body><p>x</p></body></html>"#);
+        assert_eq!(doc_at(&html, None).metadata.author, None);
+    }
+
+    #[test]
+    fn build_document_without_clock_has_no_retrieved_date() {
+        assert_eq!(doc_at(RICH, None).metadata.retrieved_date, None);
+        // ...and keeps a future-dated publish date since there's nothing to compare to.
     }
 }

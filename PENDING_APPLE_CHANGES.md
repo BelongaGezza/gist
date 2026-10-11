@@ -38,3 +38,10 @@ this file when it contains entries.
 **Change required:** After `./tools/gen-bindings.sh`, map the new `FfiLibraryItem.wordCount` (UInt32) into `LibraryItemVM` and show "N words · ~M min" on each row, using `estimateReadingSeconds(wordCount:wpm:)` with the user's RSVP WPM setting. Optionally add a word-count sort key. Schema is now v8 (ADR-030).
 **Reason:** SC-15; Rust side is complete.
 **Action:** Edit on macOS, add a `CoreClient` round-trip test, `xcodebuild test`.
+## Pending Apple Change — 2026-10-11 (SC-03 / SC-06: IR `Metadata` gains fields; new FFI `getItemMetadata`)
+**File:** `apps/apple/Shared/CoreClient.swift`, `LibraryView.swift` (and wherever import results are shown); `apps/apple/Generated/gist_ffi.swift` is gitignored — regenerate with `./tools/gen-bindings.sh`.
+**Change required:** (1) Regenerate bindings; new `GistCore.getItemMetadata(itemId:) -> FfiDocumentMetadata` (title, author, sourceType, `trackedChanges`, importDate, language, publishedDate, retrievedDate, canonicalUrl). (2) SC-03 UI: after a DOCX import (or when opening one) call it and, if `trackedChanges`, show the "unresolved tracked changes" notice (spec §3.4). (3) SC-06 UI (optional): show byline/published/retrieved/canonical for web items in an info pane. `source_type` for DOCX is now always `docx` (the `docx:tracked-changes` value is no longer written; `FfiDocumentMetadata` maps legacy rows to `docx` + `trackedChanges=true`). `get_document_json`'s `metadata` object also carries the new keys; Swift decoders ignore unknown keys.
+**Reason:** Rust-side fields exist and are tested; nothing reads them yet, so SC-03 and SC-06 stay open in spec §12.
+**Related commit/PR:** branch worktree-agent-a9db5a49d682ea802 (SC-03/SC-06).
+**Action:** apply on macOS, add a `CoreClient` test importing a DOCX with `<w:ins>` and asserting `trackedChanges`; delete this entry once done.
+
