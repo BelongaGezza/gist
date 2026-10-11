@@ -81,7 +81,7 @@ pub fn parse(
         &mut total_expanded,
     )?;
 
-    let mut metadata = gist_model::Metadata {
+    let metadata = gist_model::Metadata {
         title: stem.to_string(),
         author: None,
         source_type: "docx".to_string(),
@@ -90,6 +90,10 @@ pub fn parse(
         import_date: None,
         language: None,
         word_count: 0,
+        tracked_changes: has_tracked_changes,
+        published_date: None,
+        retrieved_date: None,
+        canonical_url: None,
     };
 
     // Package everything into one section
@@ -98,11 +102,6 @@ pub fn parse(
         heading: None,
         blocks,
     };
-
-    if has_tracked_changes {
-        // Store as a flag in source_type for now (M1); proper metadata field in M2
-        metadata.source_type = "docx:tracked-changes".to_string();
-    }
 
     let doc = gist_model::Document::new(metadata, vec![section]);
 
@@ -1333,5 +1332,31 @@ mod tests {
             parse(&docx_with_body(&long), "t", &limits),
             Err(ParseError::ResourceLimitExceeded { .. })
         ));
+    }
+
+    // ── SC-03: tracked-changes flag is a real Metadata field ─────────────
+
+    #[test]
+    fn insertion_sets_metadata_flag_and_keeps_source_type_docx() {
+        let body = r#"<w:p><w:ins w:id="1" w:author="x"><w:r><w:t>added</w:t></w:r></w:ins></w:p>"#;
+        let d = parse(&docx_with_body(body), "t", &ParseLimits::default()).unwrap();
+        assert!(d.metadata.tracked_changes);
+        assert_eq!(d.metadata.source_type, "docx");
+    }
+
+    #[test]
+    fn deletion_sets_flag() {
+        let body = r#"<w:p><w:del w:id="2"><w:r><w:delText>gone</w:delText></w:r></w:del><w:r><w:t>kept</w:t></w:r></w:p>"#;
+        let d = parse(&docx_with_body(body), "t", &ParseLimits::default()).unwrap();
+        assert!(d.metadata.tracked_changes);
+        assert_eq!(d.metadata.source_type, "docx");
+    }
+
+    #[test]
+    fn clean_document_has_no_flag() {
+        let body = r#"<w:p><w:r><w:t>plain</w:t></w:r></w:p>"#;
+        let d = parse(&docx_with_body(body), "t", &ParseLimits::default()).unwrap();
+        assert!(!d.metadata.tracked_changes);
+        assert_eq!(d.metadata.source_type, "docx");
     }
 }

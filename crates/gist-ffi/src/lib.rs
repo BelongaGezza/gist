@@ -69,8 +69,50 @@ pub enum GistError {
     /// Any other limit.
     #[error("this document exceeds GIST's import limits")]
     ResourceLimitOther,
+    /// The caller named a text encoding GIST does not recognise.
+    #[error("unsupported text encoding")]
+    UnsupportedTextEncoding,
     #[error("internal error")]
     InternalPanic,
+}
+
+/// How a text file's encoding was determined (mirrors
+/// `gist_core::EncodingSource`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiEncodingSource {
+    Bom,
+    Utf8,
+    Detected,
+    Override,
+}
+
+/// Detected (or overridden) text encoding for a plain-text file. A UI should
+/// offer the user an encoding choice when `uncertain` or `lossy` is true.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiTextEncodingInfo {
+    /// Canonical name, e.g. `"UTF-8"`, `"UTF-16LE"`, `"windows-1252"`; also
+    /// valid as the `encoding` argument of `import_file_with_encoding`.
+    pub name: String,
+    pub source: FfiEncodingSource,
+    pub uncertain: bool,
+    pub lossy: bool,
+}
+
+impl From<gist_core::EncodingInfo> for FfiTextEncodingInfo {
+    fn from(i: gist_core::EncodingInfo) -> Self {
+        use gist_core::EncodingSource as S;
+        FfiTextEncodingInfo {
+            name: i.name,
+            source: match i.source {
+                S::Bom => FfiEncodingSource::Bom,
+                S::Utf8 => FfiEncodingSource::Utf8,
+                S::Detected => FfiEncodingSource::Detected,
+                S::Override => FfiEncodingSource::Override,
+            },
+            uncertain: i.uncertain,
+            lossy: i.lossy,
+        }
+    }
 }
 
 /// Maps the importers' typed [`gist_model::LimitKind`] to the matching flat
@@ -95,6 +137,9 @@ impl From<gist_core::CoreError> for GistError {
             return limit_kind_to_error(kind);
         }
         match e {
+            gist_core::CoreError::Parse(gist_core::TxtParseError::UnknownEncoding) => {
+                GistError::UnsupportedTextEncoding
+            }
             gist_core::CoreError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
                 GistError::ChecksumMismatch { path }
             }
@@ -110,6 +155,7 @@ impl From<gist_core::ImportError> for GistError {
             gist_core::ImportError::PdfEncrypted => GistError::PdfEncrypted,
             gist_core::ImportError::PdfNoTextLayer => GistError::PdfNoTextLayer,
             gist_core::ImportError::PdfUnavailable(_) => GistError::PdfUnavailable,
+            gist_core::ImportError::UnknownEncoding => GistError::UnsupportedTextEncoding,
             gist_core::ImportError::ResourceLimitExceeded { kind, .. } => limit_kind_to_error(kind),
             gist_core::ImportError::Store(gist_store::StoreError::ChecksumMismatch { path }) => {
                 GistError::ChecksumMismatch { path }
@@ -288,6 +334,8 @@ pub struct FfiLibraryItem {
     /// Derived RSVP progress in `0.0..=1.0` (ADR-021). Flow-view-only items
     /// report 0.0 — accepted limitation.
     pub progress_fraction: f64,
+    /// Word count (ADR-030, SC-15); see `gist_store::LibraryItem::word_count`.
+    pub word_count: u32,
 }
 
 impl From<gist_store::LibraryItem> for FfiLibraryItem {
@@ -302,6 +350,7 @@ impl From<gist_store::LibraryItem> for FfiLibraryItem {
             source_type: i.source_type,
             last_opened_at: i.last_opened_at,
             progress_fraction: i.progress_fraction,
+            word_count: i.word_count,
         }
     }
 }
@@ -311,6 +360,48 @@ pub struct FfiCollection {
     pub id: String,
     pub name: String,
     pub created_at: i64,
+}
+
+/// IR-level document metadata (SC-03/SC-06). Additive record: read via
+/// [`GistCore::get_item_metadata`]; the same fields are also present in
+/// `get_document_json`'s `metadata` object.
+#[derive(uniffi::Record)]
+pub struct FfiDocumentMetadata {
+    pub title: String,
+    pub author: Option<String>,
+    pub source_type: String,
+    /// DOCX has unresolved tracked changes (SC-03).
+    pub tracked_changes: bool,
+    /// RFC 3339 UTC; `None` for items imported before SC-06.
+    pub import_date: Option<String>,
+    pub language: Option<String>,
+    /// Web: `YYYY-MM-DD`.
+    pub published_date: Option<String>,
+    /// Web: RFC 3339 UTC fetch time.
+    pub retrieved_date: Option<String>,
+    pub canonical_url: Option<String>,
+}
+
+impl From<gist_model::Metadata> for FfiDocumentMetadata {
+    fn from(m: gist_model::Metadata) -> Self {
+        // Pre-SC-03 rows used `source_type = "docx:tracked-changes"`.
+        let legacy_tracked = m.source_type == "docx:tracked-changes";
+        FfiDocumentMetadata {
+            title: m.title,
+            author: m.author,
+            source_type: if legacy_tracked {
+                "docx".to_string()
+            } else {
+                m.source_type
+            },
+            tracked_changes: m.tracked_changes || legacy_tracked,
+            import_date: m.import_date,
+            language: m.language,
+            published_date: m.published_date,
+            retrieved_date: m.retrieved_date,
+            canonical_url: m.canonical_url,
+        }
+    }
 }
 
 // ── Annotations (ADR-003) ────────────────────────────────────────────────────
@@ -1120,6 +1211,13 @@ pub fn rsvp_orp_split(word: String) -> Result<FfiOrpSplit, GistError> {
     ffi_catch!({ Ok(FfiOrpSplit::of(&word)) })
 }
 
+/// Estimated reading time in whole seconds for `word_count` words at `wpm`
+/// (rounded up, `wpm` clamped to 100..=1000 like the RSVP engine). ADR-030.
+#[uniffi::export]
+pub fn estimate_reading_seconds(word_count: u32, wpm: u32) -> Result<u32, GistError> {
+    ffi_catch!({ Ok(gist_store::estimate_reading_seconds(word_count, wpm)) })
+}
+
 // ── GistCore object ──────────────────────────────────────────────────────────
 
 #[derive(uniffi::Object)]
@@ -1212,6 +1310,42 @@ impl GistCore {
         ffi_catch!({
             self.inner
                 .import_file(&PathBuf::from(path), &gist_core::NullObserver)
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Like `import_file`, but names the text encoding (WHATWG label such as
+    /// `"windows-1251"`) for plain-text files; `None` auto-detects. Ignored
+    /// for other formats. An unrecognised label is
+    /// `GistError::UnsupportedTextEncoding`.
+    pub fn import_file_with_encoding(
+        &self,
+        path: String,
+        encoding: Option<String>,
+    ) -> Result<String, GistError> {
+        ffi_catch!({
+            self.inner
+                .import_file_with_encoding(
+                    &PathBuf::from(path),
+                    &gist_core::NullObserver,
+                    encoding.as_deref(),
+                )
+                .map_err(GistError::from)
+        })
+    }
+
+    /// Report the encoding a plain-text file would be imported with (or the
+    /// named one) without importing it, so the UI can prompt when
+    /// `uncertain` or `lossy` (SC-01).
+    pub fn detect_text_encoding(
+        &self,
+        path: String,
+        encoding: Option<String>,
+    ) -> Result<FfiTextEncodingInfo, GistError> {
+        ffi_catch!({
+            self.inner
+                .detect_text_encoding(&PathBuf::from(path), encoding.as_deref())
+                .map(FfiTextEncodingInfo::from)
                 .map_err(GistError::from)
         })
     }
@@ -1330,6 +1464,18 @@ impl GistCore {
     /// than RSVP's flat token stream. Read-only.
     pub fn get_document_json(&self, item_id: String) -> Result<String, GistError> {
         ffi_catch!({ self.inner.get_document(&item_id).map_err(GistError::from) })
+    }
+
+    /// IR-level metadata for one item: tracked-changes flag, byline, import /
+    /// publish / retrieved dates, canonical URL, language (SC-03/SC-06).
+    /// Reads the IR blob, so call it for an opened item, not per library row.
+    pub fn get_item_metadata(&self, item_id: String) -> Result<FfiDocumentMetadata, GistError> {
+        ffi_catch!({
+            self.inner
+                .get_item_metadata(&item_id)
+                .map(FfiDocumentMetadata::from)
+                .map_err(GistError::from)
+        })
     }
 
     /// Remove one or more items from the library (single-item context menu
@@ -1819,6 +1965,44 @@ mod tests {
         assert!(matches!(err, GistError::ResourceLimitTooLarge), "{err:?}");
     }
 
+    /// SC-01 over FFI: detection report, explicit override, and the typed
+    /// unknown-label error.
+    #[test]
+    fn text_encoding_detect_and_override_over_ffi() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let core = GistCore::new(
+            dir.join("db.sqlite").to_string_lossy().into_owned(),
+            dir.join("store").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let p = dir.join("koi.txt");
+        std::fs::write(&p, [0xF0, 0xD2, 0xC9, 0xD7, 0xC5, 0xD4]).unwrap();
+        let path = p.to_string_lossy().into_owned();
+
+        let auto = core.detect_text_encoding(path.clone(), None).unwrap();
+        assert_eq!(auto.source, FfiEncodingSource::Detected);
+        assert!(auto.uncertain, "six bytes of evidence must be uncertain");
+
+        let forced = core
+            .detect_text_encoding(path.clone(), Some("koi8-r".into()))
+            .unwrap();
+        assert_eq!(forced.name, "KOI8-R");
+        assert_eq!(forced.source, FfiEncodingSource::Override);
+
+        assert!(core
+            .import_file_with_encoding(path.clone(), Some("koi8-r".into()))
+            .is_ok());
+        assert!(matches!(
+            core.import_file_with_encoding(path.clone(), Some("bogus".into())),
+            Err(GistError::UnsupportedTextEncoding)
+        ));
+        assert!(matches!(
+            core.detect_text_encoding(path, Some("bogus".into())),
+            Err(GistError::UnsupportedTextEncoding)
+        ));
+    }
+
     fn corrupt_file(path: &std::path::Path) {
         let mut bytes = std::fs::read(path).unwrap();
         assert!(!bytes.is_empty(), "cannot corrupt an empty file");
@@ -1869,6 +2053,40 @@ mod tests {
             "expected a real read of corrupted content to surface \
              GistError::ChecksumMismatch, got {read_result:?}"
         );
+    }
+
+    #[test]
+    fn get_item_metadata_exposes_import_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = GistCore::new(
+            dir.path().join("test.db").to_string_lossy().into_owned(),
+            storage.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let txt = dir.path().join("a.txt");
+        std::fs::write(&txt, b"plain text").unwrap();
+        let id = core
+            .import_file(txt.to_string_lossy().into_owned())
+            .unwrap();
+        let m = core.get_item_metadata(id).unwrap();
+        assert!(!m.tracked_changes);
+        assert_eq!(m.source_type, "txt");
+        assert!(m.import_date.is_some());
+        assert!(matches!(
+            core.get_item_metadata("missing".into()),
+            Err(GistError::Core(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_tracked_changes_source_type_maps_to_flag() {
+        let mut m = gist_model::Metadata::minimal("old");
+        m.source_type = "docx:tracked-changes".into();
+        let f = FfiDocumentMetadata::from(m);
+        assert!(f.tracked_changes);
+        assert_eq!(f.source_type, "docx");
     }
 
     #[test]
@@ -2446,6 +2664,10 @@ mod reading_state_tests {
         assert_eq!(item.source_type, "txt");
         assert_eq!(item.last_opened_at, None);
         assert_eq!(item.progress_fraction, 0.0);
+        assert_eq!(item.word_count, 8);
+        assert_eq!(estimate_reading_seconds(item.word_count, 240).unwrap(), 2);
+        let hit = core.search_items("gamma".to_string(), 10).unwrap();
+        assert_eq!(hit[0].word_count, 8);
 
         let ts = core.mark_item_opened(id.clone()).unwrap();
         core.mark_item_opened("missing".to_string()).unwrap();

@@ -1,5 +1,16 @@
 use std::path::{Path, PathBuf};
 
+/// Current UTC time as an RFC 3339 string, for `Metadata::import_date`
+/// (SC-06). A clock before the epoch degrades to the epoch, never panics.
+fn now_rfc3339() -> String {
+    gist_model::metadata_util::format_rfc3339_utc(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+}
+
 /// Lower-cased file extension with no leading dot (empty string if none).
 /// Shared by every import path that needs to name a sandboxed copy of the
 /// original file (ADR-006).
@@ -8,6 +19,15 @@ fn file_ext(path: &Path) -> String {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase()
+}
+
+pub use gist_parse_txt::{EncodingInfo, EncodingSource, ParseError as TxtParseError};
+
+fn choice_of(encoding: Option<&str>) -> gist_parse_txt::EncodingChoice<'_> {
+    match encoding {
+        Some(label) => gist_parse_txt::EncodingChoice::Named(label),
+        None => gist_parse_txt::EncodingChoice::Auto,
+    }
 }
 
 /// Extension of the BLAKE3 checksum sidecar `gist-store` writes beside every
@@ -418,6 +438,9 @@ pub enum ImportError {
     Docx(String),
     #[error("parse: {0}")]
     Txt(String),
+    /// The caller named a text encoding GIST does not recognise (SC-01).
+    #[error("unknown text encoding")]
+    UnknownEncoding,
     #[error("image processing: {0}")]
     ImagePrep(String),
     #[error("web fetch: {0}")]
@@ -935,6 +958,17 @@ impl Core {
     /// 4. Insert into the store.
     /// 5. Return the document id.
     pub fn import_txt(&self, path: &Path) -> Result<String, CoreError> {
+        self.import_txt_with_encoding(path, None)
+    }
+
+    /// [`Core::import_txt`] with an explicit text encoding (any WHATWG label,
+    /// e.g. `"windows-1251"`); `None` auto-detects (SC-01). An unrecognised
+    /// label is `CoreError::Parse(ParseError::UnknownEncoding)`.
+    pub fn import_txt_with_encoding(
+        &self,
+        path: &Path,
+        encoding: Option<&str>,
+    ) -> Result<String, CoreError> {
         let limits = ParseLimits::default();
 
         // Check size before reading the file into memory.
@@ -956,7 +990,9 @@ impl Core {
             .and_then(|s| s.to_str())
             .unwrap_or("untitled");
 
-        let mut doc = gist_parse_txt::parse(&bytes, stem, &limits)?;
+        let mut doc =
+            gist_parse_txt::parse_with_encoding(&bytes, stem, &limits, choice_of(encoding))?
+                .document;
 
         // Copy into sandboxed storage before stamping metadata (ADR-006) —
         // only for content that parsed successfully.
@@ -965,6 +1001,7 @@ impl Core {
         // Stamp source path (informational) and the sandboxed copy path
         // (authoritative for any future file-based operation, e.g. removal).
         doc.metadata.source_ref = Some(path.to_string_lossy().into_owned());
+        doc.metadata.import_date = Some(now_rfc3339());
         doc.metadata.source_copy_ref = Some(copy_path);
 
         // Rebuild token stream (Document::new already did this, but we
@@ -976,6 +1013,33 @@ impl Core {
 
         tracing::debug!("gist-core: imported as {}", id);
         Ok(id)
+    }
+
+    /// Report the encoding a plain-text file would be imported with (or the
+    /// named one), without importing it, so a UI can prompt when
+    /// `uncertain`/`lossy` (SC-01). Applies the import size limits.
+    pub fn detect_text_encoding(
+        &self,
+        path: &Path,
+        encoding: Option<&str>,
+    ) -> Result<gist_parse_txt::EncodingInfo, CoreError> {
+        let limits = ParseLimits::default();
+        let declared_len = std::fs::metadata(path)?.len() as usize;
+        if declared_len > limits.max_bytes {
+            return Err(CoreError::Parse(
+                gist_parse_txt::ParseError::ResourceLimitExceeded {
+                    limit: format!("max_bytes={}", limits.max_bytes),
+                    kind: gist_model::LimitKind::TooLarge,
+                    attempted: declared_len,
+                },
+            ));
+        }
+        let bytes = std::fs::read(path)?;
+        Ok(gist_parse_txt::detect_encoding(
+            &bytes,
+            choice_of(encoding),
+            &limits,
+        )?)
     }
 
     /// List library items with offset/limit pagination.
@@ -1074,6 +1138,17 @@ impl Core {
     /// structure rather than RSVP's flat token stream — e.g. the flow-view
     /// prototypes (M2, Q8). Read-only: doesn't touch progress or rebuild the
     /// token stream. Mirrors `start_rsvp`'s "look up, then serialise" shape.
+    /// SC-03/SC-06: the IR-level metadata of one item (tracked-changes flag,
+    /// byline, dates, canonical URL, language). Read from the IR blob, not
+    /// SQL, so it costs a document read; call per opened item, not per row.
+    pub fn get_item_metadata(&self, item_id: &str) -> Result<gist_model::Metadata, CoreError> {
+        let doc = self
+            .store
+            .get_item(item_id)?
+            .ok_or_else(|| CoreError::NotFound(item_id.to_owned()))?;
+        Ok(doc.metadata)
+    }
+
     pub fn get_document(&self, item_id: &str) -> Result<String, CoreError> {
         let doc = self
             .store
@@ -1097,6 +1172,17 @@ impl Core {
         &self,
         path: &std::path::Path,
         observer: &dyn ImportObserver,
+    ) -> Result<String, ImportError> {
+        self.import_file_with_encoding(path, observer, None)
+    }
+
+    /// [`Core::import_file`] with an explicit text encoding for plain-text
+    /// files (SC-01); ignored for other formats. `None` auto-detects.
+    pub fn import_file_with_encoding(
+        &self,
+        path: &std::path::Path,
+        observer: &dyn ImportObserver,
+        encoding: Option<&str>,
     ) -> Result<String, ImportError> {
         let limits = ParseLimits::default();
 
@@ -1174,18 +1260,21 @@ impl Core {
                 other => ImportError::Pdf(other.to_string()),
             })?
         } else if mime.starts_with("text/") || ext == "txt" || ext == "md" || ext == "text" {
-            gist_parse_txt::parse(&bytes, stem, &limits).map_err(|e| match e {
-                gist_parse_txt::ParseError::ResourceLimitExceeded {
-                    limit,
-                    attempted,
-                    kind,
-                } => ImportError::ResourceLimitExceeded {
-                    limit,
-                    attempted,
-                    kind,
-                },
-                other => ImportError::Txt(other.to_string()),
-            })?
+            gist_parse_txt::parse_with_encoding(&bytes, stem, &limits, choice_of(encoding))
+                .map(|p| p.document)
+                .map_err(|e| match e {
+                    gist_parse_txt::ParseError::UnknownEncoding => ImportError::UnknownEncoding,
+                    gist_parse_txt::ParseError::ResourceLimitExceeded {
+                        limit,
+                        attempted,
+                        kind,
+                    } => ImportError::ResourceLimitExceeded {
+                        limit,
+                        attempted,
+                        kind,
+                    },
+                    other => ImportError::Txt(other.to_string()),
+                })?
         } else {
             return Err(ImportError::UnsupportedType(ext));
         };
@@ -1203,6 +1292,7 @@ impl Core {
         // Stamp source path (informational) and the sandboxed copy path
         // (authoritative for any future file-based operation, e.g. removal).
         doc.metadata.source_ref = Some(path.to_string_lossy().into_owned());
+        doc.metadata.import_date = Some(now_rfc3339());
         doc.metadata.source_copy_ref = Some(copy_path);
         doc.token_stream = doc.build_token_stream();
 
@@ -1251,6 +1341,7 @@ impl Core {
         // but stamp explicitly here too so the pipeline step matches
         // import_file's pattern and doesn't rely on gist-web's internals).
         doc.metadata.source_ref = Some(url.to_owned());
+        doc.metadata.import_date = Some(now_rfc3339());
         doc.token_stream = doc.build_token_stream();
 
         let id = doc.id.clone();
@@ -1942,6 +2033,7 @@ impl Core {
                 .join(", "),
         );
         metadata.source_copy_ref = Some(copy_path);
+        metadata.import_date = Some(now_rfc3339());
 
         let doc = gist_model::Document::new(metadata, sections);
         let id = doc.id.clone();
@@ -1966,6 +2058,66 @@ mod tests {
         fn is_cancelled(&self) -> bool {
             true
         }
+    }
+
+    fn encoding_core() -> (tempfile::TempDir, Core) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&dir.path().join("test.db"), &storage).unwrap();
+        (dir, core)
+    }
+
+    #[test]
+    fn import_txt_decodes_utf16_bom_and_legacy_with_override() {
+        let (dir, core) = encoding_core();
+
+        let mut utf16: Vec<u8> = vec![0xFF, 0xFE];
+        for u in "Zebra crossing at dawn".encode_utf16() {
+            utf16.extend(u.to_le_bytes());
+        }
+        let p = dir.path().join("u16.txt");
+        std::fs::write(&p, &utf16).unwrap();
+        let info = core.detect_text_encoding(&p, None).unwrap();
+        assert_eq!((info.name.as_str(), info.uncertain), ("UTF-16LE", false));
+        let id = core.import_file(&p, &NullObserver).unwrap();
+        assert!(core.get_document(&id).unwrap().contains("Zebra crossing"));
+
+        // KOI8-R "Привет" imported with an explicit encoding.
+        let k = dir.path().join("koi.txt");
+        std::fs::write(&k, [0xF0, 0xD2, 0xC9, 0xD7, 0xC5, 0xD4]).unwrap();
+        let id = core
+            .import_file_with_encoding(&k, &NullObserver, Some("koi8-r"))
+            .unwrap();
+        assert!(core.get_document(&id).unwrap().contains("Привет"));
+        let id = core.import_txt_with_encoding(&k, Some("koi8-r")).unwrap();
+        assert!(core.get_document(&id).unwrap().contains("Привет"));
+    }
+
+    #[test]
+    fn import_with_unknown_encoding_label_is_a_typed_error() {
+        let (dir, core) = encoding_core();
+        let p = dir.path().join("a.txt");
+        std::fs::write(&p, b"hello").unwrap();
+        assert!(matches!(
+            core.import_file_with_encoding(&p, &NullObserver, Some("klingon")),
+            Err(ImportError::UnknownEncoding)
+        ));
+        assert!(matches!(
+            core.import_txt_with_encoding(&p, Some("klingon")),
+            Err(CoreError::Parse(
+                gist_parse_txt::ParseError::UnknownEncoding
+            ))
+        ));
+        assert!(core.detect_text_encoding(&p, Some("klingon")).is_err());
+    }
+
+    #[test]
+    fn invalid_utf8_txt_now_imports_instead_of_failing() {
+        let (dir, core) = encoding_core();
+        let p = dir.path().join("bad.txt");
+        std::fs::write(&p, b"caf\xE9 au lait \xFF\xFE").unwrap();
+        assert!(core.import_file(&p, &NullObserver).is_ok());
     }
 
     #[test]
@@ -2486,6 +2638,47 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, tagged_id);
         assert!(items.iter().all(|i| i.id != untagged_id));
+    }
+
+    /// SC-03/SC-06: imports stamp `import_date`; a DOCX with revision markup
+    /// surfaces `tracked_changes` through `get_item_metadata` (the IR blob
+    /// round trip), while `source_type` stays plain `docx`.
+    #[test]
+    fn import_stamps_date_and_surfaces_tracked_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let core = Core::init(&dir.path().join("test.db"), &storage).unwrap();
+
+        let txt = dir.path().join("a.txt");
+        std::fs::write(&txt, b"plain text").unwrap();
+        let id = core.import_file(&txt, &NullObserver).unwrap();
+        let m = core.get_item_metadata(&id).unwrap();
+        let d = m.import_date.expect("import_date stamped");
+        assert!(
+            d.len() == 20 && d.ends_with('Z') && d.starts_with("20"),
+            "{d}"
+        );
+        assert!(!m.tracked_changes);
+
+        // (The synthetic tracked-changes fixture lacks styles.xml, which the
+        // DOCX parser requires, so persist a parsed-shape document directly.)
+        let mut meta = gist_model::Metadata::minimal("rev");
+        meta.source_type = "docx".into();
+        meta.tracked_changes = true;
+        meta.published_date = Some("2024-01-02".into());
+        let doc = Document::new(meta, vec![]);
+        let id = doc.id.clone();
+        core.store.insert_item(&doc).unwrap();
+        let m = core.get_item_metadata(&id).unwrap();
+        assert!(m.tracked_changes);
+        assert_eq!(m.source_type, "docx");
+        assert_eq!(m.published_date.as_deref(), Some("2024-01-02"));
+
+        assert!(matches!(
+            core.get_item_metadata("no-such-id"),
+            Err(CoreError::NotFound(_))
+        ));
     }
 
     /// ADR-021: a real import reports source type, is never-opened until a

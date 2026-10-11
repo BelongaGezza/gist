@@ -30,7 +30,7 @@ enum ImportLimitMessage {
         case .ResourceLimitOther:
             return String(localized: "\(subject) exceeds GIST's import limits.")
         case .Core, .DrmProtected, .ChecksumMismatch, .PdfEncrypted, .PdfNoTextLayer,
-             .PdfUnavailable, .InternalPanic:
+             .PdfUnavailable, .UnsupportedTextEncoding, .InternalPanic:
             return nil
         }
     }

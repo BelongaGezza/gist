@@ -18,6 +18,14 @@ limitations" at the bottom of this file for what's explicitly still open.
 No version has been tagged and there is no public release yet — this section is a running log of
 pre-1.0 work, not a shipped release note.
 
+### Added — import fidelity and library info (macOS, 2026-10-11)
+
+- Text files in other encodings (UTF-16, Windows-1252/1251, Shift_JIS, GBK and more) now import; when GIST is unsure it asks which encoding to use. Previously a non-UTF-8 .txt failed to import, and a leading UTF-8 BOM is now stripped.
+- A notice appears after importing a DOCX that contains unresolved tracked changes.
+- Web articles record byline, published date, retrieved date and canonical URL, viewable via "Item Info…".
+- Library rows show word count and an estimated reading time. (Library database upgrades to schema v8; older GIST builds will refuse it.)
+- Windows does not have these yet.
+
 ### Added — Rust core (shared by macOS and Windows)
 
 - Document import: plain text, ePub (with DRM detection via `META-INF/encryption.xml`, never
@@ -164,4 +172,4 @@ rest and at-rest-integrity work described above. To report a new vulnerability, 
   the equivalent Windows Narrator/visual pass — has not happened yet.
 - **PDF import is new and lightly tested.** It works end to end (text PDFs and scanned PDFs via OCR), but layout heuristics are tuned on synthetic PDFs only (two-column and simple footnote-free layouts); rotated text, right-to-left scripts, footnotes and tables inside PDFs are not handled, and the signed/notarised build of the embedded pdfium library has not been verified.
 - **The paginated reading view is new and only logic-tested.** Whether the measured page breaks match what SwiftUI actually draws (a clipped last line or an under-filled page is possible), the page-turn feel, VoiceOver, read-aloud follow-along and performance on very large documents have not been verified on a real display. Tables taller than a page scroll inside their page instead of splitting by row.
-- **IR/schema forward compatibility is implemented but has one deliberate limit.** Stored documents carry an `ir_version` (ADR-019), and a newer-than-understood version is refused with a clear message instead of failing obscurely. Documents containing a table are stored as version 2, so an older GIST build reports "needs a newer version" for them. An older build that opens a library whose database was upgraded to schema v7 will refuse it (`SchemaTooNew`). (This bullet previously said the policy was not implemented; that has been untrue since ADR-019, corrected 2026-10-05.)
+- **IR/schema forward compatibility is implemented but has one deliberate limit.** Stored documents carry an `ir_version` (ADR-019), and a newer-than-understood version is refused with a clear message instead of failing obscurely. Documents containing a table are stored as version 2, so an older GIST build reports "needs a newer version" for them. An older build that opens a library whose database was upgraded to schema v8 will refuse it (`SchemaTooNew`). (This bullet previously said the policy was not implemented; that has been untrue since ADR-019, corrected 2026-10-05.)
