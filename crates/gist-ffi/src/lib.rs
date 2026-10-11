@@ -334,6 +334,8 @@ pub struct FfiLibraryItem {
     /// Derived RSVP progress in `0.0..=1.0` (ADR-021). Flow-view-only items
     /// report 0.0 — accepted limitation.
     pub progress_fraction: f64,
+    /// Word count (ADR-030, SC-15); see `gist_store::LibraryItem::word_count`.
+    pub word_count: u32,
 }
 
 impl From<gist_store::LibraryItem> for FfiLibraryItem {
@@ -348,6 +350,7 @@ impl From<gist_store::LibraryItem> for FfiLibraryItem {
             source_type: i.source_type,
             last_opened_at: i.last_opened_at,
             progress_fraction: i.progress_fraction,
+            word_count: i.word_count,
         }
     }
 }
@@ -1164,6 +1167,13 @@ impl FfiRsvpSession {
 #[uniffi::export]
 pub fn rsvp_orp_split(word: String) -> Result<FfiOrpSplit, GistError> {
     ffi_catch!({ Ok(FfiOrpSplit::of(&word)) })
+}
+
+/// Estimated reading time in whole seconds for `word_count` words at `wpm`
+/// (rounded up, `wpm` clamped to 100..=1000 like the RSVP engine). ADR-030.
+#[uniffi::export]
+pub fn estimate_reading_seconds(word_count: u32, wpm: u32) -> Result<u32, GistError> {
+    ffi_catch!({ Ok(gist_store::estimate_reading_seconds(word_count, wpm)) })
 }
 
 // ── GistCore object ──────────────────────────────────────────────────────────
@@ -2566,6 +2576,10 @@ mod reading_state_tests {
         assert_eq!(item.source_type, "txt");
         assert_eq!(item.last_opened_at, None);
         assert_eq!(item.progress_fraction, 0.0);
+        assert_eq!(item.word_count, 8);
+        assert_eq!(estimate_reading_seconds(item.word_count, 240).unwrap(), 2);
+        let hit = core.search_items("gamma".to_string(), 10).unwrap();
+        assert_eq!(hit[0].word_count, 8);
 
         let ts = core.mark_item_opened(id.clone()).unwrap();
         core.mark_item_opened("missing".to_string()).unwrap();
