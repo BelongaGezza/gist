@@ -27,6 +27,11 @@
                         <RadioMenuFlyoutItem x:Name="SortTitleAz" Text="Title A–Z" GroupName="Sort" Tag="TitleAZ" Click="OnSortClick" />
                         <RadioMenuFlyoutItem x:Name="SortTitleZa" Text="Title Z–A" GroupName="Sort" Tag="TitleZA" Click="OnSortClick" />
                         <RadioMenuFlyoutItem x:Name="SortAuthorAz" Text="Author A–Z" GroupName="Sort" Tag="AuthorAZ" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortType" Text="Type" GroupName="Sort" Tag="SourceType" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortLastReadNewest" Text="Last Read (Most Recent)" GroupName="Sort" Tag="LastReadNewest" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortLastReadOldest" Text="Last Read (Oldest)" GroupName="Sort" Tag="LastReadOldest" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortProgressHigh" Text="Progress (Most Read)" GroupName="Sort" Tag="ProgressHighest" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortProgressLow" Text="Progress (Least Read)" GroupName="Sort" Tag="ProgressLowest" Click="OnSortClick" />
                     </MenuFlyout>
                 </AppBarButton.Flyout>
             </AppBarButton>

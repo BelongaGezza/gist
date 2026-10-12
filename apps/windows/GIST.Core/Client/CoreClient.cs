@@ -815,6 +815,24 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
     public Task<IRsvpEngine?> OpenRsvpEngineAsync(string itemId, uint wpm) =>
         RunAsync(core => (IRsvpEngine?)new FfiRsvpEngine(core.OpenRsvpSession(itemId, wpm)), null);
 
+    /// <summary>
+    /// Stamps the item's "last read" time (ADR-021). Fire-and-forget by contract: a failure is
+    /// swallowed - it must never surface to the user, set <see cref="LastError"/>, or clear an
+    /// error a reader is showing, and carries no path or message text.
+    /// </summary>
+    public async Task MarkItemOpenedAsync(string itemId)
+    {
+        if (!TryGetCore(out var core)) return;
+        try
+        {
+            await InvokeAsync(() => core.MarkItemOpened(itemId)).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Best effort only.
+        }
+    }
+
     /// <summary>Persists the RSVP token index so playback can resume later.</summary>
     public Task SaveProgressAsync(string itemId, ulong tokenIndex) =>
         RunVoidAsync(core => core.SaveProgress(itemId, tokenIndex));
@@ -943,7 +961,8 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
     private static IReadOnlyList<LibraryItemVM> Map(FfiLibraryItem[] items) =>
         Array.ConvertAll(
             items,
-            i => new LibraryItemVM(i.Id, i.Title ?? "Untitled", i.Authors, i.SourcePath, i.ContentEncrypted));
+            i => new LibraryItemVM(i.Id, i.Title ?? "Untitled", i.Authors, i.SourcePath, i.ContentEncrypted,
+                i.SourceType, i.LastOpenedAt, i.ProgressFraction));
 
     private Task PublishNotInitializedAsync()
     {

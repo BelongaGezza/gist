@@ -92,7 +92,51 @@ public static class LibraryFiltering
                 items.OrderByDescending(i => i.Title, StringComparer.CurrentCultureIgnoreCase).ToList(),
             LibrarySortOrder.AuthorAZ =>
                 items.OrderBy(i => i.PrimaryAuthor, StringComparer.CurrentCultureIgnoreCase).ToList(),
+            // ADR-021 keys, same rules as Apple's LibraryFiltering.sorted: unknown type last,
+            // never-opened items last in both last-read directions, ties keep incoming order.
+            LibrarySortOrder.SourceType => StableSorted(items, (a, b) =>
+                (a.SourceType.Length == 0, b.SourceType.Length == 0) switch
+                {
+                    (true, true) => null,
+                    (true, false) => false,
+                    (false, true) => true,
+                    _ => CompareOrNull(string.Compare(
+                        a.SourceType, b.SourceType, StringComparison.CurrentCultureIgnoreCase)),
+                }),
+            LibrarySortOrder.LastReadNewest => StableSorted(items, (a, b) => LastReadBefore(a, b, true)),
+            LibrarySortOrder.LastReadOldest => StableSorted(items, (a, b) => LastReadBefore(a, b, false)),
+            LibrarySortOrder.ProgressHighest => StableSorted(items, (a, b) =>
+                a.ProgressFraction == b.ProgressFraction ? null : a.ProgressFraction > b.ProgressFraction),
+            LibrarySortOrder.ProgressLowest => StableSorted(items, (a, b) =>
+                a.ProgressFraction == b.ProgressFraction ? null : a.ProgressFraction < b.ProgressFraction),
             _ => throw new ArgumentOutOfRangeException(nameof(order), order, null),
         };
+    }
+
+    private static bool? CompareOrNull(int c) => c == 0 ? null : c < 0;
+
+    private static bool? LastReadBefore(LibraryItemVM a, LibraryItemVM b, bool newestFirst)
+    {
+        if (a.LastOpenedAt is null && b.LastOpenedAt is null) return null;
+        if (a.LastOpenedAt is null) return false;
+        if (b.LastOpenedAt is null) return true;
+        var (x, y) = (a.LastOpenedAt.Value, b.LastOpenedAt.Value);
+        if (x == y) return null;
+        return newestFirst ? x > y : x < y;
+    }
+
+    /// <summary>Sorts with an explicit index tie-break; <paramref name="before"/> returns null for a tie.</summary>
+    private static IReadOnlyList<LibraryItemVM> StableSorted(
+        IReadOnlyList<LibraryItemVM> items, Func<LibraryItemVM, LibraryItemVM, bool?> before)
+    {
+        var indexed = items.Select((item, index) => (item, index)).ToList();
+        indexed.Sort((l, r) =>
+        {
+            var b = before(l.item, r.item);
+            if (b is null) return l.index.CompareTo(r.index);
+            if (b.Value) return -1;
+            return before(r.item, l.item) is null ? l.index.CompareTo(r.index) : 1;
+        });
+        return indexed.Select(t => t.item).ToList();
     }
 }

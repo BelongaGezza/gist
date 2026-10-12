@@ -85,6 +85,7 @@ public sealed partial class RsvpPage : Page
 
         ApplyTheme();
         UpdateView();
+        _ = core.MarkItemOpenedAsync(itemId);
         await _vm.LoadAsync();
         UpdateView();
         FocusPrimary();
