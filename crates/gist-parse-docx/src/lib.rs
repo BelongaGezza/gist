@@ -1334,6 +1334,23 @@ mod tests {
         ));
     }
 
+    /// F77: text typed into a `w:vMerge` continuation cell survives the
+    /// import, appended to the merged cell, instead of being dropped.
+    #[test]
+    fn test_vmerge_continuation_text_is_kept() {
+        let first = format!(
+            "<w:tr>{}</w:tr>",
+            merged_tc("top", r#"<w:vMerge w:val="restart"/>"#)
+        );
+        let cont = format!("<w:tr>{}</w:tr>", merged_tc("below", "<w:vMerge/>"));
+        let body = format!("<w:tbl>{first}{cont}</w:tbl>");
+        let doc = parse(&docx_with_body(&body), "t", &ParseLimits::default()).unwrap();
+        assert_eq!(tables_of(&doc)[0].0, &vec![vec!["top below"], vec![""]]);
+        assert_eq!(spans_of(&doc)[0].rowspan, 2);
+        // Still reachable by RSVP: the word is in the token stream.
+        assert!(doc.token_stream.iter().any(|t| t.text == "below"));
+    }
+
     // ── SC-03: tracked-changes flag is a real Metadata field ─────────────
 
     #[test]
