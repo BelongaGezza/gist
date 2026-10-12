@@ -24,6 +24,12 @@ Plain-text files consumed by `gist-parse-txt::parse(bytes, limits)`.
 | `single_line.txt` | 50,000 bytes | One line of 50 000 ASCII `'A'` characters, no trailing newline. | `Ok(Document)` — parser must not over-allocate per-line structures. |
 | `bench_20page.txt` | ~58 KB, ~8,900 words | 172 Lorem-ipsum paragraphs, blank-line-separated — a realistic stand-in for §9.1's "20-page document" performance target (not part of the corpus test; used by `crates/gist-parse-txt/benches/parse_bench.rs`, M4 R2). | `Ok(Document)` — used for `cargo bench`, not correctness. |
 | `line_endings.txt` | ~340 bytes | Five paragraphs, each separated by a differently-spelled "blank line": CRLF-CRLF, bare-CR-CR, a line with a single space, a line with a single tab. Regression fixture for issue #76 (paragraphs previously only split on a literal `"\n\n"`). | `Ok(Document)` with exactly 5 non-empty paragraph blocks. |
+| `encodings/utf8_bom.txt` | 123 bytes | UTF-8 with BOM, two English paragraphs. Synthetic, written for this repo (SC-01). | Detected as UTF-8 via BOM; BOM stripped. |
+| `encodings/utf16le_bom.txt`, `encodings/utf16be_bom.txt` | 258 bytes each | Same two paragraphs plus "café 日本", UTF-16 LE / BE with BOM. Synthetic (SC-01). | Detected via BOM, not uncertain, text intact. |
+| `encodings/utf16le_nobom.txt` | 240 bytes | Two English paragraphs, UTF-16LE without BOM. Synthetic (SC-01). | Sniffed as UTF-16LE (NUL-byte pattern), 2 paragraphs. |
+| `encodings/windows1252_french.txt` | 223 bytes | Original French prose with accents and an em dash in windows-1252. Synthetic (SC-01). | Auto: decoded without loss; override `windows-1252` yields "café", "croîssants", U+2014. |
+| `encodings/windows1251_russian.txt` | 174 bytes | Original Russian prose in windows-1251. Synthetic (SC-01). | Override `windows-1251` decodes Cyrillic; auto either decodes correctly or is flagged uncertain. |
+| `encodings/invalid_utf8_mixed.txt` | 95 bytes | ASCII with stray bytes `FF FE FD` and `80 81`, no valid encoding. Synthetic (SC-01). | Never an error; not reported as plain UTF-8; forcing `utf-8` is lossy (U+FFFD). |
 | `adversarial/all_null_bytes.bin` | 1,024 bytes | 1 024 null bytes.  Extension is `.bin` so `Core::import_file` returns `ImportError::UnsupportedType`; pass bytes directly to `parse()` to test that path. | When called directly: `Ok` or a recognised `ParseError`, never a panic. |
 | `adversarial/max_lines.txt` | ~285 KB | 5 000 short lines ("Line 00000: The quick brown fox…"). | `Ok(Document)` — stress test line-count handling without hitting memory limits. |
 
@@ -81,6 +87,7 @@ Network fetching is tested via integration/fuzz separately.
 | `minimal_body.html` | Bare `<html><body><p>Hello world</p></body></html>`. | Extraction returns "Hello world". |
 | `no_article.html` | Page with `<main>` element but no `<article>`. | Extraction falls back to `<main>` content. |
 | `table_article.html` | Synthetic (M6 R3, 2026-10-03). `<article>` with `h1`, paragraph, the same 3x4 table as the epub/docx fixtures, paragraph. | `extract_content` returns 4 blocks incl. one `Block::Table` (header row, empty cell preserved). Before M6 R3 each cell became a separate paragraph. |
+| `article_with_metadata.html` | Synthetic (SC-06, 2026-10-11). `<html lang="en-GB">`, `meta author`, `article:published_time`, `link rel=canonical`; invented names/URLs on `example.org`. | author "Alex Example", published `2024-03-09`, canonical URL, language `en-GB`. |
 | `merged_cells_article.html` | Synthetic (M7 R7, 2026-10-05). `<article>` with the same `colspan`/`rowspan` table as the epub fixture. | Same grid and 3 spans as the epub fixture. |
 | `adversarial/empty_body.html` | `<html><body></body></html>` — no content nodes. | Returns empty string or empty block list; must not panic. |
 | `adversarial/script_heavy.html` | Many `<script>` and `<style>` tags in head and body, interspersed with article content. | All `<script>` and `<style>` elements stripped; prose content preserved. |

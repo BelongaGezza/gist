@@ -1,6 +1,6 @@
 # ADR-022: Process isolation for pdfium (finding F33)
 
-Status: **Proposed. Design record plus measured spike; nothing is implemented in the product (user decision D3, M7).** The recommendation at the end is for the user to decide.
+Status: **Accepted 2026-10-09 (option c): accept the in-process risk for v1.0 and schedule a portable helper process (option b) for a post-v1.0 milestone.** Design record plus measured spike; nothing is implemented in the product (user decision D3, M7). The owner confirmed the recommendation at the end of this ADR on 2026-10-09.
 
 ## Context
 

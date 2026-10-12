@@ -23,6 +23,10 @@ fn make_document(i: usize) -> Document {
         import_date: None,
         language: None,
         word_count: 0,
+        tracked_changes: false,
+        published_date: None,
+        retrieved_date: None,
+        canonical_url: None,
     };
     let section = Section {
         id: "s0".to_string(),
