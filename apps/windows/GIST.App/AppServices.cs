@@ -69,6 +69,7 @@ public static class AppServices
             new UiSettingsThemeSystemProvider(queue));
 
         RsvpSettings = new FileRsvpSettingsStore(Path.Combine(Paths.Root, "rsvp-settings.txt"));
+        Core.ReadingWpmProvider = () => RsvpSettings.LoadWpm() ?? RsvpWpm.Default;
         FlowTypography = new FileTypographySettingsStore(Path.Combine(Paths.Root, "flow-typography.txt"));
         FlowPositions = new FileFlowScrollPositionStore(Path.Combine(Paths.Root, "flow-positions"));
 

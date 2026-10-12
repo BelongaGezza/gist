@@ -24,6 +24,9 @@ public enum LibraryDialog
     /// <summary>Import URL prompt (§4.5). Import is disabled while the box is blank.</summary>
     ImportUrl,
 
+    /// <summary>SC-01: pick the encoding of a plain-text file the core could not detect with confidence.</summary>
+    EncodingPrompt,
+
     /// <summary>New Collection name prompt (§4.5).</summary>
     NewCollection,
 

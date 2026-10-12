@@ -29,7 +29,9 @@ public sealed record LibraryItemVM
         bool contentEncrypted = false,
         string sourceType = "",
         long? lastOpenedAt = null,
-        double progressFraction = 0)
+        double progressFraction = 0,
+        uint wordCount = 0,
+        uint readingSeconds = 0)
     {
         Id = id;
         Title = title;
@@ -39,6 +41,8 @@ public sealed record LibraryItemVM
         SourceType = sourceType;
         LastOpenedAt = lastOpenedAt;
         ProgressFraction = progressFraction;
+        WordCount = wordCount;
+        ReadingSeconds = readingSeconds;
     }
 
     /// <summary>Stable document id (UUIDv7) as produced by the Rust core.</summary>
@@ -75,6 +79,12 @@ public sealed record LibraryItemVM
     /// </summary>
     public double ProgressFraction { get; init; }
 
+    /// <summary>Words in the document (SC-15); 0 when unknown or empty.</summary>
+    public uint WordCount { get; init; }
+
+    /// <summary>Estimated reading time in seconds at the reader's WPM (SC-15).</summary>
+    public uint ReadingSeconds { get; init; }
+
     /// <summary>First author, or the empty string when there is none (see sort semantics).</summary>
     public string PrimaryAuthor => Authors.Count > 0 ? Authors[0] : string.Empty;
 
@@ -87,6 +97,8 @@ public sealed record LibraryItemVM
         && SourceType == other.SourceType
         && LastOpenedAt == other.LastOpenedAt
         && ProgressFraction.Equals(other.ProgressFraction)
+        && WordCount == other.WordCount
+        && ReadingSeconds == other.ReadingSeconds
         && Authors.SequenceEqual(other.Authors);
 
     public override int GetHashCode()
@@ -99,6 +111,8 @@ public sealed record LibraryItemVM
         hash.Add(SourceType);
         hash.Add(LastOpenedAt);
         hash.Add(ProgressFraction);
+        hash.Add(WordCount);
+        hash.Add(ReadingSeconds);
         foreach (var author in Authors)
         {
             hash.Add(author);

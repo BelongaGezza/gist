@@ -481,7 +481,7 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
     /// an untyped core error.
     /// </remarks>
     /// <returns>The new item id, or null on failure.</returns>
-    public async Task<string?> ImportFileAsync(string path)
+    public async Task<string?> ImportFileAsync(string path, string? encoding = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
@@ -504,7 +504,7 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
         await OnUiAsync(() => IsLoading = true).ConfigureAwait(false);
         try
         {
-            var result = await InvokeAsync(() => core.ImportFile(path)).ConfigureAwait(false);
+            var result = await InvokeAsync(() => encoding is null ? core.ImportFile(path) : core.ImportFileWithEncoding(path, encoding)).ConfigureAwait(false);
             if (result.Failed)
             {
                 if (result.Error.Kind == CoreErrorKind.DrmProtected)
@@ -524,6 +524,31 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
             await OnUiAsync(() => IsLoading = false).ConfigureAwait(false);
             await ReloadItemsAsync(clearErrorOnSuccess: false).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Asks the core which encoding a plain-text file would import with, without importing it
+    /// (SC-01). Null on failure with <see cref="LastError"/> set; callers fall back to a plain
+    /// import rather than blocking on a failed probe.
+    /// </summary>
+    public async Task<TextEncodingProbe?> DetectTextEncodingAsync(string path, string? encoding = null)
+    {
+        if (!TryGetCore(out var core)) return null;
+        var result = await InvokeAsync(() => core.DetectTextEncoding(path, encoding)).ConfigureAwait(false);
+        if (result.Failed) return null;
+        var info = result.Value;
+        return new TextEncodingProbe(info.Name, info.Uncertain, info.Lossy);
+    }
+
+    /// <summary>
+    /// Import-time metadata for the SC-03 tracked-changes notice. Quiet by contract: a failure
+    /// returns null and never sets <see cref="LastError"/> (the import already succeeded).
+    /// </summary>
+    public async Task<ItemMetadata?> GetItemMetadataAsync(string itemId)
+    {
+        if (!TryGetCore(out var core)) return null;
+        var result = await InvokeAsync(() => core.GetItemMetadata(itemId)).ConfigureAwait(false);
+        return result.Failed ? null : new ItemMetadata(result.Value.SourceType, result.Value.TrackedChanges);
     }
 
     /// <summary>
@@ -957,17 +982,47 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
         GistException.InternalPanic => new CoreError(
             CoreErrorKind.InternalPanic,
             "An internal error occurred in the GIST core. The operation was cancelled."),
+        GistException.UnsupportedTextEncoding => new CoreError(
+            CoreErrorKind.UnsupportedTextEncoding,
+            "That text encoding isn't supported."),
+        GistException.ResourceLimitTooLarge
+            or GistException.ResourceLimitTooManyPages
+            or GistException.ResourceLimitTooManyEntries
+            or GistException.ResourceLimitTooDeeplyNested
+            or GistException.ResourceLimitContentTooLarge
+            or GistException.ResourceLimitTableTooLarge
+            or GistException.ResourceLimitOther => new CoreError(
+                CoreErrorKind.ResourceLimit,
+                "This file exceeds GIST's import limits."),
         _ when storeOpening => new CoreError(
             CoreErrorKind.StoreUnavailable,
             "The GIST library could not be opened."),
         _ => new CoreError(CoreErrorKind.Core, e.Message),
     };
 
-    private static IReadOnlyList<LibraryItemVM> Map(FfiLibraryItem[] items) =>
-        Array.ConvertAll(
+    /// <summary>
+    /// Reading speed used for the row "about N min" estimate (SC-15). Read once per item load, never
+    /// per render. The app points this at the saved RSVP WPM; the default matches the RSVP default.
+    /// </summary>
+    public Func<uint> ReadingWpmProvider { get; set; } = () => 300;
+
+    private IReadOnlyList<LibraryItemVM> Map(FfiLibraryItem[] items)
+    {
+        var wpm = Math.Clamp(ReadingWpmProvider(), 100u, 1000u);
+        return Array.ConvertAll(
             items,
-            i => new LibraryItemVM(i.Id, i.Title ?? "Untitled", i.Authors, i.SourcePath, i.ContentEncrypted,
-                i.SourceType, i.LastOpenedAt, i.ProgressFraction));
+            i => new LibraryItemVM(
+                i.Id, i.Title ?? "Untitled", i.Authors, i.SourcePath, i.ContentEncrypted,
+                i.SourceType, i.LastOpenedAt, i.ProgressFraction,
+                i.WordCount, ReadingSeconds(i.WordCount, wpm)));
+    }
+
+    private static uint ReadingSeconds(uint words, uint wpm)
+    {
+        if (words == 0) return 0;
+        try { return GistFfiMethods.EstimateReadingSeconds(words, wpm); }
+        catch (Exception) { return 0; }
+    }
 
     private Task PublishNotInitializedAsync()
     {
