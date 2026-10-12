@@ -31,7 +31,7 @@ import SwiftUI
 // than inline edits to their `body`s would have been.
 //
 // What this deliberately does *not* try to cover: `RsvpView`/
-// `FlowViewSwiftUINative`'s own reading typography (`RotaryDialView`,
+// `FlowViewSwiftUINative`'s own reading typography (the retired rotary dial,
 // `OrpWordView`, and Flow View's `TypographySettings.fontSize`-driven body
 // text) is intentionally decoupled from the OS's Dynamic Type setting --
 // both already expose their own dedicated, app-level font-size control

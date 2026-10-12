@@ -30,6 +30,16 @@ final class CoreClient: ObservableObject {
     /// An image-only (scanned) PDF: the Library presents the existing OCR
     /// import sheet pre-loaded with this file instead of showing an error.
     @Published var pdfOcrCandidate: URL?
+    /// SC-01: a plain-text import paused because the detected encoding is
+    /// uncertain or lossy; the Library presents a picker. Nothing has been
+    /// imported while this is set; cancelling just clears it.
+    @Published var pendingEncodingImport: PendingEncodingImport?
+    /// SC-03: informational, non-blocking notice shown after a successful
+    /// import (e.g. a DOCX with unresolved tracked changes).
+    @Published var importNotice: String?
+    /// Reading speed used for the row "~N min" estimate (SC-15). Read once
+    /// per item load, never per render.
+    var readingWpmProvider: () -> Int = { RsvpDefaults.shared.defaultWpm }
 
     private let core: GistCore?
 
@@ -249,8 +259,14 @@ final class CoreClient: ObservableObject {
         }
     }
 
+    private func readingSeconds(for words: UInt32, wpm: UInt32) -> Int {
+        guard words > 0 else { return 0 }
+        return Int((try? estimateReadingSeconds(wordCount: words, wpm: wpm)) ?? 0)
+    }
+
     private func mapItems(_ ffiItems: [FfiLibraryItem]) -> [LibraryItemVM] {
-        ffiItems.map { item in
+        let wpm = UInt32(max(100, min(1000, readingWpmProvider())))
+        return ffiItems.map { item in
             LibraryItemVM(
                 id: item.id,
                 // (R5b localisation) `?? "Untitled"` forces this to plain
@@ -263,7 +279,9 @@ final class CoreClient: ObservableObject {
                 contentEncrypted: item.contentEncrypted,
                 sourceType: item.sourceType,
                 lastOpenedAt: item.lastOpenedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
-                progressFraction: item.progressFraction
+                progressFraction: item.progressFraction,
+                wordCount: Int(item.wordCount),
+                readingSeconds: readingSeconds(for: item.wordCount, wpm: wpm)
             )
         }
     }
@@ -360,7 +378,7 @@ final class CoreClient: ObservableObject {
                 drmProtectedFile = URL(string: urlString)
             case .Core, .ChecksumMismatch, .InternalPanic,
                 // PDF cases are only produced by `importFile`; unreachable here.
-                .PdfEncrypted, .PdfNoTextLayer, .PdfUnavailable:
+                .PdfEncrypted, .PdfNoTextLayer, .PdfUnavailable, .UnsupportedTextEncoding:
                 error = "\(gistError)"
             case .ResourceLimitTooLarge, .ResourceLimitTooManyPages, .ResourceLimitTooManyEntries,
                 .ResourceLimitTooDeeplyNested, .ResourceLimitContentTooLarge,
@@ -501,6 +519,15 @@ final class CoreClient: ObservableObject {
     /// import path, which sniffs the format from magic bytes / extension.
     func importFile(url: URL) async {
         guard let core else { return }
+        importNotice = nil
+        if TextEncodingChoices.isPlainTextFile(url),
+            let info = try? core.detectTextEncoding(path: url.path, encoding: nil),
+            TextEncodingChoices.needsPrompt(uncertain: info.uncertain, lossy: info.lossy)
+        {
+            pendingEncodingImport = PendingEncodingImport(
+                url: url, detectedName: info.name, lossy: info.lossy)
+            return
+        }
         drmProtectedFile = nil
         pdfEncryptedFile = nil
         pdfUnavailableFile = nil
@@ -510,6 +537,7 @@ final class CoreClient: ObservableObject {
             let id = try core.importFile(path: url.path)
             error = nil
             await autoEncryptIfEnabled(itemId: id)
+            noteTrackedChangesIfNeeded(itemId: id, url: url)
         } catch let gistError as GistError {
             switch gistError {
             case .DrmProtected:
@@ -521,6 +549,8 @@ final class CoreClient: ObservableObject {
             case .PdfNoTextLayer:
                 // Not an error: a scan. Route to the existing OCR flow.
                 pdfOcrCandidate = url
+            case .UnsupportedTextEncoding:
+                error = String(localized: "That text encoding isn't supported.")
             case .Core, .ChecksumMismatch, .InternalPanic:
                 error = "\(gistError)"
             case .ResourceLimitTooLarge, .ResourceLimitTooManyPages, .ResourceLimitTooManyEntries,
@@ -533,6 +563,60 @@ final class CoreClient: ObservableObject {
             self.error = "\(error)"
         }
         await reloadItems(clearErrorOnSuccess: false)
+    }
+
+    /// SC-01: completes a paused plain-text import with the user's chosen
+    /// encoding (a WHATWG label). Typed `GistError` handling only.
+    func importTextFile(url: URL, encoding: String) async {
+        guard let core else { return }
+        pendingEncodingImport = nil
+        importNotice = nil
+        do {
+            let id = try core.importFileWithEncoding(path: url.path, encoding: encoding)
+            error = nil
+            await autoEncryptIfEnabled(itemId: id)
+        } catch let gistError as GistError {
+            switch gistError {
+            case .UnsupportedTextEncoding:
+                error = String(localized: "That text encoding isn't supported.")
+            case .ResourceLimitTooLarge, .ResourceLimitTooManyPages, .ResourceLimitTooManyEntries,
+                .ResourceLimitTooDeeplyNested, .ResourceLimitContentTooLarge,
+                .ResourceLimitTableTooLarge, .ResourceLimitOther:
+                importLimitMessage = ImportLimitMessage.message(
+                    for: gistError, name: url.lastPathComponent)
+            default:
+                error = "\(gistError)"
+            }
+        } catch {
+            self.error = "\(error)"
+        }
+        await reloadItems(clearErrorOnSuccess: false)
+    }
+
+    /// SC-01: what `detectTextEncoding` reports when forcing `encoding`
+    /// (e.g. to learn whether the user's pick still decodes lossily).
+    func detectEncoding(url: URL, encoding: String?) -> FfiTextEncodingInfo? {
+        try? core?.detectTextEncoding(path: url.path, encoding: encoding)
+    }
+
+    /// SC-03/SC-06: metadata for the item-info sheet; nil on failure.
+    func itemInfo(itemId: String) -> ItemInfoVM? {
+        guard let core, let m = try? core.getItemMetadata(itemId: itemId) else { return nil }
+        return ItemInfoVM(
+            title: m.title, author: m.author, sourceType: m.sourceType,
+            trackedChanges: m.trackedChanges, importDate: m.importDate,
+            language: m.language, publishedDate: m.publishedDate,
+            retrievedDate: m.retrievedDate, canonicalUrl: m.canonicalUrl)
+    }
+
+    /// SC-03: after a DOCX import, post a non-blocking notice if the
+    /// document had unresolved tracked changes.
+    private func noteTrackedChangesIfNeeded(itemId: String, url: URL) {
+        guard url.pathExtension.lowercased() == "docx",
+            itemInfo(itemId: itemId)?.trackedChanges == true
+        else { return }
+        importNotice = String(
+            localized: "\(url.lastPathComponent) contains unresolved tracked changes. GIST imported the text with insertions included and deletions removed; open the original in Word to review the changes.")
     }
 
     /// Settings scene's Import-tab default (`ImportDefaults
@@ -560,6 +644,20 @@ final class CoreClient: ObservableObject {
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             return try decoder.decode(RsvpSessionVM.self, from: Data(json.utf8))
+        } catch {
+            self.error = "\(error)"
+            return nil
+        }
+    }
+
+    /// Opens a live Rust RSVP pacing session (`FfiRsvpSession`) for `itemId`,
+    /// restoring saved progress. `RsvpPlayer` drives it from a wall clock; all
+    /// pacing, ORP and stats arithmetic stays in `gist-rsvp`. Returns `nil`
+    /// on failure and sets `error`.
+    func openRsvpSession(itemId: String, wpm: UInt32) async -> FfiRsvpSession? {
+        guard let core else { return nil }
+        do {
+            return try core.openRsvpSession(itemId: itemId, wpm: wpm)
         } catch {
             self.error = "\(error)"
             return nil
@@ -895,6 +993,10 @@ struct LibraryItemVM: Identifiable {
     let sourceType: String
     let lastOpenedAt: Date?
     let progressFraction: Double
+    /// SC-15: word count and the estimated reading seconds at the WPM in
+    /// effect when the row was loaded (0 when the document is empty).
+    let wordCount: Int
+    let readingSeconds: Int
 
     init(
         id: String,
@@ -904,7 +1006,9 @@ struct LibraryItemVM: Identifiable {
         contentEncrypted: Bool = false,
         sourceType: String = "",
         lastOpenedAt: Date? = nil,
-        progressFraction: Double = 0
+        progressFraction: Double = 0,
+        wordCount: Int = 0,
+        readingSeconds: Int = 0
     ) {
         self.id = id
         self.title = title
@@ -914,6 +1018,8 @@ struct LibraryItemVM: Identifiable {
         self.sourceType = sourceType
         self.lastOpenedAt = lastOpenedAt
         self.progressFraction = progressFraction
+        self.wordCount = wordCount
+        self.readingSeconds = readingSeconds
     }
 }
 

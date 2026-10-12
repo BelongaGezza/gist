@@ -74,3 +74,28 @@ This entry is **not** deleted, because its ask was a *visual* confirmation and p
 **Reason:** keep the Windows flow reader's annotation anchoring aligned with Rust/Swift for merged tables.
 **Related commit/PR:** M7 role R7 (branch worktree-agent-a86e55a250667a5b0), ADR-019 addendum 2.
 **Action:** On a Windows session: add a `FlowDocumentDecoderTests` case decoding the golden block above (assert `Rows` and that unknown `spans` does not throw) and a flattening assertion equal to the golden text; import `fixtures/docx/with_merged_cells.docx` and confirm the table renders with 3 columns aligned. Delete this entry once verified.
+
+## Pending Windows Change — 2026-10-09 (Rust: `Config::pause_on_punctuation` + `FfiRsvpSession.set_pause_on_punctuation`/`pause_on_punctuation`)
+**File:** `apps/windows/GIST.Core/Generated/` (gitignored) and, optionally, the RSVP settings UI.
+**Change required:** regenerate the C# bindings (`tools/gen-bindings-cs` equivalent) so the two new `FfiRsvpSession` methods exist; build and run the Windows tests. Additive only — nothing existing changed. Optional follow-up: surface a "Pause longer at punctuation" toggle in the W4 RSVP reader like Apple's, using the same mutate-while-playing sequence (`pause(elapsed)` → `setPauseOnPunctuation(enabled, 0)` → `resume()` → re-anchor).
+**Reason:** added from a macOS session so Apple could finish adopting the FFI pacing session without keeping a Swift copy of the pacing table. `Config` gained a `#[serde(default)]` field (old JSON still decodes; `start_rsvp`'s JSON gains one key, which C#/Swift decoders ignore).
+**Related commit/PR:** branch `feat/apple-rsvp-ffi-adoption`.
+**Action:** regenerate bindings, `dotnet build`/test on Windows; confirm the `windows-build` CI leg is green on the PR.
+
+## Pending Windows Change — 2026-10-11
+**File:** `apps/windows/**` library row view-model / C# FFI wrapper
+**Change required:** Surface `FfiLibraryItem.word_count` and `estimate_reading_seconds(word_count, wpm)` (SC-15, ADR-030) as "N words, ~M min" on library rows; the generated C# bindings need regenerating.
+**Reason:** SC-15; Rust side done, no UI yet.
+**Action:** Implement and build on Windows.
+## Pending Windows Change — 2026-10-11 (SC-03 / SC-06: IR `Metadata` gains fields; new FFI `get_item_metadata`)
+**File:** `apps/windows/GIST.Core/Flow/FlowDocumentDecoder.cs` (must tolerate), `apps/windows/GIST.Core/Generated/` (gitignored); optional UI. **No Windows code was edited.**
+**Change required:** none for correctness. `Document.metadata` JSON (in `get_document_json`) gains additive keys `tracked_changes` (bool), `published_date`, `retrieved_date`, `canonical_url`, and `import_date`/`language` are now populated for new imports; DOCX `source_type` is always `docx`. A decoder that ignores unknown keys is unaffected. Optional: regenerate bindings for `GistCore.get_item_metadata` / `FfiDocumentMetadata` and show a tracked-changes notice for DOCX (spec §3.4) and web byline/dates.
+**Reason:** keep the Windows decoder tolerant and queue the SC-03/SC-06 UI.
+**Related commit/PR:** branch worktree-agent-a9db5a49d682ea802.
+**Action:** on Windows add a `FlowDocumentDecoderTests` case decoding a document whose `metadata` includes the new keys (assert no throw); delete this entry once verified.
+
+## Pending Windows Change — 2026-10-11 (SC-01 encoding prompt, SC-03 notice)
+**File:** apps/windows/** (C# / XAML)
+**Change required:** (1) On `.txt` import, call the FFI `detect_text_encoding`; if `uncertain` or `lossy`, show a picker (guess + curated list) and import via `import_file_with_encoding`; cancel imports nothing; handle `GistError.UnsupportedTextEncoding` as a typed case. (2) After a DOCX import, read `get_item_metadata`; if `tracked_changes`, show a non-blocking notice. macOS reference: `apps/apple/Shared/ImportMetadataViews.swift`, `CoreClient.swift`.
+**Reason:** spec §12 SC-01 and SC-03 stay open until Windows ships these. Not buildable or testable from macOS.
+**Action:** implement on Windows, verify, delete this entry.

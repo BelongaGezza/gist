@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod metadata_util;
+
 // ── Resource limits ────────────────────────────────────────────────────────
 
 /// Coarse, path-free classification of which resource limit an importer hit.
@@ -107,9 +109,27 @@ pub struct Metadata {
     /// documents imported before this field existed.
     #[serde(default)]
     pub source_copy_ref: Option<String>,
+    /// RFC 3339 UTC timestamp of when the item was imported (`None` for
+    /// documents imported before SC-06).
     pub import_date: Option<String>,
+    /// BCP-47-ish language tag when determinable (web `<html lang>`/meta,
+    /// ePub `dc:language`); `None` otherwise.
     pub language: Option<String>,
     pub word_count: u32,
+    /// SC-03: DOCX contained unresolved tracked changes (`w:ins`/`w:del`).
+    /// Replaces the old `source_type = "docx:tracked-changes"` hack.
+    /// Additive `#[serde(default)]` field (ADR-019): no `ir_version` bump.
+    #[serde(default)]
+    pub tracked_changes: bool,
+    /// SC-06: web publish date as `YYYY-MM-DD`, when the page declares one.
+    #[serde(default)]
+    pub published_date: Option<String>,
+    /// SC-06: RFC 3339 UTC timestamp of the web fetch.
+    #[serde(default)]
+    pub retrieved_date: Option<String>,
+    /// SC-06: the page's declared canonical `http(s)` URL.
+    #[serde(default)]
+    pub canonical_url: Option<String>,
 }
 
 impl Metadata {
@@ -123,6 +143,10 @@ impl Metadata {
             import_date: None,
             language: None,
             word_count: 0,
+            tracked_changes: false,
+            published_date: None,
+            retrieved_date: None,
+            canonical_url: None,
         }
     }
 }
@@ -666,6 +690,53 @@ mod tests {
         });
         let meta: Metadata = serde_json::from_value(json).unwrap();
         assert_eq!(meta.source_copy_ref, None);
+    }
+
+    /// ADR-019 (SC-03/SC-06): the four new fields are additive — an old blob
+    /// (none of them present) decodes with defaults...
+    #[test]
+    fn old_metadata_without_sc03_sc06_fields_decodes_with_defaults() {
+        let json = serde_json::json!({
+            "title": "old", "author": null, "source_type": "docx:tracked-changes",
+            "source_ref": null, "source_copy_ref": null, "import_date": null,
+            "language": null, "word_count": 3,
+        });
+        let m: Metadata = serde_json::from_value(json).unwrap();
+        assert!(!m.tracked_changes);
+        assert_eq!(m.published_date, None);
+        assert_eq!(m.retrieved_date, None);
+        assert_eq!(m.canonical_url, None);
+    }
+
+    /// ...and a new blob still decodes in the *prior* shape (a struct with
+    /// exactly the pre-SC-03 fields, as an older binary has), because
+    /// unknown keys are ignored. No `ir_version` bump is therefore needed.
+    #[test]
+    fn new_metadata_decodes_in_the_prior_shape() {
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct PriorMetadata {
+            title: String,
+            author: Option<String>,
+            source_type: String,
+            source_ref: Option<String>,
+            #[serde(default)]
+            source_copy_ref: Option<String>,
+            import_date: Option<String>,
+            language: Option<String>,
+            word_count: u32,
+        }
+        let mut m = Metadata::minimal("new");
+        m.tracked_changes = true;
+        m.published_date = Some("2024-01-02".into());
+        m.retrieved_date = Some("2026-10-11T00:00:00Z".into());
+        m.canonical_url = Some("https://example.com/a".into());
+        let v = serde_json::to_value(&m).unwrap();
+        let prior: PriorMetadata = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(prior.title, "new");
+        let back: Metadata = serde_json::from_value(v).unwrap();
+        assert!(back.tracked_changes);
+        assert_eq!(back.published_date.as_deref(), Some("2024-01-02"));
     }
 
     // ── Block::Table (M6/R3, ADR-019 addendum) ───────────────────────────
