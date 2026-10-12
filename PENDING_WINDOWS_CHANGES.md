@@ -58,13 +58,6 @@ This entry is **not** deleted, because its ask was a *visual* confirmation and p
 
 <!-- Restored 2026-10-12: the six entries below were deleted by commit 663e319 (PR #104) together with the ADR-021 entry it applied, but none of them had been applied (checked against apps/windows on main @ 473ff86: no ResourceLimit kind, no table-spans decoding, no pause-on-punctuation toggle, no word count, metadata notice or encoding prompt). Bindings were regenerated on Windows on 2026-10-12, so the "regenerate bindings" steps are done; the UI/test steps are not. -->
 
-## Pending Windows Change — 2026-10-09 (Rust: `Config::pause_on_punctuation` + `FfiRsvpSession.set_pause_on_punctuation`/`pause_on_punctuation`)
-**File:** `apps/windows/GIST.Core/Generated/` (gitignored) and, optionally, the RSVP settings UI.
-**Change required:** regenerate the C# bindings (`tools/gen-bindings-cs` equivalent) so the two new `FfiRsvpSession` methods exist; build and run the Windows tests. Additive only — nothing existing changed. Optional follow-up: surface a "Pause longer at punctuation" toggle in the W4 RSVP reader like Apple's, using the same mutate-while-playing sequence (`pause(elapsed)` → `setPauseOnPunctuation(enabled, 0)` → `resume()` → re-anchor).
-**Reason:** added from a macOS session so Apple could finish adopting the FFI pacing session without keeping a Swift copy of the pacing table. `Config` gained a `#[serde(default)]` field (old JSON still decodes; `start_rsvp`'s JSON gains one key, which C#/Swift decoders ignore).
-**Related commit/PR:** branch `feat/apple-rsvp-ffi-adoption`.
-**Bindings regenerated and the Windows build/tests are green (2026-10-12).** Remaining: the optional "Pause longer at punctuation" toggle in the RSVP reader. Delete this entry once done or declined.
-
 ## Pending Windows Change — 2026-10-11 (SC-06 web byline/dates UI)
 **Decoder tolerance applied and tested 2026-10-12.** `get_item_metadata` bindings are generated and `CoreClient.GetItemMetadataAsync` exists (used for the SC-03 tracked-changes notice). **Remaining (optional):** show web byline/published/retrieved dates and canonical URL (only http/https as a link, never auto-opened) in an item-info surface, mirroring Apple's `ItemInfoPresentation`. Delete this entry once done or declined.
 
