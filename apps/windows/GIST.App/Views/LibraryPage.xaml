@@ -17,6 +17,9 @@
         <!-- Header: title left, search right (spec 4.1). -->
         <StackPanel Grid.Row="0" Spacing="8">
         <!-- Fixed-text warning when a removal left stored files behind (never paths/titles). -->
+        <!-- SC-03: non-blocking, path-free notice about the last import. -->
+        <InfoBar x:Name="ImportNoticeBar" Severity="Informational" IsOpen="False" IsClosable="True"
+                 Closed="OnImportNoticeClosed" AutomationProperties.AutomationId="LibraryPage_ImportNotice" />
         <InfoBar x:Name="RemoveWarningBar" Severity="Warning" IsOpen="False" IsClosable="True"
                  Closed="OnRemoveWarningClosed" Loaded="OnRemoveWarningLoaded"
                  AutomationProperties.AutomationId="LibraryPage_RemoveWarning" />
@@ -132,6 +135,10 @@
                             <TextBlock Text="{x:Bind Title}" Style="{StaticResource BodyStrongTextBlockStyle}"
                                        TextTrimming="CharacterEllipsis" />
                             <TextBlock Text="{x:Bind Authors}" Visibility="{x:Bind AuthorsVisibility}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind SizeText}" Visibility="{x:Bind SizeVisibility}"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        TextTrimming="CharacterEllipsis" />

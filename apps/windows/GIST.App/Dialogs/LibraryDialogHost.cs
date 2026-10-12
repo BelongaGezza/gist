@@ -1,4 +1,5 @@
 using Gist.Core.Client;
+using Gist.Core.Models;
 using Gist.Core.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -191,6 +192,7 @@ public sealed class LibraryDialogHost
     private Task ShowAsync(LibraryViewModel vm, XamlRoot xamlRoot, LibraryDialog which) => which switch
     {
         LibraryDialog.ImportUrl => ShowImportUrlAsync(vm, xamlRoot),
+        LibraryDialog.EncodingPrompt => ShowEncodingPromptAsync(vm, xamlRoot),
         LibraryDialog.NewCollection => ShowNewCollectionAsync(vm, xamlRoot),
         LibraryDialog.RemoveConfirm => ShowRemoveAsync(vm, xamlRoot),
         LibraryDialog.EncryptConfirm => ShowEncryptAsync(vm, xamlRoot),
@@ -295,6 +297,53 @@ public sealed class LibraryDialogHost
         if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
             await vm.ImportUrlAsync(box.Text);
+        }
+    }
+
+    // ── Encoding prompt (SC-01) ────────────────────────────────────────────
+
+    private static async Task ShowEncodingPromptAsync(LibraryViewModel vm, XamlRoot xamlRoot)
+    {
+        if (vm.PendingEncoding is not { } pending) return;
+
+        var combo = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+        AutomationProperties.SetName(combo, "Encoding");
+        foreach (var option in TextEncodingChoices.Options(pending.DetectedName)) combo.Items.Add(new ComboBoxItem { Content = option.Name, Tag = option.Label });
+        var selection = TextEncodingChoices.Selection(pending.DetectedName);
+        combo.SelectedItem = combo.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == selection);
+
+        var warning = new TextBlock
+        {
+            Text = DialogContent.EncodingLossyWarning,
+            TextWrapping = TextWrapping.Wrap,
+            Visibility = pending.Lossy ? Visibility.Visible : Visibility.Collapsed,
+        };
+
+        var dialog = NewDialog(xamlRoot, DialogContent.EncodingTitle);
+        dialog.PrimaryButtonText = DialogContent.EncodingPrimary;
+        dialog.CloseButtonText = DialogContent.CancelButton;
+        dialog.IsPrimaryButtonEnabled = combo.SelectedItem is not null;
+        dialog.Content = Stack(Body(DialogContent.EncodingBody(pending.DetectedName, pending.FileName)), combo, warning);
+
+        // Re-probe when the choice changes so the lossy warning reflects the encoding picked.
+        combo.SelectionChanged += async (_, _) =>
+        {
+            dialog.IsPrimaryButtonEnabled = combo.SelectedItem is not null;
+            if (combo.SelectedItem is ComboBoxItem { Tag: string label })
+            {
+                var lossy = await vm.ProbeLossyAsync(pending.Path, label);
+                warning.Visibility = lossy == true ? Visibility.Visible : Visibility.Collapsed;
+            }
+        };
+
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary
+            && combo.SelectedItem is ComboBoxItem { Tag: string chosen })
+        {
+            await vm.ImportFileWithEncodingAsync(pending.Path, chosen);
+        }
+        else
+        {
+            vm.CancelEncodingPrompt();
         }
     }
 

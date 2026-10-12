@@ -37,6 +37,12 @@ public enum CoreErrorKind
     InternalPanic,
 
     /// <summary>Any other error reported by the core.</summary>
+    /// <summary>A plain-text import named an encoding the core does not recognise (SC-01).</summary>
+    UnsupportedTextEncoding,
+
+    /// <summary>An import was rejected by a resource limit (size, pages, entries, nesting, table size).</summary>
+    ResourceLimit,
+
     Core,
 
     /// <summary>An unexpected managed-side exception.</summary>

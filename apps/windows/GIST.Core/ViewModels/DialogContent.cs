@@ -75,12 +75,28 @@ public static class DialogContent
     /// <summary>Accessible name for a tag's remove button.</summary>
     public static string RemoveTagAutomationName(string tag) => $"Remove tag {tag}";
 
+    /// <summary>SC-03 notice shown after importing a DOCX that still had tracked changes.</summary>
+    public const string TrackedChangesNotice = "This document had unresolved tracked changes when it was imported.";
+
+    /// <summary>SC-01 prompt text.</summary>
+    public const string EncodingTitle = "Choose Text Encoding";
+
+    public static string EncodingBody(string detected, string fileName) =>
+        $"GIST guessed {detected} for {fileName}. Choose the encoding if the text looks wrong.";
+
+    public const string EncodingLossyWarning =
+        "Some characters can't be read with this encoding and will appear as replacement characters.";
+
+    public const string EncodingPrimary = "Import";
+
     /// <summary>
     /// A fixed, generic sentence for a failure of the given kind. Never the core's own message.
     /// </summary>
     public static string ErrorMessage(CoreErrorKind? kind) => kind switch
     {
         CoreErrorKind.DrmProtected => DrmMessage,
+        CoreErrorKind.UnsupportedTextEncoding => "That text encoding isn't supported. Choose a different one and try again.",
+        CoreErrorKind.ResourceLimit => "This file is too large or too complex for GIST's import limits, so it couldn't be imported.",
         CoreErrorKind.SourceFileMissing => "The file could not be found. It may have been moved or deleted.",
         CoreErrorKind.KeyStoreCorrupt => "GIST can't use its encryption key, so encrypted items can't be opened.",
         CoreErrorKind.KeyStoreUnavailable => "GIST couldn't reach its encryption key. Please try again.",
