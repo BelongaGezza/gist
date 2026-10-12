@@ -485,4 +485,35 @@ public sealed class CoreClientTests : IDisposable
 
     private static EncryptItemsSummaryShape Shape(Gist.Core.Models.EncryptItemsSummary summary) =>
         new(summary.EncryptedCount, summary.AlreadyEncryptedCount, summary.FailedCount);
+
+    // ── ADR-021 reading state ──────────────────────────────────────────────
+
+    [Fact]
+    public async Task Imported_item_reports_its_type_and_has_never_been_opened()
+    {
+        using var client = await NewReadyClientAsync();
+        await client.ImportFileAsync(_workspace.CopyFixture("basic_ascii.txt"));
+
+        var item = Assert.Single(client.Items);
+        Assert.Equal("txt", item.SourceType);
+        Assert.Null(item.LastOpenedAt);
+        Assert.Equal(0, item.ProgressFraction);
+    }
+
+    [Fact]
+    public async Task MarkItemOpened_stamps_last_read_and_unknown_ids_are_silent()
+    {
+        using var client = await NewReadyClientAsync();
+        var id = await client.ImportFileAsync(_workspace.CopyFixture("basic_ascii.txt"));
+        Assert.NotNull(id);
+
+        await client.MarkItemOpenedAsync("no-such-id");
+        Assert.Null(client.LastError);
+
+        await client.MarkItemOpenedAsync(id!);
+        await client.RefreshAsync();
+
+        Assert.Null(client.LastError);
+        Assert.NotNull(Assert.Single(client.Items).LastOpenedAt);
+    }
 }

@@ -222,4 +222,36 @@ public sealed class LibraryFilteringTests
         Assert.Equal(labels.Count, labels.Distinct(StringComparer.Ordinal).Count());
         Assert.DoesNotContain(labels, string.IsNullOrWhiteSpace);
     }
+
+    // ── ADR-021 reading-state keys (same rules as Apple's LibraryFiltering.sorted) ──
+
+    private static LibraryItemVM State(string id, string type = "", long? opened = null, double progress = 0) =>
+        new(id, id, Array.Empty<string>(), sourceType: type, lastOpenedAt: opened, progressFraction: progress);
+
+    private static string Ids(IReadOnlyList<LibraryItemVM> items) => string.Join(",", items.Select(i => i.Id));
+
+    [Fact]
+    public void SourceType_sorts_alphabetically_with_unknown_last_and_ties_in_incoming_order()
+    {
+        var items = new[] { State("a", ""), State("b", "pdf"), State("c", "epub"), State("d", "pdf"), State("e", "") };
+        Assert.Equal("c,b,d,a,e", Ids(LibraryFiltering.Sorted(items, LibrarySortOrder.SourceType)));
+    }
+
+    [Theory]
+    [InlineData(LibrarySortOrder.LastReadNewest, "c,a,b,d,e")]
+    [InlineData(LibrarySortOrder.LastReadOldest, "b,a,c,d,e")]
+    public void LastRead_puts_never_opened_last_in_both_directions(LibrarySortOrder order, string expected)
+    {
+        var items = new[] { State("a", opened: 200), State("b", opened: 100), State("c", opened: 300), State("d"), State("e") };
+        Assert.Equal(expected, Ids(LibraryFiltering.Sorted(items, order)));
+    }
+
+    [Theory]
+    [InlineData(LibrarySortOrder.ProgressHighest, "c,a,b,d")]
+    [InlineData(LibrarySortOrder.ProgressLowest, "b,d,a,c")]
+    public void Progress_orders_by_fraction_and_keeps_incoming_order_for_ties(LibrarySortOrder order, string expected)
+    {
+        var items = new[] { State("a", progress: 0.5), State("b", progress: 0), State("c", progress: 1), State("d", progress: 0) };
+        Assert.Equal(expected, Ids(LibraryFiltering.Sorted(items, order)));
+    }
 }
