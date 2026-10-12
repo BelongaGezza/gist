@@ -45,6 +45,11 @@ internal sealed class FfiRsvpEngine : IRsvpEngine
 
     public void SetWpm(uint wpm, ulong elapsedMs) => _session.SetWpm(wpm, elapsedMs);
 
+    public bool PauseOnPunctuation => _session.PauseOnPunctuation();
+
+    public void SetPauseOnPunctuation(bool enabled, ulong elapsedMs) =>
+        _session.SetPauseOnPunctuation(enabled, elapsedMs);
+
     public void Dispose()
     {
         if (_disposed) return;

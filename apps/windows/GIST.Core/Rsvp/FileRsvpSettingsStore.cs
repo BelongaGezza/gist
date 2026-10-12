@@ -9,12 +9,14 @@ namespace Gist.Core.Rsvp;
 public sealed class FileRsvpSettingsStore
 {
     private readonly string _path;
+    private readonly string _punctuationPath;
 
     /// <param name="path">Absolute file path. The parent directory must already exist.</param>
     public FileRsvpSettingsStore(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         _path = path;
+        _punctuationPath = path + ".punctuation";
     }
 
     /// <summary>The saved WPM clamped into the engine's range, or null when absent or unparseable.</summary>
@@ -38,6 +40,33 @@ public sealed class FileRsvpSettingsStore
         try
         {
             File.WriteAllText(_path, wpm.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    /// <summary>Remembered "pause longer at punctuation" choice; null when never set or unreadable.</summary>
+    public bool? LoadPauseOnPunctuation()
+    {
+        try
+        {
+            if (!File.Exists(_punctuationPath)) return null;
+            return File.ReadAllText(_punctuationPath).Trim() switch
+            {
+                "1" => true,
+                "0" => false,
+                _ => null,
+            };
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
+    public void SavePauseOnPunctuation(bool enabled)
+    {
+        try
+        {
+            File.WriteAllText(_punctuationPath, enabled ? "1" : "0");
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
