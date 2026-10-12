@@ -171,7 +171,22 @@ pub struct SweepOutcome {
     /// One entry per failure, coarse kind only. Never contains a "missing
     /// file" entry. See [`FileDeleteFailureKind`].
     pub failure_kinds: Vec<FileDeleteFailureKind>,
+    /// Unreferenced, pattern-matching files that were *kept* because they
+    /// were modified within the sweep's minimum age (or their modification
+    /// time is in the future or unreadable), F39. A later sweep reclaims a
+    /// genuine orphan once it is old enough. Not exposed over FFI.
+    pub files_too_recent: u32,
 }
+
+/// Default minimum age for [`Core::sweep_orphaned_files`] (F39): an
+/// unreferenced blob modified more recently than this is kept, because it may
+/// belong to an import that has written its files but not yet committed its
+/// row — in this process or another one on the same storage directory.
+/// `Store::insert_item` writes the blobs and the original copy only after the
+/// (possibly long) parse/OCR step, so the window to cover is the row/FTS
+/// insert; ten minutes is a generous margin. The cost is that a genuine
+/// orphan younger than this waits for a later sweep (disk space only).
+pub const ORPHAN_SWEEP_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Accumulates per-file deletion results for [`Core::remove_items_detailed`]
 /// and [`Core::sweep_orphaned_files`] so both report the same shape.
@@ -322,12 +337,31 @@ fn is_sweepable_original_name(name: &str) -> bool {
 /// *not* in `keep` and that `is_candidate` positively identifies as a
 /// GIST-generated file. See [`Core::sweep_orphaned_files`] for the full
 /// safety contract this implements.
+/// Is a candidate file old enough for the sweep to delete (F39)? `min_age`
+/// of zero disables the check. A modification time that is unreadable or in
+/// the future (clock skew) counts as *not* old enough: the sweep only ever
+/// errs towards keeping a file.
+fn old_enough(md: &std::fs::Metadata, min_age: std::time::Duration) -> bool {
+    if min_age.is_zero() {
+        return true;
+    }
+    let Ok(modified) = md.modified() else {
+        return false;
+    };
+    match std::time::SystemTime::now().duration_since(modified) {
+        Ok(age) => age >= min_age,
+        Err(_) => false,
+    }
+}
+
 fn sweep_dir(
     dir: &Path,
     keep: &std::collections::HashSet<String>,
     is_candidate: fn(&str) -> bool,
+    min_age: std::time::Duration,
     tally: &mut DeleteTally,
     scanned: &mut u32,
+    too_recent: &mut u32,
 ) -> Result<(), CoreError> {
     match std::fs::symlink_metadata(dir) {
         // A symlink/junction *as* the directory: never followed, so the
@@ -363,6 +397,18 @@ fn sweep_dir(
         // Keep-list lookup is case-insensitive (see `sweep_orphaned_files`);
         // the candidate-pattern check uses the name as it really is.
         if keep.contains(&name.to_ascii_lowercase()) || !is_candidate(&name) {
+            continue;
+        }
+        // F39: an unreferenced file this young may belong to an import whose
+        // row is not committed yet. `DirEntry::metadata` does not follow
+        // links (and links were already skipped above). A metadata failure
+        // keeps the file, like every other uncertainty in this sweep.
+        let fresh = match entry.metadata() {
+            Ok(md) => !old_enough(&md, min_age),
+            Err(_) => true,
+        };
+        if fresh {
+            *too_recent += 1;
             continue;
         }
         let path = dir.join(&name);
@@ -1533,10 +1579,29 @@ impl Core {
     ///   level, so a link planted inside the storage directory cannot make
     ///   the sweep reach outside it.
     /// - Directories are never removed.
+    /// - An unreferenced file modified less than [`ORPHAN_SWEEP_MIN_AGE`] ago
+    ///   (or with an unreadable or future modification time) is kept and
+    ///   counted in [`SweepOutcome::files_too_recent`] (F39): `insert_item`
+    ///   writes an import's blobs before its row commits, so a sweep in
+    ///   another process (or any caller not serialised with imports) could
+    ///   otherwise delete a just-written import. A re-import that reuses an
+    ///   existing content-addressed original refreshes its modification time
+    ///   for the same reason (`Store::store_original_copy`).
     ///
     /// Failures are counted, not propagated: a file still locked at sweep
     /// time just stays for the next sweep.
     pub fn sweep_orphaned_files(&self) -> Result<SweepOutcome, CoreError> {
+        self.sweep_orphaned_files_older_than(ORPHAN_SWEEP_MIN_AGE)
+    }
+
+    /// [`Core::sweep_orphaned_files`] with an explicit minimum age. A zero
+    /// `min_age` disables the age check; only a caller that knows no import
+    /// can be in flight on this storage directory (in any process) should
+    /// pass one — tests, mainly.
+    pub fn sweep_orphaned_files_older_than(
+        &self,
+        min_age: std::time::Duration,
+    ) -> Result<SweepOutcome, CoreError> {
         let storage_dir = self.store.storage_dir().to_path_buf();
         let referenced = self.store.list_referenced_files()?;
 
@@ -1580,27 +1645,33 @@ impl Core {
 
         let mut tally = DeleteTally::default();
         let mut scanned = 0u32;
+        let mut too_recent = 0u32;
 
         sweep_dir(
             &storage_dir,
             &keep_blobs,
             is_sweepable_blob_name,
+            min_age,
             &mut tally,
             &mut scanned,
+            &mut too_recent,
         )?;
         sweep_dir(
             &storage_dir.join("originals"),
             &keep_originals,
             is_sweepable_original_name,
+            min_age,
             &mut tally,
             &mut scanned,
+            &mut too_recent,
         )?;
 
         tracing::debug!(
-            "gist-core: sweep scanned {} file(s), deleted {}, failed {}",
+            "gist-core: sweep scanned {} file(s), deleted {}, failed {}, kept {} too recent",
             scanned,
             tally.deleted,
-            tally.failed()
+            tally.failed(),
+            too_recent
         );
 
         Ok(SweepOutcome {
@@ -1609,6 +1680,7 @@ impl Core {
             files_missing: tally.missing,
             files_failed: tally.failed(),
             failure_kinds: tally.failure_kinds,
+            files_too_recent: too_recent,
         })
     }
 
@@ -3530,7 +3602,9 @@ mod tests {
             std::fs::write(path, b"not mine").unwrap();
         }
 
-        let outcome = core.sweep_orphaned_files().unwrap();
+        let outcome = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(
             (outcome.files_deleted, outcome.files_failed),
             (orphans.len() as u32, 0),
@@ -3553,7 +3627,9 @@ mod tests {
         );
 
         // Idempotent: a second sweep with nothing orphaned deletes nothing.
-        let again = core.sweep_orphaned_files().unwrap();
+        let again = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!((again.files_deleted, again.files_failed), (0, 0));
     }
 
@@ -3579,7 +3655,9 @@ mod tests {
 
         // One row gone, the other still referencing the shared copy.
         core.remove_items(&[first], false).unwrap();
-        let outcome = core.sweep_orphaned_files().unwrap();
+        let outcome = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(outcome.files_deleted, 0, "{outcome:?}");
         assert!(
             copy.exists(),
@@ -3588,13 +3666,136 @@ mod tests {
 
         // Last reference gone: now it is genuinely orphaned.
         core.remove_items(&[second], false).unwrap();
-        let outcome = core.sweep_orphaned_files().unwrap();
+        let outcome = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(
             (outcome.files_deleted, outcome.files_failed),
             (2, 0),
             "the unreferenced copy and its checksum sidecar: {outcome:?}"
         );
         assert!(!copy.exists());
+    }
+
+    /// Set a file's modification time `secs` seconds from now (negative =
+    /// in the past). F39 tests only.
+    fn set_mtime_offset(path: &Path, secs: i64) {
+        let now = std::time::SystemTime::now();
+        let delta = std::time::Duration::from_secs(secs.unsigned_abs());
+        let when = if secs < 0 { now - delta } else { now + delta };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    /// F39: the default sweep keeps an unreferenced file that was modified
+    /// within `ORPHAN_SWEEP_MIN_AGE` (it may belong to an import whose row
+    /// is not committed yet, possibly in another process) and one whose
+    /// modification time is in the future, and deletes it once it is old
+    /// enough.
+    #[test]
+    fn default_sweep_keeps_young_and_future_dated_orphans_and_reclaims_old_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+
+        let young = storage.join("01926f3a-7c2b-7a10-9f3d-2b6c5e4a1d88.json");
+        let future = storage.join("01926f3a-7c2b-7a10-9f3d-2b6c5e4a1d89.json");
+        let old = storage.join("01926f3a-7c2b-7a10-9f3d-2b6c5e4a1d8a.tokens.json");
+        let old_original = storage
+            .join("originals")
+            .join(format!("{}.txt", "cd".repeat(32)));
+        std::fs::create_dir_all(storage.join("originals")).unwrap();
+        for p in [&young, &future, &old, &old_original] {
+            std::fs::write(p, b"orphan").unwrap();
+        }
+        set_mtime_offset(&future, 3600);
+        let old_secs = -(ORPHAN_SWEEP_MIN_AGE.as_secs() as i64) - 60;
+        set_mtime_offset(&old, old_secs);
+        set_mtime_offset(&old_original, old_secs);
+
+        let outcome = core.sweep_orphaned_files().unwrap();
+        assert_eq!(
+            (
+                outcome.files_deleted,
+                outcome.files_too_recent,
+                outcome.files_failed
+            ),
+            (2, 2, 0),
+            "{outcome:?}"
+        );
+        assert!(young.exists(), "a just-written orphan must be kept");
+        assert!(future.exists(), "a future-dated orphan must be kept");
+        assert!(!old.exists() && !old_original.exists());
+
+        // Once the young file ages past the grace it is reclaimed; the
+        // future-dated one stays until its clock catches up.
+        set_mtime_offset(&young, old_secs);
+        let outcome = core.sweep_orphaned_files().unwrap();
+        assert_eq!((outcome.files_deleted, outcome.files_too_recent), (1, 1));
+        assert!(!young.exists() && future.exists());
+    }
+
+    /// F39 end to end: a just-imported item's files are protected by the
+    /// grace even if its row were not there yet. Simulated by importing,
+    /// then deleting only the DB row (as a crash between the blob writes
+    /// and the row commit, or a second process's sweep running inside that
+    /// window, would see it).
+    #[test]
+    fn default_sweep_does_not_reclaim_a_just_written_import_whose_row_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+        let src = dir.path().join("inflight.txt");
+        std::fs::write(&src, b"Written but not yet committed.").unwrap();
+        let id = core.import_file(&src, &NullObserver).unwrap();
+        let blob = storage.join(format!("{id}.json"));
+        let copy = the_one_sandboxed_copy(&storage);
+        core.store.remove_items(&[id]).unwrap(); // row gone, files untouched
+
+        let outcome = core.sweep_orphaned_files().unwrap();
+        assert_eq!(outcome.files_deleted, 0, "{outcome:?}");
+        assert!(outcome.files_too_recent >= 6, "{outcome:?}");
+        assert!(blob.exists() && copy.exists());
+
+        // Without the grace (the pre-F39 behaviour) they would have gone.
+        let outcome = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
+        assert!(outcome.files_deleted >= 6, "{outcome:?}");
+        assert!(!blob.exists() && !copy.exists());
+    }
+
+    /// F39: re-importing bytes whose content-addressed copy already exists
+    /// (e.g. as an old, unreferenced orphan) refreshes that copy's
+    /// modification time, so the default sweep cannot delete it out from
+    /// under the new import before its row commits.
+    #[test]
+    fn reimport_refreshes_an_existing_original_copys_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, storage) = core_rooted_at(dir.path());
+        let src = dir.path().join("dup.txt");
+        std::fs::write(&src, b"Same bytes, imported, removed, imported again.").unwrap();
+        let first = core.import_file(&src, &NullObserver).unwrap();
+        let copy = the_one_sandboxed_copy(&storage);
+        let sidecar = PathBuf::from(format!("{}.blake3", copy.display()));
+        // Make the copy an old orphan (row gone, file kept), as a removal
+        // whose delete failed long ago would leave it.
+        core.store.remove_items(&[first]).unwrap();
+        let old_secs = -(ORPHAN_SWEEP_MIN_AGE.as_secs() as i64) - 60;
+        set_mtime_offset(&copy, old_secs);
+        set_mtime_offset(&sidecar, old_secs);
+        let before = std::fs::read(&copy).unwrap();
+
+        let _second = core.import_file(&src, &NullObserver).unwrap();
+        assert_eq!(std::fs::read(&copy).unwrap(), before, "content untouched");
+        for p in [&copy, &sidecar] {
+            let age = std::time::SystemTime::now()
+                .duration_since(std::fs::metadata(p).unwrap().modified().unwrap())
+                .unwrap_or_default();
+            assert!(age < ORPHAN_SWEEP_MIN_AGE, "{p:?} mtime not refreshed");
+        }
     }
 
     /// The sweep must not follow a link out of the storage directory. On
@@ -3618,7 +3819,9 @@ mod tests {
         std::os::unix::fs::symlink(&outside, storage.join("originals")).unwrap();
         std::os::unix::fs::symlink(&bait, storage.join("linked.json")).unwrap();
 
-        let outcome = core.sweep_orphaned_files().unwrap();
+        let outcome = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(
             (outcome.files_deleted, outcome.files_failed),
             (0, 0),
@@ -3720,14 +3923,18 @@ mod tests {
 
         // A sweep while the handle is still open must also fail honestly,
         // and must not lose the file.
-        let blocked = core.sweep_orphaned_files().unwrap();
+        let blocked = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(blocked.files_failed, 1, "{blocked:?}");
         assert_eq!(blocked.failure_kinds, vec![FileDeleteFailureKind::Locked]);
         assert!(doc_path.exists());
 
         drop(handle);
 
-        let swept = core.sweep_orphaned_files().unwrap();
+        let swept = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(
             (swept.files_deleted, swept.files_failed),
             (1, 0),
@@ -3818,7 +4025,9 @@ mod tests {
                 Err(e @ ImportError::UnsupportedType(_)) => {
                     eprintln!("{name}: refused as unsupported ({e}) — checking for residue");
                     assert!(core.list_items(0, 10).unwrap().is_empty());
-                    let sweep = core.sweep_orphaned_files().unwrap();
+                    let sweep = core
+                        .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+                        .unwrap();
                     assert_eq!(
                         (sweep.files_scanned, sweep.files_deleted),
                         (0, 0),
@@ -3874,7 +4083,9 @@ mod tests {
             return;
         }
 
-        let outcome = core.sweep_orphaned_files().unwrap();
+        let outcome = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(
             (outcome.files_deleted, outcome.files_failed),
             (0, 0),
@@ -3924,7 +4135,9 @@ mod tests {
              re-cased file — otherwise this test is not exercising what it claims to"
         );
 
-        let outcome = core.sweep_orphaned_files().unwrap();
+        let outcome = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(
             (outcome.files_deleted, outcome.files_failed),
             (0, 0),
@@ -3985,7 +4198,9 @@ mod tests {
 
         drop(handle);
 
-        let swept = core.sweep_orphaned_files().unwrap();
+        let swept = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert!(
             !copy_path.exists(),
             "the sweep must reclaim the now-unlocked orphaned copy: {swept:?}"
@@ -4109,7 +4324,9 @@ mod tests {
         assert!(core.get_document(&id_b).is_ok());
 
         // And a sweep must agree: a referenced file is never an orphan.
-        let swept = core.sweep_orphaned_files().unwrap();
+        let swept = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(
             (swept.files_deleted, swept.files_failed),
             (0, 0),
@@ -4395,7 +4612,9 @@ mod tests {
         // And the sweep must not act on it either: its keep-list and its
         // candidate patterns are both name-based and confined to the two
         // directories it scans.
-        let swept = core.sweep_orphaned_files().unwrap();
+        let swept = core
+            .sweep_orphaned_files_older_than(std::time::Duration::ZERO)
+            .unwrap();
         assert!(
             outside.exists() && sha256_hex(&outside) == outside_hash,
             "the sweep must not reach outside the storage directory either: {swept:?}"
