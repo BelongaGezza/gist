@@ -16,6 +16,13 @@ public enum LibrarySortOrder
     TitleAZ,
     TitleZA,
     AuthorAZ,
+
+    // ADR-021 reading-state keys, appended so the original menu order is unchanged.
+    SourceType,
+    LastReadNewest,
+    LastReadOldest,
+    ProgressHighest,
+    ProgressLowest,
 }
 
 /// <summary>Display labels for <see cref="LibrarySortOrder"/>, kept out of the enum itself.</summary>
@@ -29,6 +36,11 @@ public static class LibrarySortOrderExtensions
         LibrarySortOrder.TitleAZ => "Title (A–Z)",
         LibrarySortOrder.TitleZA => "Title (Z–A)",
         LibrarySortOrder.AuthorAZ => "Author (A–Z)",
+        LibrarySortOrder.SourceType => "Type",
+        LibrarySortOrder.LastReadNewest => "Last Read (Most Recent)",
+        LibrarySortOrder.LastReadOldest => "Last Read (Oldest)",
+        LibrarySortOrder.ProgressHighest => "Progress (Most Read)",
+        LibrarySortOrder.ProgressLowest => "Progress (Least Read)",
         _ => throw new ArgumentOutOfRangeException(nameof(order), order, null),
     };
 }

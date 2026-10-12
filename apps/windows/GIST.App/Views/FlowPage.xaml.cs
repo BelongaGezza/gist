@@ -89,6 +89,7 @@ public sealed partial class FlowPage : Page, IReadingLayout
 
         try
         {
+            _ = AppServices.Core.MarkItemOpenedAsync(_args.ItemId);
             var json = await AppServices.Core.GetDocumentJsonAsync(_args.ItemId);
             if (_left) return;
             if (json is null)
