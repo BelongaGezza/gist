@@ -1529,7 +1529,12 @@ impl GistCore {
     /// Never deletes a file any row still references (including a
     /// content-addressed ADR-006 original shared by several items), never
     /// touches anything outside the storage directory, and never follows a
-    /// symlink or Windows junction out of it. See
+    /// symlink or Windows junction out of it. Since 2026-10-12 (F39) it
+    /// also keeps any unreferenced file modified within the last ten minutes
+    /// (`gist_core::ORPHAN_SWEEP_MIN_AGE`), so it cannot delete an import
+    /// that has written its files but not yet committed its row — including
+    /// one in a second process. A just-orphaned file is therefore reclaimed
+    /// by a later sweep, not the next one. See
     /// `gist_core::Core::sweep_orphaned_files` for the full contract.
     pub fn sweep_orphaned_files(&self) -> Result<FfiSweepOutcome, GistError> {
         ffi_catch!({
