@@ -118,6 +118,42 @@ public sealed class FlowDocumentDecoderTests
     }
 
     [Fact]
+    public void Merged_cell_table_with_spans_decodes_the_aligned_grid_and_matches_the_second_golden()
+    {
+        // Second cross-language golden (Rust gist-core and Swift FlowTableTests): `spans` is additive
+        // and ignored here; covered slots are empty cells so a merged region contributes its text once.
+        const string json = """
+            {"id":"d","metadata":{"title":"T","author":null},"sections":[{"id":"s0","heading":null,"blocks":[
+            {"Paragraph":{"runs":[{"text":"Intro text.","bold":false,"italic":false,"code":false}]}},
+            {"Table":{"rows":[["Sales","","Notes"],["North","100","Strong"],["South","80",""]],"header_row":true,"spans":[{"row":0,"col":0,"rowspan":1,"colspan":2},{"row":1,"col":2,"rowspan":2,"colspan":1}]}},
+            {"Paragraph":{"runs":[{"text":"Outro text after.","bold":false,"italic":false,"code":false}]}}]}]}
+            """;
+
+        var doc = FlowDocumentDecoder.Decode(json).Document!;
+
+        var table = Assert.Single(doc.Sections[0].Blocks.OfType<TableBlock>());
+        Assert.Equal(3, table.Rows.Count);
+        Assert.All(table.Rows, r => Assert.Equal(3, r.Count));
+        Assert.Equal("Intro text.\n\nSales\t\tNotes\nNorth\t100\tStrong\nSouth\t80\t\n\nOutro text after.", doc.Sections[0].PlainText);
+    }
+
+    [Fact]
+    public void Metadata_with_the_new_additive_keys_decodes_without_error()
+    {
+        const string json = """
+            {"id":"d","metadata":{"title":"T","author":"A","tracked_changes":true,"published_date":"2026-01-02",
+            "retrieved_date":"2026-02-03T04:05:06Z","canonical_url":"https://example.com/a","import_date":"2026-10-11","language":"en"},
+            "sections":[{"id":"s0","heading":null,"blocks":[
+            {"Paragraph":{"runs":[{"text":"Hello.","bold":false,"italic":false,"code":false}]}}]}]}
+            """;
+
+        var result = FlowDocumentDecoder.Decode(json);
+
+        Assert.NotNull(result.Document);
+        Assert.Equal("Hello.", result.Document!.Sections[0].PlainText);
+    }
+
+    [Fact]
     public void Block_utf8_offsets_count_bytes_and_the_two_byte_separator()
     {
         const string json = """
