@@ -15,21 +15,29 @@ using Windows.System;
 namespace Gist.App.Views;
 
 /// <summary>Display projection of a library item (title, authors, encrypted glyph). Never carries paths.</summary>
-public sealed record LibraryRow(string Id, string Title, string Authors, bool Encrypted)
+public sealed record LibraryRow(
+    string Id, string Title, string Authors, bool Encrypted, string ReadState = "", int ProgressPercent = 0)
 {
+    public Visibility ProgressVisibility => ProgressPercent > 0 ? Visibility.Visible : Visibility.Collapsed;
+
     public Visibility AuthorsVisibility => Authors.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
     public Visibility LockVisibility => Encrypted ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>Accessible name of the list row.</summary>
     public string AutomationName =>
-        (Authors.Length > 0 ? $"{Title}, {Authors}" : Title) + (Encrypted ? ", encrypted" : string.Empty);
+        (Authors.Length > 0 ? $"{Title}, {Authors}" : Title)
+        + (ReadState.Length > 0 ? $", {ReadState}" : string.Empty)
+        + (ProgressPercent > 0 ? $", {ProgressPercent} percent read" : string.Empty)
+        + (Encrypted ? ", encrypted" : string.Empty);
 
     public static LibraryRow From(LibraryItemVM item) => new(
         item.Id,
         string.IsNullOrWhiteSpace(item.Title) ? "Untitled" : item.Title,
         item.Authors.Count > 0 ? string.Join(", ", item.Authors) : string.Empty,
-        item.ContentEncrypted);
+        item.ContentEncrypted,
+        ReadingStateText.LastRead(item.LastOpenedAt, DateTimeOffset.Now),
+        ReadingStateText.ProgressPercent(item.ProgressFraction));
 }
 
 public sealed partial class LibraryPage : Page
