@@ -150,6 +150,12 @@ public sealed class RsvpPlaybackController : IDisposable
     /// <summary>Changes speed. The core clamps and the position never jumps.</summary>
     public void SetWpm(uint wpm) => Mutate(() => _engine.SetWpm(wpm, 0));
 
+    /// <summary>Whether punctuation pauses are on. Valid after construction.</summary>
+    public bool PauseOnPunctuation => _engine.PauseOnPunctuation;
+
+    /// <summary>Toggles punctuation pauses; the position never jumps.</summary>
+    public void SetPauseOnPunctuation(bool enabled) => Mutate(() => _engine.SetPauseOnPunctuation(enabled, 0));
+
     // ── Internals ──────────────────────────────────────────────────────────
 
     private void Mutate(Action op)

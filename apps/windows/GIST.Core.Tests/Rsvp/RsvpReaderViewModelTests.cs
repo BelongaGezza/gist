@@ -246,6 +246,10 @@ public sealed class RsvpReaderViewModelTests
 
         public void SetWpm(uint wpm, ulong elapsedMs) => _inner.SetWpm(wpm, elapsedMs);
 
+        public bool PauseOnPunctuation => _inner.PauseOnPunctuation;
+
+        public void SetPauseOnPunctuation(bool enabled, ulong elapsedMs) => _inner.SetPauseOnPunctuation(enabled, elapsedMs);
+
         public void Dispose() => _inner.Dispose();
     }
 
