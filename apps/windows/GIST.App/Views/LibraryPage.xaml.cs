@@ -16,8 +16,10 @@ namespace Gist.App.Views;
 
 /// <summary>Display projection of a library item (title, authors, encrypted glyph). Never carries paths.</summary>
 public sealed record LibraryRow(
-    string Id, string Title, string Authors, bool Encrypted, string ReadState = "", int ProgressPercent = 0)
+    string Id, string Title, string Authors, bool Encrypted, string ReadState = "", int ProgressPercent = 0, string? SizeText = null, string? SizeSpoken = null)
 {
+    public Visibility SizeVisibility => string.IsNullOrEmpty(SizeText) ? Visibility.Collapsed : Visibility.Visible;
+
     public Visibility ProgressVisibility => ProgressPercent > 0 ? Visibility.Visible : Visibility.Collapsed;
 
     public Visibility AuthorsVisibility => Authors.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -27,6 +29,7 @@ public sealed record LibraryRow(
     /// <summary>Accessible name of the list row.</summary>
     public string AutomationName =>
         (Authors.Length > 0 ? $"{Title}, {Authors}" : Title)
+        + (SizeSpoken is { Length: > 0 } ? $", {SizeSpoken}" : string.Empty)
         + (ReadState.Length > 0 ? $", {ReadState}" : string.Empty)
         + (ProgressPercent > 0 ? $", {ProgressPercent} percent read" : string.Empty)
         + (Encrypted ? ", encrypted" : string.Empty);
@@ -37,7 +40,9 @@ public sealed record LibraryRow(
         item.Authors.Count > 0 ? string.Join(", ", item.Authors) : string.Empty,
         item.ContentEncrypted,
         ReadingStateText.LastRead(item.LastOpenedAt, DateTimeOffset.Now),
-        ReadingStateText.ProgressPercent(item.ProgressFraction));
+        ReadingStateText.ProgressPercent(item.ProgressFraction),
+        ReadingTimeFormat.Caption(item.WordCount, item.ReadingSeconds),
+        ReadingTimeFormat.AccessibilityLabel(item.WordCount, item.ReadingSeconds));
 }
 
 public sealed partial class LibraryPage : Page
@@ -192,11 +197,24 @@ public sealed partial class LibraryPage : Page
         }
 
         UpdateRemoveWarning(vm);
+        UpdateImportNotice(vm);
 
         if (vm.PendingDialog != LibraryDialog.None && !_handlingDialog)
         {
             _ = SafeAsync(() => RunPendingDialogAsync(vm));
         }
+    }
+
+    private void UpdateImportNotice(LibraryViewModel vm)
+    {
+        var notice = vm.ImportNotice;
+        ImportNoticeBar.IsOpen = notice is not null;
+        if (notice is not null) ImportNoticeBar.Message = notice;
+    }
+
+    private void OnImportNoticeClosed(InfoBar sender, InfoBarClosedEventArgs args)
+    {
+        if (args.Reason == InfoBarCloseReason.CloseButton) _vm?.DismissImportNotice();
     }
 
     private void UpdateRemoveWarning(LibraryViewModel vm)
