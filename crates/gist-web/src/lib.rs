@@ -411,6 +411,23 @@ pub(crate) fn build_document_at(
     Ok(Document::new(metadata, vec![section]))
 }
 
+/// Fuzzing entry point for the whole offline document build, including the
+/// page-metadata pass (`extract_page_meta`: byline, publish date, canonical
+/// URL, language) and the retrieved-date filter (`next_day_bound`) that
+/// [`extract_content`] does not reach (F81). Uses the default
+/// [`ParseLimits`] and a fixed source URL; `retrieved_at` is passed through
+/// unvalidated, exactly as the importer would pass its own timestamp, so
+/// the fuzzer can also feed malformed values. Not part of the app's API.
+#[doc(hidden)]
+pub fn fuzz_build_document(html: &str, retrieved_at: Option<&str>) -> Result<Document, ParseError> {
+    build_document_at(
+        html,
+        "https://example.invalid/fuzz",
+        &ParseLimits::default(),
+        retrieved_at,
+    )
+}
+
 /// Extract `(title, blocks)` from an HTML string.
 ///
 /// `pub` (not `pub(crate)`) specifically so `fuzz_web_extract` can fuzz this
@@ -1383,6 +1400,32 @@ mod tests {
         assert_eq!(m.language.as_deref(), Some("en-GB"));
         assert_eq!(m.retrieved_date.as_deref(), Some("2026-10-11T01:02:03Z"));
         assert_eq!(m.source_type, "web");
+    }
+
+    /// F81: the fuzz entry point reaches the metadata pass (same result as
+    /// the importer's path) and tolerates malformed `retrieved_at` values,
+    /// including ones whose first 10 bytes are not a char boundary.
+    #[test]
+    fn fuzz_entry_point_reaches_metadata_and_tolerates_hostile_retrieved_dates() {
+        let d = fuzz_build_document(RICH, Some("2026-10-11T01:02:03Z")).unwrap();
+        assert_eq!(d.metadata.author.as_deref(), Some("Jane Q. Public"));
+        assert_eq!(d.metadata.published_date.as_deref(), Some("2024-05-06"));
+        for r in [
+            "",
+            "x",
+            "0000-00-00",
+            "9999-12-31T23:59:59Z",
+            "2024-02-29",
+            "+202-+1-+1",
+            "ééééééééé",
+            "2024-1é-01",
+            "\u{10FFFF}\u{10FFFF}\u{10FFFF}",
+            "99999999999999999999",
+        ] {
+            let d = fuzz_build_document(RICH, Some(r)).unwrap();
+            assert_eq!(d.metadata.retrieved_date.as_deref(), Some(r));
+        }
+        assert!(fuzz_build_document(RICH, None).is_ok());
     }
 
     #[test]

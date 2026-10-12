@@ -304,7 +304,9 @@ pub fn parse_span_attr(s: &str) -> u32 {
 ///   `max_table_rows` first.
 /// - A `v_merge_continue` cell extends the cell directly above when that cell
 ///   starts in the same column with the same width and ends on the previous
-///   row; otherwise it is an ordinary empty cell (orphan continuation).
+///   row; otherwise it is an ordinary cell (orphan continuation). Any text in
+///   a continuation cell that does merge is appended, space-separated, to
+///   the merged cell's text rather than dropped (F77).
 ///
 /// Memory is bounded by `max_table_rows * max_table_cols` slots because spans
 /// never overlap.
@@ -363,6 +365,20 @@ pub fn layout_table(
                         && (o.row + o.rowspan) as usize == r
                     {
                         placed[oid].rowspan += 1;
+                        // F77: Word normally leaves a continuation cell
+                        // empty, but text typed into one is real content.
+                        // Keep it by appending it to the merged cell's text
+                        // (which lives in the top-left slot) instead of
+                        // dropping it. Normalised so it can never introduce
+                        // a table separator; bounded by the input text.
+                        let extra = normalize_cell_text(&cell.text);
+                        if !extra.is_empty() {
+                            let top = &mut grid[o.row as usize][o.col as usize];
+                            if !top.is_empty() {
+                                top.push(' ');
+                            }
+                            top.push_str(&extra);
+                        }
                         ensure(&mut grid, &mut owner, r, c + cs);
                         for slot in &mut owner[r][c..c + cs] {
                             *slot = Some(oid);
@@ -935,6 +951,44 @@ mod tests {
                 colspan: 1
             }]
         );
+    }
+
+    /// F77: text in a merging continuation cell is kept (appended to the
+    /// merged cell), not silently dropped; empty continuations change
+    /// nothing; separators in the appended text are normalised away.
+    #[test]
+    fn v_merge_continue_text_is_appended_to_the_merged_cell() {
+        let cont = |text: &str| RawCell {
+            text: text.into(),
+            colspan: 1,
+            rowspan: 1,
+            v_merge_continue: true,
+        };
+        let raw = vec![
+            vec![rc("A", 1, 1), rc("Start", 1, 1)],
+            vec![rc("B", 1, 1), cont("more\ttext")],
+            vec![rc("C", 1, 1), cont("")],
+            vec![rc("D", 1, 1), cont("end")],
+        ];
+        let (rows, spans) = layout_table(raw, &ParseLimits::default()).unwrap();
+        assert_eq!(rows[0], vec!["A", "Start more text end"]);
+        assert_eq!(rows[1], vec!["B", ""]);
+        assert_eq!(rows[3], vec!["D", ""]);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].rowspan, 4);
+        let t = Block::Table {
+            rows,
+            header_row: false,
+            spans,
+        };
+        // No stray tab/newline was introduced by the appended text.
+        assert_eq!(t.plain_text().matches('\t').count(), 4);
+        assert_eq!(t.plain_text().matches('\n').count(), 3);
+
+        // An empty top cell takes the continuation text without a leading space.
+        let raw = vec![vec![rc("", 1, 1)], vec![cont("late")]];
+        let (rows, _) = layout_table(raw, &ParseLimits::default()).unwrap();
+        assert_eq!(rows[0], vec!["late"]);
     }
 
     #[test]

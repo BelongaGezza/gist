@@ -53,6 +53,14 @@ public sealed class RemovalOutcomeTests : IDisposable
             .Where(f => Path.GetFileName(f).StartsWith(id, StringComparison.Ordinal))
             .ToArray();
 
+    /// <summary>
+    /// The Rust sweep keeps an unreferenced file modified in the last ten minutes (F39, it may
+    /// belong to an import in flight in another process). Tests that expect a just-orphaned file
+    /// to be reclaimed age it past that window first, simulating the time a real orphan has.
+    /// </summary>
+    private static void AgePastSweepGrace(string path) =>
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddHours(-1));
+
     private string[] AllStorageFiles() =>
         Directory.GetFiles(_workspace.StorageDir, "*", SearchOption.AllDirectories)
             .Select(f => f.ToUpperInvariant()).OrderBy(f => f, StringComparer.Ordinal).ToArray();
@@ -256,6 +264,7 @@ public sealed class RemovalOutcomeTests : IDisposable
         }
 
         first.Dispose();
+        AgePastSweepGrace(lockedPath);
 
         // "GIST restarts": a fresh client on the same directory sweeps in the background.
         var second = new CoreClient(_workspace.DbPath, _workspace.StorageDir, _keyProvider);
@@ -352,11 +361,45 @@ public sealed class RemovalOutcomeTests : IDisposable
             hold.Dispose();
         }
 
+        AgePastSweepGrace(lockedPath);
         await client.RefreshAsync();
         await client.WaitForSweepAsync();
 
         Assert.NotSame(startupSweep, client.LastSweepResult);
         Assert.False(File.Exists(lockedPath));
+    }
+
+    [Fact]
+    public async Task Sweep_keeps_a_just_orphaned_file_until_it_is_older_than_the_grace()
+    {
+        // F39: a second process's startup sweep must not delete an import whose row has not
+        // committed yet. The Rust sweep cannot tell such a file from a fresh orphan, so it keeps
+        // every unreferenced file younger than ten minutes; a later sweep reclaims it.
+        var first = await NewReadyClientAsync();
+        var (id, _) = await ImportAsync(first, "young", "Orphaned moments ago.");
+        var lockedPath = FilesOf(id).Single(f => f.EndsWith(".tokens.json", StringComparison.Ordinal));
+        using (new FileStream(lockedPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            await first.RemoveItemsAsync(new[] { id }, deleteSourceFiles: false);
+        }
+
+        first.Dispose();
+
+        var second = new CoreClient(_workspace.DbPath, _workspace.StorageDir, _keyProvider);
+        _disposables.Add(second);
+        Assert.True(await second.InitializeAsync());
+        await second.WaitForSweepAsync();
+        Assert.True(File.Exists(lockedPath), "a file younger than the grace must be kept");
+        Assert.Equal(0, second.LastSweepResult!.FilesDeleted);
+        second.Dispose();
+
+        AgePastSweepGrace(lockedPath);
+        var third = new CoreClient(_workspace.DbPath, _workspace.StorageDir, _keyProvider);
+        _disposables.Add(third);
+        Assert.True(await third.InitializeAsync());
+        await third.WaitForSweepAsync();
+        Assert.False(File.Exists(lockedPath), "once old enough the orphan is reclaimed");
+        Assert.Equal(1, third.LastSweepResult!.FilesDeleted);
     }
 
     [Fact]
