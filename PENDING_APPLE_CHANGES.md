@@ -26,3 +26,9 @@ this file when it contains entries.
 **Action:** when running the full suite unattended, expect to need a human present to click through a Keychain prompt the first time (or run interactively in Xcode once to pre-authorize). Periodically clean up stray `...TEST-<uuid>` Keychain items. No code action needed.
 
 
+## Pending Apple Change — 2026-10-12 (shared Rust: F39 orphan-sweep minimum age)
+**File:** `apps/apple/Shared/AppSettings.swift` (doc comment on `deleteSourceFilesOnRemoval`), `apps/apple/Shared/SettingsView.swift` (Storage tab wording about the next launch), `apps/apple/Tests/**` only if a test expects a just-orphaned file to be swept immediately (none found by grep on 2026-10-12).
+**Change required:** wording only, no code is required. `Core::sweep_orphaned_files` (Swift `sweepOrphanedFiles()`) now keeps any unreferenced file modified in the last ten minutes (`gist_core::ORPHAN_SWEEP_MIN_AGE`), so a kept-then-orphaned stored copy is deleted "at a later launch, once it is ten minutes old" rather than strictly "at the next launch". A stored copy's modification time is its import time (refreshed on a dedup re-import), so in practice this is still usually the next launch. Adjust the comment/Settings sentence if it promises "next launch" exactly. The FFI shape is unchanged (no binding change). Also: `layout_table` now keeps text typed into a DOCX `vMerge` continuation cell (F77) — Swift reads the stored grid as-is, so no Swift change; the Rust/Swift table goldens are unaffected (their continuation cells are empty).
+**Reason:** F39 (Windows review): a second process's startup sweep could delete an import that had written its blobs but not committed its row.
+**Related commit/PR:** branch `feat/core-hardening-2026-10-12`.
+**Action:** on macOS, confirm `apple-build` CI was green on the PR (shared Rust), optionally adjust the wording, delete this entry.

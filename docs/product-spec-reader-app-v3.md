@@ -85,7 +85,7 @@ This is the core differentiator and needs the most precision. Five source types 
 - Tables: parsed and persisted in the document model as `Block::Table` (header row, merged cells via optional `spans`) and rendered as an accessible, theme-aware grid in the macOS flow view; linearised row by row for RSVP and read-aloud. *(v1.5 text said "flattened in v1.0, full rendering in v1.1". That was superseded: tables shipped in M6 and merged cells in M7. The original claim that tables were already parsed and persisted was false until M6.)*
 - Zip-bomb protection: same streaming decompression limit as ePub.
 
-> **Status: Partial.** Style-resolved headings, lists, tables, tracked-change handling and all limits are implemented. **Not implemented:** (a) the "unresolved tracked changes" notice. The parser sets `source_type = "docx:tracked-changes"` as a stop-gap (its own comment says "proper metadata field in M2"), but no UI reads it, so the user is never told (`SC-03`). (b) Image extraction and the inline-or-strip preference: no parser emits `Block::Image` (`SC-04`).
+> **Status: Partial.** Style-resolved headings, lists, tables, tracked-change handling and all limits are implemented. **Not implemented:** (a) the "unresolved tracked changes" notice on Windows: the parser now sets a real `Metadata.tracked_changes` flag (`source_type` stays `docx`; legacy `docx:tracked-changes` rows are normalised by the store/FFI) and macOS shows a banner, but the Windows shell does not yet (`SC-03`; corrected 2026-10-12, F84). (b) Image extraction and the inline-or-strip preference: no parser emits `Block::Image` (`SC-04`).
 
 ### 3.5 Scanned documents (OCR)
 - Input: camera capture (mobile) or imported image files (all platforms).
@@ -111,7 +111,7 @@ This is the core differentiator and needs the most precision. Five source types 
   - Respect `robots.txt` where applicable.
 - Hard-stop on paywall/authentication boundaries — no bypass of paywalls or authentication.
 
-> **Status: Partial.** HTTPS-only fetch, SSRF-safe address resolution on every hop (`F14`), 5-redirect cap, streaming size limit, no cookie jar, `robots.txt` and `<article>`/`<main>`/`<body>` extraction are implemented, with the source URL stored in `source_ref`. **Not implemented:** byline, publish date and retrieved date (the parser leaves `author` and `import_date` unset), optional images, and the share-sheet/browser-extension "Send to GIST" entry point (`SC-06`, `SC-07`). Paste-a-URL is the only entry point.
+> **Status: Partial.** HTTPS-only fetch, SSRF-safe address resolution on every hop (`F14`), 5-redirect cap, streaming size limit, no cookie jar, `robots.txt` and `<article>`/`<main>`/`<body>` extraction are implemented, with the source URL stored in `source_ref`. Byline (`author`), publish date, retrieved date, canonical URL and page language are captured since 2026-10-11 (`SC-06`, Rust and macOS; Windows display pending), and `import_date` is stamped by every importer (corrected 2026-10-12, F84). **Not implemented:** optional images, and the share-sheet/browser-extension "Send to GIST" entry point (`SC-06`, `SC-07`). Paste-a-URL is the only entry point.
 
 ### 3.7 Common post-import normalisation
 All sources are converted into one internal semantic document model (§7) before reaching the reading UI, so the reading engine itself is source-agnostic. All parsers share a common resource limit policy enforced before allocation.
@@ -143,7 +143,7 @@ All sources are converted into one internal semantic document model (§7) before
 
 - **Metadata:** title, author/source, source type, date added, date last opened, reading progress %, word count/estimated reading time, cover/thumbnail (generated for text-only sources).
 
-  > **Status: Partial.** Title, author, source type, date added, date last opened and progress % are stored and shown. `word_count` is computed and stored in the document but is not exposed through the FFI item record or shown anywhere, so there is no word count or estimated reading time in the UI (`SC-15`). Covers: see Views above (`SC-12`). Note that `Metadata.import_date` and `Metadata.language` are never populated by any parser; "date added" comes from the database `created_at` column.
+  > **Status: Partial.** Title, author, source type, date added, date last opened and progress % are stored and shown. `word_count` is a schema v8 column exposed as `FfiLibraryItem.word_count` with `estimateReadingSeconds`, shown on macOS rows as "N words · ≈ M min"; the Windows shell does not show it yet (`SC-15`). Covers: see Views above (`SC-12`). `Metadata.import_date` is stamped by every importer and `Metadata.language` is set by the ePub and web parsers (since 2026-10-11); "date added" in the library still comes from the database `created_at` column (corrected 2026-10-12, F84).
 
 - **Item removal:** items may be removed from the library individually or in bulk.
   - **Single-item removal:** available from the item's context menu (right-click / long-press) and from a toolbar button when exactly one item is selected.
