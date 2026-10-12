@@ -87,6 +87,32 @@ public sealed class CoreClientTests : IDisposable
     }
 
     /// <summary>
+    /// A zip with more entries than <c>max_zip_entries</c> (10 000) is rejected before extraction
+    /// and must surface as the typed ResourceLimit kind, not the generic Core one.
+    /// </summary>
+    [Fact]
+    public async Task ImportFile_over_the_zip_entry_limit_reports_ResourceLimit_by_type()
+    {
+        using var client = await NewReadyClientAsync();
+        var path = Path.Combine(_workspace.Root, "too-many-entries.docx");
+        using (var zip = System.IO.Compression.ZipFile.Open(path, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            for (var i = 0; i < 10_001; i++)
+            {
+                zip.CreateEntry($"e{i}.txt");
+            }
+        }
+
+        var id = await client.ImportFileAsync(path);
+
+        Assert.Null(id);
+        Assert.NotNull(client.LastError);
+        Assert.Equal(CoreErrorKind.ResourceLimit, client.LastError!.Kind);
+        Assert.DoesNotContain(path, client.LastError.Message, StringComparison.Ordinal);
+        Assert.Empty(client.Items);
+    }
+
+    /// <summary>
     /// A non-HTTPS URL is rejected by <c>gist-web</c> before any network access (ADR-005/F14), so
     /// this exercises the URL-import error path without a live request.
     /// </summary>
