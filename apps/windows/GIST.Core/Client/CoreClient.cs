@@ -285,6 +285,11 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
     /// removal, import and encrypt, so it can never overlap one: it queues behind whatever is in
     /// flight. It never runs on the caller's or the UI thread, and every failure is swallowed
     /// (this class logs nothing, so there is nothing to log; the outcome is counts-only anyway).
+    /// The gate only serialises this process: since F39 (2026-10-12) the Rust sweep itself also
+    /// keeps any unreferenced file modified in the last ten minutes, which covers an import in
+    /// flight in a second GIST process. A file orphaned by a just-failed removal is therefore
+    /// reclaimed by a later sweep once it is that old (a blob's modification time is its import
+    /// time, so in practice usually the next one).
     /// </remarks>
     private void StartBackgroundSweep()
     {
