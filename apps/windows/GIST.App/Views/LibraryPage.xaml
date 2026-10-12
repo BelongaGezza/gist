@@ -135,6 +135,11 @@
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind ReadState}" Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <ProgressBar Value="{x:Bind ProgressPercent}" Minimum="0" Maximum="100" Height="3" Margin="0,4,0,0"
+                                         Visibility="{x:Bind ProgressVisibility}" AutomationProperties.AccessibilityView="Raw" />
                         </StackPanel>
                         <FontIcon Grid.Column="1" Glyph="&#xE72E;" FontSize="14" Visibility="{x:Bind LockVisibility}"
                                   VerticalAlignment="Center" AutomationProperties.Name="Encrypted at rest"
