@@ -39,6 +39,12 @@ public interface IRsvpEngine : IDisposable
     void BackWords(ulong count, ulong elapsedMs);
 
     void SetWpm(uint wpm, ulong elapsedMs);
+
+    /// <summary>Whether sentence/comma/paragraph pauses are applied (Rust pacing table).</summary>
+    bool PauseOnPunctuation { get; }
+
+    /// <summary>Toggles punctuation pauses. Same pause-first contract as <see cref="SetWpm"/>.</summary>
+    void SetPauseOnPunctuation(bool enabled, ulong elapsedMs);
 }
 
 /// <summary>Monotonic millisecond clock the playback loop re-anchors to (never wall-clock time).</summary>

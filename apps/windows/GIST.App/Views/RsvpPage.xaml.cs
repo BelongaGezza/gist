@@ -74,7 +74,9 @@ public sealed partial class RsvpPage : Page
             new StopwatchRsvpClock(),
             new DispatcherRsvpTimer(DispatcherQueue),
             AppServices.RsvpSettings.LoadWpm() ?? RsvpWpm.Default,
-            AppServices.RsvpSettings.SaveWpm);
+            AppServices.RsvpSettings.SaveWpm,
+            AppServices.RsvpSettings.LoadPauseOnPunctuation() ?? true,
+            AppServices.RsvpSettings.SavePauseOnPunctuation);
         _vm.PropertyChanged += OnVmChanged;
 
         if (!_themeHooked)
@@ -177,6 +179,8 @@ public sealed partial class RsvpPage : Page
             AutomationProperties.SetName(PlayPauseButton, label);
             ToolTipService.SetToolTip(PlayPauseButton, label + " (Space)");
 
+            if (PunctuationToggle.IsOn != vm.PauseOnPunctuation) PunctuationToggle.IsOn = vm.PauseOnPunctuation;
+
             var wpm = (double)vm.Wpm;
             if (WpmSlider.Value != wpm) WpmSlider.Value = wpm;
             if (WpmBox.Value != wpm) WpmBox.Value = wpm;
@@ -247,6 +251,12 @@ public sealed partial class RsvpPage : Page
     {
         if (_syncing || _vm is null) return;
         _vm.SetWpm(e.NewValue);
+    }
+
+    private void OnPunctuationToggled(object sender, RoutedEventArgs e)
+    {
+        if (_syncing || _vm is null) return;
+        _vm.SetPauseOnPunctuation(PunctuationToggle.IsOn);
     }
 
     private void OnWpmBoxChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)

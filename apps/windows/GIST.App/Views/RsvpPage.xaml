@@ -107,6 +107,12 @@
                                ValueChanged="OnWpmBoxChanged" />
                 </StackPanel>
 
+                <ToggleSwitch x:Name="PunctuationToggle" HorizontalAlignment="Center" TabIndex="5"
+                              OnContent="Pause longer at punctuation" OffContent="Pause longer at punctuation"
+                              AutomationProperties.AutomationId="RsvpPage_PunctuationToggle"
+                              AutomationProperties.Name="Pause longer at punctuation"
+                              Toggled="OnPunctuationToggled" />
+
                 <!-- 4. Play/Pause: large, accent. Space toggles (page-level). -->
                 <Button x:Name="PlayPauseButton" HorizontalAlignment="Center" Padding="32,14" TabIndex="1"
                         Click="OnPlayPause" AutomationProperties.AutomationId="RsvpPage_PlayPauseButton">
