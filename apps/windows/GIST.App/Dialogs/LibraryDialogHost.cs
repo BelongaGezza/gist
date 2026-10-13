@@ -202,6 +202,7 @@ public sealed class LibraryDialogHost
         LibraryDialog.Error => ShowMessageAsync(
             xamlRoot, DialogContent.ErrorTitle, DialogContent.ErrorMessage(vm.LastError?.Kind)),
         LibraryDialog.TagEditor => ShowTagEditorAsync(vm, xamlRoot),
+        LibraryDialog.ItemInfo => ShowItemInfoAsync(vm, xamlRoot),
         _ => Task.CompletedTask,
     };
 
@@ -209,6 +210,7 @@ public sealed class LibraryDialogHost
     {
         LibraryDialog.RemoveConfirm => ShowCollectionRemoveAsync(vm, xamlRoot),
         LibraryDialog.TagEditor => ShowTagEditorAsync(vm, xamlRoot),
+        LibraryDialog.ItemInfo => ShowItemInfoAsync(vm, xamlRoot),
         LibraryDialog.Error => ShowMessageAsync(
             xamlRoot, DialogContent.ErrorTitle, DialogContent.ErrorMessage(vm.LastError?.Kind)),
         _ => Task.CompletedTask,
@@ -460,6 +462,84 @@ public sealed class LibraryDialogHost
         dialog.DefaultButton = ContentDialogButton.Close;
         dialog.Content = panel;
         await ShowDialogAsync(dialog);
+    }
+
+    // ── Item info (SC-03 / SC-06) ──────────────────────────────────────────
+
+    private static async Task ShowItemInfoAsync(LibraryViewModelBase vm, XamlRoot xamlRoot)
+    {
+        var item = vm.SingleSelectedItem;
+        if (item is null)
+        {
+            return;
+        }
+
+        var info = await vm.ItemInfoAsync(item.Id);
+        var dialog = NewDialog(xamlRoot, item.Title);
+        dialog.CloseButtonText = DialogContent.ItemInfoDoneButton;
+        dialog.DefaultButton = ContentDialogButton.Close;
+
+        var panel = new StackPanel { Spacing = 12 };
+        if (info is null)
+        {
+            panel.Children.Add(Body(DialogContent.ItemInfoUnavailable));
+        }
+        else
+        {
+            AddInfoRow(panel, "Author", info.Author);
+            AddInfoRow(panel, "Type", info.SourceType);
+            AddInfoRow(panel, "Language", info.Language);
+            AddInfoRow(panel, "Imported", ItemInfoPresentation.DisplayDate(info.ImportDate));
+            AddInfoRow(panel, "Published", ItemInfoPresentation.DisplayDate(info.PublishedDate));
+            AddInfoRow(panel, "Retrieved", ItemInfoPresentation.DisplayDate(info.RetrievedDate));
+
+            // Only http(s) becomes a link, and only the user's own click follows it.
+            if (!string.IsNullOrWhiteSpace(info.CanonicalUrl))
+            {
+                var link = ItemInfoPresentation.SafeLink(info.CanonicalUrl);
+                FrameworkElement value = link is null
+                    ? new TextBlock { Text = info.CanonicalUrl.Trim(), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true }
+                    : new HyperlinkButton
+                    {
+                        Content = new TextBlock { Text = link.AbsoluteUri, TextWrapping = TextWrapping.Wrap },
+                        NavigateUri = link,
+                        Padding = new Thickness(0),
+                    };
+                AutomationProperties.SetName(value, "Canonical URL: " + info.CanonicalUrl.Trim());
+                AddInfoRow(panel, "Canonical URL", value);
+            }
+
+            if (info.TrackedChanges)
+            {
+                panel.Children.Add(Body(DialogContent.TrackedChangesNotice));
+            }
+        }
+
+        dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 420 };
+        await ShowDialogAsync(dialog);
+    }
+
+    private static void AddInfoRow(StackPanel panel, string label, string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+        var value = new TextBlock { Text = text.Trim(), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
+        AutomationProperties.SetName(value, label + ": " + text.Trim());
+        AddInfoRow(panel, label, value);
+    }
+
+    private static void AddInfoRow(StackPanel panel, string label, FrameworkElement value)
+    {
+        var caption = new TextBlock
+        {
+            Text = label,
+            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        };
+        AutomationProperties.SetAccessibilityView(caption, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        var row = new StackPanel { Spacing = 2 };
+        row.Children.Add(caption);
+        row.Children.Add(value);
+        panel.Children.Add(row);
     }
 
     // ── DRM / Error ────────────────────────────────────────────────────────

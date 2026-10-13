@@ -116,6 +116,28 @@ jobs:
       - name: dotnet test
         run: dotnet test apps/windows/GIST.sln -c Release --no-build
 
+      - name: Build unsigned MSIX (x64)
+        # W6: proves the packaged configuration builds and carries the core DLL. Unsigned, so it is
+        # an inspection artifact only; signing and the Store/sideload decision are ADR-017 (open).
+        run: |
+          dotnet build apps/windows/GIST.App/GIST.App.csproj -c Release -p:Platform=x64 \
+            -p:GistPackaged=true -p:GenerateAppxPackageOnBuild=true -p:AppxPackageSigningEnabled=false
+          msix=$(ls apps/windows/GIST.App/AppPackages/*/*.msix | head -1)
+          echo "package: $msix"
+          # An MSIX is a zip. Fail if the native core or the manifest is missing from it.
+          listing=$(powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead('$(cygpath -w "$msix")').Entries | ForEach-Object FullName")
+          echo "$listing" | grep -q 'gist_ffi.dll' || { echo "::error::gist_ffi.dll missing from MSIX"; exit 1; }
+          echo "$listing" | grep -q 'AppxManifest.xml' || { echo "::error::AppxManifest.xml missing from MSIX"; exit 1; }
+          echo "$listing" | grep -q 'GIST.exe' || { echo "::error::GIST.exe missing from MSIX"; exit 1; }
+
+      - name: Upload unsigned MSIX
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gist-msix-x64-unsigned
+          path: apps/windows/GIST.App/AppPackages/**/*.msix
+          if-no-files-found: error
+          retention-days: 7
+
       - name: RSVP drift soak (60 s, real engine)
         env:
           GIST_RUN_SOAK: "1"

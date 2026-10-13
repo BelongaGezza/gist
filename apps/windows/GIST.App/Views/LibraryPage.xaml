@@ -160,6 +160,7 @@
                     <MenuFlyoutItem Text="Open in Reader" Click="OnOpen" />
                     <MenuFlyoutItem Text="Open in Flow View" Click="OnOpenFlow" />
                     <MenuFlyoutItem Text="Manage Tags…" Click="OnTags" />
+                    <MenuFlyoutItem Text="Get Info…" Click="OnInfo" />
                     <MenuFlyoutItem x:Name="RowEncrypt" Text="Encrypt…" Click="OnEncrypt" />
                     <MenuFlyoutSeparator />
                     <MenuFlyoutItem Text="Remove…" Click="OnRemove" />

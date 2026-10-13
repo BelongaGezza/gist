@@ -123,6 +123,16 @@ public abstract class LibraryViewModelBase : ObservableObject, IDisposable
     /// <summary>Command 9, "Tags": exactly one item selected (the editor is single-item, §6).</summary>
     public bool CanEditTags => SelectionCount == 1;
 
+    /// <summary>"Get Info": exactly one item selected.</summary>
+    public bool CanShowInfo => SelectionCount == 1;
+
+    /// <summary>The SC-06 metadata for an item, or null if the core could not supply it. Quiet.</summary>
+    public Task<ItemMetadata?> ItemInfoAsync(string itemId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(itemId);
+        return Core.GetItemMetadataAsync(itemId);
+    }
+
     /// <summary>
     /// Replaces the selection. Duplicates and blank ids are dropped; an unchanged selection raises
     /// no notifications.
@@ -403,6 +413,7 @@ public abstract class LibraryViewModelBase : ObservableObject, IDisposable
         OnPropertyChanged(nameof(CanRemove));
         OnPropertyChanged(nameof(CanOpen));
         OnPropertyChanged(nameof(CanEditTags));
+        OnPropertyChanged(nameof(CanShowInfo));
     }
 
     private void OnCorePropertyChanged(object? sender, PropertyChangedEventArgs e) =>

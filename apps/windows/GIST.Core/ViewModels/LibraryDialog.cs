@@ -42,6 +42,9 @@ public enum LibraryDialog
     /// <summary>Tag editor for the single selected item (§6).</summary>
     TagEditor,
 
+    /// <summary>Item info (SC-03 / SC-06) for the single selected item.</summary>
+    ItemInfo,
+
     /// <summary>
     /// The DRM dialog. Raised only from a structurally typed
     /// <see cref="Client.CoreErrorKind.DrmProtected"/>, never from message text (§10 item 4).
