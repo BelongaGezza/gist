@@ -168,3 +168,10 @@ Spec §7.2. Tags are provisional; role R2 retags with real test names.
   session, while every other automated test in both files passed, including the rest of that same file's native-picker
   coverage. Reproduced twice in isolation, so not test-ordering related; not yet root-caused, and unrelated to any W3
   (sidebar/collections/theme) code. If it recurs, re-run it alone before assuming a regression.
+
+## Item info (SC-03 / SC-06) — added 2026-10-13
+
+- [ ] [manual only] Right-click an item → "Get Info…": the dialog titled with the item shows Type and Imported; a web item also shows Author, Published, Retrieved and the canonical URL.
+- [ ] [manual only] The canonical URL is a link only for http/https; clicking it opens the default browser; nothing opens on its own.
+- [ ] [manual only] A DOCX that had tracked changes shows the tracked-changes sentence; Narrator reads each row as "Label: value".
+- [ ] [manual only] Check the dialog in Light, Dark, Sepia, OLED and a high-contrast theme.

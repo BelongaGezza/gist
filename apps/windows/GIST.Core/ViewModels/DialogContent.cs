@@ -63,6 +63,11 @@ public static class DialogContent
     public const string TagEditorAddButton = "Add";
     public const string TagEditorDoneButton = "Done";
 
+    // Item info (SC-03 / SC-06)
+    public const string ItemInfoDoneButton = "Done";
+    public const string ItemInfoUnavailable = "Details are not available for this item.";
+    public const string ItemInfoTrackedChanges = "Had unresolved tracked changes when imported.";
+
     /// <summary>Import is enabled only for non-blank input (§4.5).</summary>
     public static bool CanImportUrl(string? text) => !string.IsNullOrWhiteSpace(text);
 

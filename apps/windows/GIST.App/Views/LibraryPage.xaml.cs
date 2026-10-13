@@ -470,6 +470,11 @@ public sealed partial class LibraryPage : Page
         if (_vm is { CanRemove: true }) _vm.RequestDialog(LibraryDialog.RemoveConfirm);
     }
 
+    private void OnInfo(object sender, RoutedEventArgs e)
+    {
+        if (_vm is { CanShowInfo: true }) _vm.RequestDialog(LibraryDialog.ItemInfo);
+    }
+
     private void OnTags(object sender, RoutedEventArgs e)
     {
         if (_vm is { CanEditTags: true }) _vm.RequestDialog(LibraryDialog.TagEditor);
