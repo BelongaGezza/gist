@@ -60,8 +60,74 @@ public sealed record PendingEncodingImport(string Path, string DetectedName, boo
     public string FileName => System.IO.Path.GetFileName(Path);
 }
 
-/// <summary>The import-time facts the UI needs from <c>get_item_metadata</c> (SC-03).</summary>
-public sealed record ItemMetadata(string SourceType, bool TrackedChanges);
+/// <summary>
+/// The import-time facts the UI needs from <c>get_item_metadata</c> (SC-03 tracked changes, SC-06
+/// web details). Every optional field is null for items imported before SC-06.
+/// </summary>
+public sealed record ItemMetadata(
+    string SourceType,
+    bool TrackedChanges,
+    string Title = "",
+    string? Author = null,
+    string? ImportDate = null,
+    string? Language = null,
+    string? PublishedDate = null,
+    string? RetrievedDate = null,
+    string? CanonicalUrl = null);
+
+/// <summary>
+/// Pure presentation rules for the item-info dialog (SC-06). Mirrors Apple's
+/// <c>ItemInfoPresentation</c>.
+/// </summary>
+public static class ItemInfoPresentation
+{
+    /// <summary>
+    /// Only an absolute http(s) URL with a host may become a link; anything else stays plain
+    /// text. The link is never opened automatically.
+    /// </summary>
+    public static Uri? SafeLink(string? raw)
+    {
+        var trimmed = raw?.Trim();
+        if (string.IsNullOrEmpty(trimmed)
+            || !Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            || string.IsNullOrEmpty(uri.Host))
+        {
+            return null;
+        }
+
+        return uri;
+    }
+
+    /// <summary>
+    /// A locale-formatted date when <paramref name="raw"/> is ISO 8601 (date or date-time),
+    /// otherwise the trimmed string unchanged. Null/blank gives null.
+    /// </summary>
+    public static string? DisplayDate(string? raw)
+    {
+        var trimmed = raw?.Trim();
+        if (string.IsNullOrEmpty(trimmed)) return null;
+
+        if (DateTimeOffset.TryParseExact(
+                trimmed, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var day))
+        {
+            return day.ToString("d", CultureInfo.CurrentCulture);
+        }
+
+        if (DateTimeOffset.TryParse(
+                trimmed, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var moment))
+        {
+            return moment.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+        }
+
+        return trimmed;
+    }
+
+    /// <summary>Whether the web-specific section has anything to show.</summary>
+    public static bool HasWebDetails(ItemMetadata info) =>
+        info.PublishedDate is not null || info.RetrievedDate is not null || info.CanonicalUrl is not null;
+}
 
 /// <summary>SC-15 word-count / reading-time text, matching Apple's <c>ReadingTimeFormat</c>.</summary>
 public static class ReadingTimeFormat

@@ -150,4 +150,64 @@ public sealed class ImportMetadataTests : IDisposable
         await vm.ImportFileAsync(_workspace.CopyFixture("headings_and_paragraphs.docx"));
         Assert.Null(vm.ImportNotice);
     }
+
+    // ── SC-06 item info ───────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("https://example.com/a?b=1", true)]
+    [InlineData("  http://example.com  ", true)]
+    [InlineData("javascript:alert(1)", false)]
+    [InlineData("file:///C:/secret.txt", false)]
+    [InlineData("ftp://example.com/x", false)]
+    [InlineData("example.com/page", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void SafeLink_allows_only_absolute_http_and_https(string? raw, bool expected) =>
+        Assert.Equal(expected, ItemInfoPresentation.SafeLink(raw) is not null);
+
+    [Fact]
+    public void DisplayDate_formats_iso_dates_and_passes_other_text_through()
+    {
+        Assert.Null(ItemInfoPresentation.DisplayDate(null));
+        Assert.Null(ItemInfoPresentation.DisplayDate("   "));
+        Assert.Equal(
+            new DateTime(2026, 3, 9).ToString("d", System.Globalization.CultureInfo.CurrentCulture),
+            ItemInfoPresentation.DisplayDate("2026-03-09"));
+        Assert.Equal("last spring", ItemInfoPresentation.DisplayDate(" last spring "));
+        var stamp = ItemInfoPresentation.DisplayDate("2026-03-09T12:30:00Z");
+        Assert.NotNull(stamp);
+        Assert.DoesNotContain("T12", stamp, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HasWebDetails_is_true_only_when_a_web_field_is_present()
+    {
+        var plain = new ItemMetadata("txt", false);
+        Assert.False(ItemInfoPresentation.HasWebDetails(plain));
+        Assert.True(ItemInfoPresentation.HasWebDetails(plain with { PublishedDate = "2026-01-01" }));
+        Assert.True(ItemInfoPresentation.HasWebDetails(plain with { RetrievedDate = "2026-01-01T00:00:00Z" }));
+        Assert.True(ItemInfoPresentation.HasWebDetails(plain with { CanonicalUrl = "https://example.com" }));
+    }
+
+    [Fact]
+    public async Task Item_info_for_a_file_import_has_a_type_and_date_but_no_web_details()
+    {
+        var (client, vm) = await NewAsync();
+        var path = Path.Combine(_workspace.Root, "info.txt");
+        await File.WriteAllTextAsync(path, "alpha beta gamma");
+        var id = await vm.ImportFileAsync(path);
+        Assert.NotNull(id);
+
+        vm.SetSelection(new[] { id! });
+        Assert.True(vm.CanShowInfo);
+        var info = await vm.ItemInfoAsync(id!);
+
+        Assert.NotNull(info);
+        Assert.Equal("txt", info!.SourceType);
+        Assert.False(info.TrackedChanges);
+        Assert.False(string.IsNullOrWhiteSpace(info.Title));
+        Assert.False(ItemInfoPresentation.HasWebDetails(info));
+        Assert.Null(await vm.ItemInfoAsync("no-such-item"));
+        Assert.Null(client.LastError);
+    }
 }
