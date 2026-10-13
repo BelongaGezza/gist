@@ -20,7 +20,7 @@ GIST is a cross-platform RSVP-style reading app. The Rust core handles all parsi
 - **Rust core (M0–M1):** done and CI-verified (`cargo test`/`clippy -D warnings`/`fmt --check`/`cargo deny check bans licenses sources`). PDF (M6), tables, schema v8, TXT encoding detection and import metadata (M8 first slice) are in.
 - **macOS app (M2–M7):** feature-complete and compiler/test-verified; what remains is human-gated — manual click-throughs (`docs/qa-manual-clickthrough-*.md`), VoiceOver/Dynamic Type on hardware, a real macOS 14/15 run, and a signed Hardened-Runtime launch (`N8`).
 - **Release:** signing/notarisation credentials are missing; see `docs/v1.0-release-checklist.md`. v1.0 waits on M7 verification.
-- **Windows (WinUI 3):** W0–W5 built; W6 (accessibility/packaging) not started. Pending hand-offs are in `PENDING_WINDOWS_CHANGES.md`.
+- **Windows (WinUI 3):** W0–W5 built; W6 started 2026-10-13 (contrast audit + unsigned MSIX CI; rest open). Pending hand-offs are in `PENDING_WINDOWS_CHANGES.md`.
 - **M8 (spec conformance, `SC-01`–`SC-24`):** first Rust/macOS slice done; plan `docs/m8-agent-roles.md` is a DRAFT (D1–D6 unresolved). Spec §12 of `docs/product-spec-reader-app-v3.md` is the live backlog. Close an `SC` row only when implemented and tested, or the spec text is amended and dated in spec §10. Check §12 before claiming a spec feature done.
 - Per-milestone detail: `docs/project-history.md`. Open security items: `docs/security-register.md` (all `F14`–`F25`/`N1`–`N7`/`N9` closed; `N8`, `F28`, `F29`, `F33` (accepted), and the low-severity `F39`–`F85` remainders are open).
 

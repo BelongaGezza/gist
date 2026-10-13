@@ -548,7 +548,11 @@ public sealed partial class CoreClient : ObservableObject, IDisposable
     {
         if (!TryGetCore(out var core)) return null;
         var result = await InvokeAsync(() => core.GetItemMetadata(itemId)).ConfigureAwait(false);
-        return result.Failed ? null : new ItemMetadata(result.Value.SourceType, result.Value.TrackedChanges);
+        if (result.Failed) return null;
+        var m = result.Value;
+        return new ItemMetadata(
+            m.SourceType, m.TrackedChanges, m.Title, m.Author, m.ImportDate, m.Language,
+            m.PublishedDate, m.RetrievedDate, m.CanonicalUrl);
     }
 
     /// <summary>
