@@ -249,7 +249,7 @@ public sealed class LibraryDialogHost
         dialog.PrimaryButtonText = DialogContent.CollectionRemoveButton;
         dialog.CloseButtonText = DialogContent.CancelButton;
         dialog.DefaultButton = ContentDialogButton.Close;
-        dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 360 };
+        dialog.Content = DialogKeyboardScroll.Body(panel, 360, dialog.Title as string ?? "Dialog");
 
         if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
@@ -405,7 +405,7 @@ public sealed class LibraryDialogHost
         dialog.PrimaryButtonStyle = (Style)XamlReader.Load(DestructiveButtonStyleXaml);
         dialog.CloseButtonText = DialogContent.CancelButton;
         dialog.DefaultButton = ContentDialogButton.Close;
-        dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 360 };
+        dialog.Content = DialogKeyboardScroll.Body(panel, 360, dialog.Title as string ?? "Dialog");
 
         if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
@@ -441,7 +441,7 @@ public sealed class LibraryDialogHost
         dialog.CloseButtonText = DialogContent.CancelButton;
         // Irreversible on key loss: make Cancel, not Encrypt, the Enter default.
         dialog.DefaultButton = ContentDialogButton.Close;
-        dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 420 };
+        dialog.Content = DialogKeyboardScroll.Body(panel, 420, dialog.Title as string ?? "Dialog");
 
         if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
@@ -515,7 +515,7 @@ public sealed class LibraryDialogHost
             }
         }
 
-        dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 420 };
+        dialog.Content = DialogKeyboardScroll.Body(panel, 420, dialog.Title as string ?? "Dialog");
         await ShowDialogAsync(dialog);
     }
 
@@ -632,11 +632,7 @@ public sealed class LibraryDialogHost
         addRow.Children.Add(box);
         addRow.Children.Add(add);
 
-        dialog.Content = new ScrollViewer
-        {
-            MaxHeight = 380,
-            Content = Stack(empty, tagPanel, addRow),
-        };
+        dialog.Content = DialogKeyboardScroll.Body(Stack(empty, tagPanel, addRow), 380, dialog.Title as string ?? "Dialog");
         dialog.Opened += async (_, _) =>
         {
             await ReloadAsync();

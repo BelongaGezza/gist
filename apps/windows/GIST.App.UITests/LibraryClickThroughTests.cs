@@ -437,6 +437,8 @@ public class LibraryClickThroughTests
             // (d) release the lock, restart on the same root: the startup sweep deletes the orphan.
             hold!.Dispose();
             hold = null;
+            // The sweep keeps unreferenced files younger than ten minutes (F39); age the orphan past that grace.
+            File.SetLastWriteTimeUtc(blob, DateTime.UtcNow.AddHours(-1));
             using var again = await GistAppSession.StartAsync(existingRoot: root);
             var d2 = new LibraryDriver(again);
             d2.WaitForLibrary();
