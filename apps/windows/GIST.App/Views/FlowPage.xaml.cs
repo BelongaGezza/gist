@@ -321,6 +321,7 @@ public sealed partial class FlowPage : Page, IReadingLayout
         {
             Typography = _typography.Settings,
             HighContrast = hc,
+            TextScale = new UISettings().TextScaleFactor,
             Foreground = foreground,
             SecondaryForeground = secondary,
             Border = border,

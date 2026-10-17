@@ -11,7 +11,7 @@ namespace Gist.App.UITests;
 /// checks read real pixels and so need an unlocked interactive desktop.
 /// </summary>
 [Trait("Category", "UI")]
-public class SystemAccessibilityTests
+public partial class SystemAccessibilityTests
 {
     private const string Apple = "apple-orchard";
 

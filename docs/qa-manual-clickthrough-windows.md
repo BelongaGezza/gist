@@ -146,7 +146,7 @@ Spec §7.2. Tags are provisional; role R2 retags with real test names.
 - [ ] [manual only] Tables (if the document has any): rows/columns align, header row distinct, readable in every theme.
 - [ ] [manual only] Themes: Light, Dark, Sepia, OLED (exactly black) and System each give a legible reading surface, selection colour and progress bar; High contrast bypasses the palette.
 - [ ] [manual only] Narrator: reading column is navigable by paragraph/heading; headings announce their level; images announce alt text; Find and Contents are reachable and announce match count/position where available; progress is announced as a value, not spoken on every scroll.
-- [ ] [automated for the Library, RSVP reader and Remove dialog; Flow reader text scaling is still manual] Text scaling (Settings > Accessibility > Text size, up to 225%): text and controls enlarge without clipping; the reading column stays centred.
+- [ ] [automated for the Library, RSVP reader, Flow reader and every Library dialog except the encoding prompt and DRM dialog] Text scaling (Settings > Accessibility > Text size, up to 225%): text and controls enlarge without clipping; the reading column stays centred.
 - [ ] [manual only] Window resize and narrow width: column reflows, command bar collapses to overflow, no horizontal scrollbar.
 - [ ] [manual only] Nothing shows a raw exception message, GUID or file path; opening an item whose document cannot be loaded shows a plain message and a way back.
 
