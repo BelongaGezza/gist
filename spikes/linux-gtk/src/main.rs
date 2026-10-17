@@ -9,10 +9,14 @@ use std::{
 };
 
 use gist_core::Core;
+use gist_linux_keyring_spike::{KeyError, SecretServiceStore};
 use gist_model::{Block, Document, TokenKind};
 use gist_rsvp::{Config, RsvpSession};
 use gist_store::LibraryItem;
 use gtk::{glib, prelude::*};
+
+mod chooser;
+mod keys;
 
 const PAGE_SIZE: usize = 200;
 
@@ -32,6 +36,8 @@ enum UiMessage {
         title: String,
         session: RsvpSession,
     },
+    /// `None` clears the key banner; `Some` explains a key-store problem.
+    KeyStatus(Option<KeyError>),
     Status(String),
     Failed(String),
 }
@@ -62,10 +68,14 @@ fn build_window(app: &gtk::Application) {
     let remove_button = gtk::Button::with_label("Remove");
     let flow_button = gtk::Button::with_label("Flow");
     let rsvp_button = gtk::Button::with_label("RSVP");
+    let encrypt_button = gtk::Button::with_label("Encrypt");
+    encrypt_button.set_tooltip_text(Some(
+        "Encrypt the selected document with a key held in your desktop key service",
+    ));
     let search_entry = gtk::SearchEntry::new();
     search_entry.set_placeholder_text(Some("Search your library"));
     search_entry.set_hexpand(true);
-    for button in [&remove_button, &flow_button, &rsvp_button] {
+    for button in [&remove_button, &flow_button, &rsvp_button, &encrypt_button] {
         button.set_sensitive(false);
     }
 
@@ -75,6 +85,7 @@ fn build_window(app: &gtk::Application) {
     toolbar.append(&remove_button);
     toolbar.append(&flow_button);
     toolbar.append(&rsvp_button);
+    toolbar.append(&encrypt_button);
 
     let library_list = gtk::ListBox::new();
     library_list.set_selection_mode(gtk::SelectionMode::Single);
@@ -188,12 +199,19 @@ fn build_window(app: &gtk::Application) {
     status.set_xalign(0.0);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
+    let key_banner = gtk::Label::new(None);
+    key_banner.set_wrap(true);
+    key_banner.set_xalign(0.0);
+    key_banner.add_css_class("warning");
+    key_banner.set_visible(false);
+
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
     root.set_margin_top(12);
     root.set_margin_bottom(12);
     root.set_margin_start(12);
     root.set_margin_end(12);
     root.append(&toolbar);
+    root.append(&key_banner);
     root.append(&body);
     root.append(&status);
 
@@ -218,6 +236,14 @@ fn build_window(app: &gtk::Application) {
         &remove_button,
         &flow_button,
         &rsvp_button,
+        &encrypt_button,
+    );
+    connect_encrypt(
+        &encrypt_button,
+        &window,
+        Rc::clone(&core_state),
+        Rc::clone(&selected_item),
+        sender.clone(),
     );
     connect_open_reader(
         &flow_button,
@@ -270,6 +296,8 @@ fn build_window(app: &gtk::Application) {
         &remove_button,
         &flow_button,
         &rsvp_button,
+        &encrypt_button,
+        &key_banner,
         &play_button,
         &position_scale,
         &position_label,
@@ -311,41 +339,26 @@ fn connect_import(
     sender: mpsc::Sender<UiMessage>,
 ) {
     let weak_window = window.downgrade();
+    let slot = chooser::ChooserSlot::default();
     button.connect_clicked(move |_| {
         let Some(window) = weak_window.upgrade() else {
             return;
         };
         let Some(core) = core_state.borrow().as_ref().map(Arc::clone) else {
+            let _ = sender.send(UiMessage::Status(
+                "The library is still opening. Try again in a moment.".into(),
+            ));
             return;
         };
-        let chooser = gtk::FileChooserNative::new(
-            Some("Import a document"),
-            Some(&window),
-            gtk::FileChooserAction::Open,
-            Some("Import"),
-            Some("Cancel"),
-        );
-        let filter = gtk::FileFilter::new();
-        filter.set_name(Some("Supported documents"));
-        for extension in ["txt", "text", "md", "epub", "docx", "pdf"] {
-            filter.add_pattern(&format!("*.{extension}"));
-        }
-        chooser.add_filter(&filter);
         let sender = sender.clone();
-        chooser.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                match dialog.file().and_then(|file| file.path()) {
-                    Some(path) => import_file(Arc::clone(&core), path, sender.clone()),
-                    None => {
-                        let _ = sender.send(UiMessage::Failed(
-                            "The selected document has no local file path.".into(),
-                        ));
-                    }
-                }
+        slot.present(&window, move |path| match path {
+            Some(path) => import_file(Arc::clone(&core), path, sender.clone()),
+            None => {
+                let _ = sender.send(UiMessage::Failed(
+                    "The selected document has no local file path.".into(),
+                ));
             }
-            dialog.destroy();
         });
-        chooser.show();
     });
 }
 
@@ -356,7 +369,9 @@ fn connect_library_selection(
     remove_button: &gtk::Button,
     flow_button: &gtk::Button,
     rsvp_button: &gtk::Button,
+    encrypt_button: &gtk::Button,
 ) {
+    let encrypt_button = encrypt_button.downgrade();
     let remove_button = remove_button.downgrade();
     let flow_button = flow_button.downgrade();
     let rsvp_button = rsvp_button.downgrade();
@@ -367,7 +382,13 @@ fn connect_library_selection(
                 .and_then(|index| visible_items.borrow().get(index).cloned())
         });
         let enabled = selected.is_some();
+        let can_encrypt = selected
+            .as_ref()
+            .is_some_and(|item| !item.content_encrypted);
         *selected_item.borrow_mut() = selected;
+        if let Some(button) = encrypt_button.upgrade() {
+            button.set_sensitive(can_encrypt);
+        }
         if let Some(button) = remove_button.upgrade() {
             button.set_sensitive(enabled);
         }
@@ -426,6 +447,47 @@ fn connect_open_reader(
             ReaderMode::Flow => load_flow(core, item.id, item.title.unwrap_or_default(), sender),
             ReaderMode::Rsvp => load_rsvp(core, item.id, item.title.unwrap_or_default(), sender),
         }
+    });
+}
+
+fn connect_encrypt(
+    button: &gtk::Button,
+    window: &gtk::ApplicationWindow,
+    core_state: Rc<RefCell<Option<Arc<Core>>>>,
+    selected_item: Rc<RefCell<Option<LibraryItem>>>,
+    sender: mpsc::Sender<UiMessage>,
+) {
+    let weak_window = window.downgrade();
+    button.connect_clicked(move |_| {
+        let (Some(window), Some(core), Some(item)) = (
+            weak_window.upgrade(),
+            core_state.borrow().as_ref().map(Arc::clone),
+            selected_item.borrow().clone(),
+        ) else {
+            return;
+        };
+        let title = item.title.as_deref().unwrap_or("Untitled");
+        let dialog = gtk::MessageDialog::builder()
+            .transient_for(&window)
+            .modal(true)
+            .message_type(gtk::MessageType::Question)
+            .buttons(gtk::ButtonsType::Cancel)
+            .text(format!("Encrypt “{title}”?"))
+            .secondary_text(
+                "GIST's internal copy of this document's text is encrypted with a key kept in your desktop key service (GNOME Keyring, KWallet or KeePassXC). \
+                 The copy GIST made of the original file is not encrypted yet, and the file you originally selected is untouched. \
+                 If the key is lost, the document cannot be recovered.",
+            )
+            .build();
+        dialog.add_button("Encrypt", gtk::ResponseType::Accept);
+        let sender = sender.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                encrypt_item(Arc::clone(&core), item.id.clone(), sender.clone());
+            }
+            dialog.close();
+        });
+        dialog.present();
     });
 }
 
@@ -677,6 +739,8 @@ fn connect_messages(
     remove_button: &gtk::Button,
     flow_button: &gtk::Button,
     rsvp_button: &gtk::Button,
+    encrypt_button: &gtk::Button,
+    key_banner: &gtk::Label,
     play_button: &gtk::Button,
     position_scale: &gtk::Scale,
     position_label: &gtk::Label,
@@ -698,6 +762,8 @@ fn connect_messages(
     let remove_button = remove_button.downgrade();
     let flow_button = flow_button.downgrade();
     let rsvp_button = rsvp_button.downgrade();
+    let encrypt_button = encrypt_button.downgrade();
+    let key_banner = key_banner.downgrade();
     let play_button = play_button.downgrade();
     let position_scale = position_scale.downgrade();
     let position_label = position_label.downgrade();
@@ -724,6 +790,8 @@ fn connect_messages(
                 Some(remove_button),
                 Some(flow_button),
                 Some(rsvp_button),
+                Some(encrypt_button),
+                Some(key_banner),
                 Some(play_button),
                 Some(position_scale),
                 Some(position_label),
@@ -742,6 +810,8 @@ fn connect_messages(
                 remove_button.upgrade(),
                 flow_button.upgrade(),
                 rsvp_button.upgrade(),
+                encrypt_button.upgrade(),
+                key_banner.upgrade(),
                 play_button.upgrade(),
                 position_scale.upgrade(),
                 position_label.upgrade(),
@@ -776,6 +846,7 @@ fn connect_messages(
                     remove_button.set_sensitive(false);
                     flow_button.set_sensitive(false);
                     rsvp_button.set_sensitive(false);
+                    encrypt_button.set_sensitive(false);
                     if count == 0 {
                         status.set_text(if query.is_empty() {
                             "Your library is empty. Import a document to get started."
@@ -840,6 +911,13 @@ fn connect_messages(
                     wpm_scale.set_sensitive(true);
                     status.set_text("RSVP ready");
                 }
+                UiMessage::KeyStatus(error) => match error {
+                    Some(error) => {
+                        key_banner.set_text(&keys::key_message(&error));
+                        key_banner.set_visible(true);
+                    }
+                    None => key_banner.set_visible(false),
+                },
                 UiMessage::Status(message) => status.set_text(&message),
                 UiMessage::Failed(error) => {
                     status.set_text(&error);
@@ -879,8 +957,9 @@ fn connect_messages(
 
 fn initialize_library(sender: mpsc::Sender<UiMessage>) {
     thread::spawn(move || match initialize_core() {
-        Ok(core) => {
+        Ok((core, key_error)) => {
             let _ = sender.send(UiMessage::Ready(core));
+            let _ = sender.send(UiMessage::KeyStatus(key_error));
         }
         Err(error) => {
             let _ = sender.send(UiMessage::Failed(error));
@@ -888,15 +967,24 @@ fn initialize_library(sender: mpsc::Sender<UiMessage>) {
     });
 }
 
-fn initialize_core() -> Result<Arc<Core>, String> {
+/// Opens the library. The key store is only consulted when the library
+/// already holds encrypted items; a key problem leaves a working keyless core
+/// (unencrypted items stay usable) and is returned for the banner.
+fn initialize_core() -> Result<(Arc<Core>, Option<KeyError>), String> {
     let data_dir = data_dir()
         .ok_or_else(|| "Could not determine a home directory for the Linux GTK app.".to_string())?;
-    let storage_dir = data_dir.join("storage");
+    let layout = keys::Layout::new(data_dir);
+    let storage_dir = layout.storage_dir();
     fs::create_dir_all(&storage_dir)
         .map_err(|error| format!("Could not create {}: {error}", storage_dir.display()))?;
-    Core::init(&data_dir.join("gist.sqlite3"), &storage_dir)
-        .map(Arc::new)
-        .map_err(|error| format!("Could not initialize the GIST core: {error}"))
+    let core = Core::init(&layout.db_path(), &storage_dir)
+        .map_err(|error| format!("Could not initialize the GIST core: {error}"))?;
+    let has_encrypted = keys::any_encrypted(&core)?;
+    match keys::open_keyed(&layout, &SecretServiceStore::new(), has_encrypted, false) {
+        Ok(Some(keyed)) => Ok((keyed.core, None)),
+        Ok(None) => Ok((Arc::new(core), None)),
+        Err(error) => Ok((Arc::new(core), Some(error))),
+    }
 }
 
 fn list_items(core: Arc<Core>, query: String, sender: mpsc::Sender<UiMessage>) {
@@ -931,6 +1019,40 @@ fn import_file(core: Arc<Core>, path: PathBuf, sender: mpsc::Sender<UiMessage>) 
                 let _ = sender.send(UiMessage::Failed(format!(
                     "Could not import {name}: {error}"
                 )));
+            }
+        }
+    });
+}
+
+fn encrypt_item(core: Arc<Core>, item_id: String, sender: mpsc::Sender<UiMessage>) {
+    thread::spawn(move || {
+        let Some(data_dir) = data_dir() else {
+            let _ = sender.send(UiMessage::Failed(
+                "Could not determine a home directory for the Linux GTK app.".into(),
+            ));
+            return;
+        };
+        let layout = keys::Layout::new(data_dir);
+        match keys::encrypt_item(&layout, &SecretServiceStore::new(), &core, &item_id) {
+            Ok(done) => {
+                let message = if done.already {
+                    "Already encrypted"
+                } else {
+                    "Encrypted"
+                };
+                // Switch to the key-backed core so the item stays readable.
+                let _ = sender.send(UiMessage::Ready(done.keyed.core));
+                let _ = sender.send(UiMessage::KeyStatus(None));
+                let _ = sender.send(UiMessage::Status(message.into()));
+            }
+            Err(keys::EncryptError::Key(error)) => {
+                let _ = sender.send(UiMessage::KeyStatus(Some(error)));
+                let _ = sender.send(UiMessage::Status(
+                    "Encryption is unavailable; nothing was changed.".into(),
+                ));
+            }
+            Err(keys::EncryptError::Other(error)) => {
+                let _ = sender.send(UiMessage::Failed(error));
             }
         }
     });
