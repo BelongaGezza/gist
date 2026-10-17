@@ -39,6 +39,10 @@ pub enum KeyError {
     /// An unlock prompt was dismissed or the service refused access.
     #[error("access to the key store was denied")]
     Denied,
+    /// No key exists and none may be created here: the caller has data that
+    /// needs the old key, so a new one would silently orphan it.
+    #[error("no key was found in the key store")]
+    Missing,
     /// An entry exists but is not a 32-byte key. It is left untouched.
     #[error("the stored key is corrupt (expected {KEY_LEN} bytes, found {0})")]
     Corrupt(usize),
@@ -86,10 +90,25 @@ impl LinuxKeyProvider {
     /// `lock_path` is a file in the user's data directory (not a secret); all
     /// processes that may create the key must use the same path.
     pub fn open(store: &dyn SecretStore, lock_path: &Path) -> Result<Self, KeyError> {
+        Self::resolve(store, lock_path, true)
+    }
+
+    /// Like [`open`](Self::open) but never creates a key: [`KeyError::Missing`]
+    /// if there is none. Use it whenever existing data depends on the key
+    /// (a library with encrypted items), so a lost key is reported, not
+    /// quietly replaced.
+    pub fn open_existing(store: &dyn SecretStore, lock_path: &Path) -> Result<Self, KeyError> {
+        Self::resolve(store, lock_path, false)
+    }
+
+    fn resolve(store: &dyn SecretStore, lock_path: &Path, create: bool) -> Result<Self, KeyError> {
         let _guard = CreationLock::acquire(lock_path)?;
 
         if let Some(key) = oldest_key(store.list()?)? {
             return Ok(Self { key });
+        }
+        if !create {
+            return Err(KeyError::Missing);
         }
 
         let mut candidate = Zeroizing::new([0u8; KEY_LEN]);

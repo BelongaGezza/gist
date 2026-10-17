@@ -42,6 +42,23 @@ so the provider is plain Rust implementing the existing trait; no new FFI surfac
   keyring means unencrypted items stay usable and the shell disables new encryption with an actionable
   message (shell responsibility, L1).
 
+## GTK spike integration (2026-10-17)
+
+`spikes/linux-gtk/src/keys.rs` (GTK-free, unit-tested) holds the policy; `main.rs` adds an **Encrypt** button
+and a key banner. Key work runs on worker threads, never the GTK main loop.
+
+* **Key store untouched unless needed.** Startup consults it only if the library already has encrypted
+  items. A user who never encrypts never has a key created (smoke-checked: no `keys/` folder appears).
+* **A lost key is never replaced.** A library with encrypted items uses `LinuxKeyProvider::open_existing`
+  (new; returns `KeyError::Missing`, never creates). Encrypting another item in such a library fails with
+  `Missing` too. A key is created only when the user explicitly encrypts in a library with no encrypted items.
+* **Failures leave a working app.** Startup falls back to a keyless core so unencrypted items stay usable,
+  and shows a banner naming what still works and what to do (`keys::key_message`, one message per
+  `KeyError`, no internals leaked). A failed Encrypt changes nothing.
+* **Encrypt flow.** Confirmation dialog (states that the copy GIST made on import is not yet encrypted,
+  tracked gap `A5`, and that a lost key cannot be recovered) -> resolve key -> `encrypt_items` -> switch to
+  the key-backed core (ADR-014 read-after-encrypt) -> refresh.
+
 ## Dependency decision (resolved 2026-10-17: option 3)
 
 The ready-made crates (`secret-service` 5.2.0, `oo7` 0.7.0-beta) depend on `zbus` 5, whose `zvariant`,
@@ -55,7 +72,7 @@ a new major version; revisit when `secret-service` itself moves to zbus 6.
 
 ## Verification (Linux, 2026-10-17)
 
-28 headless tests pass (`GIST_REQUIRE_DBUS=1` makes the wire tests fail instead of skip when `dbus-daemon` is
+30 headless tests pass in `spikes/linux-keyring` (and 7 more in the GTK spike's `keys` module) (`GIST_REQUIRE_DBUS=1` makes the wire tests fail instead of skip when `dbus-daemon` is
 missing); `clippy --all-targets -D warnings` and `fmt --check` clean.
 
 * **Policy (fakes):** create/reuse, distinct keys, no write when a key exists, corrupt entry untouched,
@@ -73,6 +90,8 @@ missing); `clippy --all-targets -D warnings` and `fmt --check` clean.
   key created; dismissed prompt -> `Denied` and nothing created; no service on the bus -> `Unavailable`;
   unreachable bus -> `Unavailable`; a service that never answers -> `Unavailable` within the timeout (found
   by a hang during mutation testing; the timeout is the fix).
+
+**GTK spike (`keys.rs`, headless, fake store):** key store not touched when nothing is encrypted; encrypt creates one key and the item reads through the keyed core while the keyless core cannot; reopen uses the existing key; lost key -> `Missing` and no replacement (also when encrypting another item); Unavailable/Locked/Denied encrypt and create nothing; double-encrypt is idempotent; every message is actionable and leaks no internals. A 10 s launch smoke test (private data dir and bus) ran without panics. **Clicking through the Encrypt flow and the banner in the real window is not yet done.**
 
 **Not verified:** the client against a real daemon. The wire tests prove conformance to the Secret Service
 spec *as read here*, with a fake written by the same author, and the shared `dh` module means a
