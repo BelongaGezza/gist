@@ -9,7 +9,12 @@ license = "MIT"
 
 [dependencies]
 gist-store = { path = "../../crates/gist-store" }
-secret-service = { version = "5.2", default-features = false, features = ["rt-async-io-crypto-rust"] }
+zbus = "6"
+num-bigint = "0.4"
+hkdf = "0.13"
+sha2 = "0.11"
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc"] }
 getrandom = "0.3"
 thiserror = "2"
 zeroize = "1"
