@@ -22,8 +22,7 @@ One-time setup steps per machine. Mark done by appending `[DONE — machine, dat
 
 ## Linux
 - Rust toolchain plus system build essentials. No Apple or WinUI targets.
-- GTK4 spike (`spikes/linux-gtk`, excluded from the workspace): GTK4 development packages; see its README. PDFium is not configured on Linux, so PDF import does not work there yet.
-- Key custody spike (`spikes/linux-keyring`, excluded from the workspace): unit tests need nothing extra. The `#[ignore]`d real-keyring test needs a Secret Service daemon (e.g. `gnome-keyring`) and must only be run on a disposable session bus, never against your own keyring: `dbus-run-session -- sh -c 'echo pw | gnome-keyring-daemon --unlock --components=secrets && cargo test -- --ignored'`.
+- GTK4 spike (`spikes/linux-gtk`, excluded from the workspace): GTK4 development packages; see its README. Run `./tools/fetch-pdfium.sh` (Linux x86_64) to fetch the pinned, SHA-256-verified `libpdfium.so` into `artifacts/pdfium/`; debug builds find it there, and PDF tests need `GIST_REQUIRE_PDFIUM=1` to fail rather than skip when it is absent.
 - Android host work (A0 spike, Linux only): JDK 21, Android SDK and NDK r28, `cargo-ndk` (not yet installed anywhere); `tools/gen-bindings-kt.sh` generates Kotlin bindings.
 
 ## Windows — installed/verified 2026-09-20 (W0)
