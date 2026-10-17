@@ -1415,4 +1415,169 @@ mod tests {
         assert_eq!(position_text(0, 12), "1/12");
         assert_eq!(position_text(usize::MAX, 12), "12/12");
     }
+
+    struct TempLibrary {
+        root: PathBuf,
+        core: Core,
+    }
+
+    impl TempLibrary {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "gist-linux-gtk-spike-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            let storage = root.join("storage");
+            fs::create_dir_all(&storage).expect("create temp storage");
+            let core = Core::init(&root.join("gist.sqlite3"), &storage).expect("init core");
+            Self { root, core }
+        }
+    }
+
+    impl Drop for TempLibrary {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn fixture(relative: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures")
+            .join(relative)
+    }
+
+    /// Imports a fixture through the same core calls the GTK handlers use and
+    /// returns the item id, the Flow text and the RSVP token count.
+    fn import_and_open(library: &TempLibrary, relative: &str) -> (String, String, usize) {
+        let path = fixture(relative);
+        let id = library
+            .core
+            .import_file(&path, &gist_core::NullObserver)
+            .unwrap_or_else(|error| panic!("import {relative}: {error}"));
+        let document: Document =
+            serde_json::from_str(&library.core.get_document(&id).expect("get document"))
+                .expect("document json");
+        let session = library
+            .core
+            .new_rsvp_session(&id, Config::default())
+            .expect("rsvp session");
+        (id, document_text(&document), session.tokens.len())
+    }
+
+    #[test]
+    fn imports_open_in_flow_and_rsvp_for_txt_epub_and_docx() {
+        let library = TempLibrary::new("formats");
+        for relative in [
+            "txt/basic_ascii.txt",
+            "txt/unicode_utf8.txt",
+            "epub/minimal_valid.epub",
+            "epub/multi_chapter.epub",
+            "epub/utf8_content.epub",
+            "docx/minimal_valid.docx",
+            "docx/headings_and_paragraphs.docx",
+            "docx/with_table.docx",
+        ] {
+            let (_, text, tokens) = import_and_open(&library, relative);
+            assert!(!text.trim().is_empty(), "{relative}: empty Flow text");
+            assert!(tokens > 0, "{relative}: no RSVP tokens");
+        }
+        let items = library.core.list_items(0, PAGE_SIZE).expect("list");
+        assert_eq!(items.len(), 8);
+    }
+
+    #[test]
+    fn pdf_import_works_with_pdfium_or_reports_a_typed_unavailable_error() {
+        let library = TempLibrary::new("pdf");
+        let path = fixture("pdf/plain_text.pdf");
+        match library.core.import_file(&path, &gist_core::NullObserver) {
+            Ok(id) => {
+                let document: Document =
+                    serde_json::from_str(&library.core.get_document(&id).expect("get document"))
+                        .expect("document json");
+                assert!(!document_text(&document).trim().is_empty());
+            }
+            Err(gist_core::ImportError::PdfUnavailable(why)) => {
+                assert_ne!(
+                    std::env::var("GIST_REQUIRE_PDFIUM").as_deref(),
+                    Ok("1"),
+                    "pdfium required but unavailable: {why}"
+                );
+                eprintln!("skipping PDF content check: pdfium unavailable ({why})");
+            }
+            Err(error) => panic!("unexpected PDF import error: {error}"),
+        }
+    }
+
+    #[test]
+    fn image_only_pdf_is_rejected_with_no_text_layer() {
+        let library = TempLibrary::new("ocr-pdf");
+        match library
+            .core
+            .import_file(&fixture("pdf/image_only.pdf"), &gist_core::NullObserver)
+        {
+            Err(gist_core::ImportError::PdfNoTextLayer) => {}
+            Err(gist_core::ImportError::PdfUnavailable(_))
+                if std::env::var("GIST_REQUIRE_PDFIUM").as_deref() != Ok("1") => {}
+            other => panic!("expected PdfNoTextLayer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_finds_an_imported_document_and_removal_deletes_only_the_internal_copy() {
+        let library = TempLibrary::new("search-remove");
+        let source = library.root.join("source.txt");
+        fs::write(&source, "Quartz lanterns glow over the harbour tonight.").expect("write");
+        let id = library
+            .core
+            .import_file(&source, &gist_core::NullObserver)
+            .expect("import");
+
+        let hits = library
+            .core
+            .search_items("lanterns", PAGE_SIZE)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
+
+        let outcome = library
+            .core
+            .remove_items_detailed(&[id], true)
+            .expect("remove");
+        assert!(outcome.files_deleted > 0);
+        assert!(
+            source.exists(),
+            "the user's original file must survive removal"
+        );
+        assert!(library
+            .core
+            .list_items(0, PAGE_SIZE)
+            .expect("list")
+            .is_empty());
+        assert!(library
+            .core
+            .search_items("lanterns", PAGE_SIZE)
+            .expect("search")
+            .is_empty());
+    }
+
+    #[test]
+    fn scrubber_progress_survives_reopening_an_item() {
+        let library = TempLibrary::new("progress");
+        let source = library.root.join("progress.txt");
+        fs::write(&source, "one two three four five six seven eight").expect("write");
+        let id = library
+            .core
+            .import_file(&source, &gist_core::NullObserver)
+            .expect("import");
+        library.core.save_progress(&id, 5).expect("save progress");
+        let session = library
+            .core
+            .new_rsvp_session(&id, Config::default())
+            .expect("session");
+        assert_eq!(session.cursor, 5);
+    }
 }
