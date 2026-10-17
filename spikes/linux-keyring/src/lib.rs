@@ -160,100 +160,17 @@ pub fn lock_path(data_dir: &Path) -> PathBuf {
     data_dir.join("keys").join("content-key.lock")
 }
 
-// ── Secret Service backend ────────────────────────────────────────────────
-
-const ATTRIBUTES: [(&str, &str); 3] = [
-    ("xdg:schema", "org.gist.ContentKey"),
-    ("application", "gist"),
-    ("purpose", "content-key-v1"),
-];
-
-/// Secret Service (D-Bus) backend over the user's default collection.
-pub struct SecretServiceStore {
-    // Blocking connection; secret-service ties items to its lifetime, so each
-    // call reconnects. Key access happens once per launch, not per read.
-    _private: (),
-}
-
-impl SecretServiceStore {
-    pub fn new() -> Self {
-        Self { _private: () }
-    }
-
-    fn with_collection<T>(
-        &self,
-        f: impl FnOnce(&secret_service::blocking::Collection<'_>) -> Result<T, KeyError>,
-    ) -> Result<T, KeyError> {
-        use secret_service::blocking::SecretService;
-        use secret_service::EncryptionType;
-
-        let service = SecretService::connect(EncryptionType::Dh).map_err(map_error)?;
-        let collection = service.get_default_collection().map_err(map_error)?;
-        if collection.is_locked().map_err(map_error)? {
-            collection.unlock().map_err(map_error)?;
-        }
-        f(&collection)
-    }
-}
-
-impl Default for SecretServiceStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SecretStore for SecretServiceStore {
-    fn list(&self) -> Result<Vec<Entry>, KeyError> {
-        self.with_collection(|collection| {
-            let items = collection
-                .search_items(ATTRIBUTES.into_iter().collect())
-                .map_err(map_error)?;
-            items
-                .iter()
-                .map(|item| {
-                    item.ensure_unlocked().map_err(map_error)?;
-                    Ok(Entry {
-                        created: item.get_created().map_err(map_error)?,
-                        id: item.item_path.to_string(),
-                        secret: item.get_secret().map_err(map_error)?,
-                    })
-                })
-                .collect()
-        })
-    }
-
-    fn add(&self, secret: &[u8]) -> Result<(), KeyError> {
-        self.with_collection(|collection| {
-            collection
-                .create_item(
-                    "GIST content key",
-                    ATTRIBUTES.into_iter().collect(),
-                    secret,
-                    false, // never replace an existing entry
-                    "application/octet-stream",
-                )
-                .map(|_| ())
-                .map_err(map_error)
-        })
-    }
-}
-
-fn map_error(error: secret_service::Error) -> KeyError {
-    use secret_service::Error as E;
-    match error {
-        E::Locked => KeyError::Locked,
-        E::Prompt | E::PromptDisconnected => KeyError::Denied,
-        E::Unavailable | E::NoResult => KeyError::Unavailable(error.to_string()),
-        E::Zbus(_) | E::ZbusFdo(_) => KeyError::Unavailable(error.to_string()),
-        other => KeyError::Store(other.to_string()),
-    }
-}
-
 /// Convenience for shells: open the real keyring and return an `Arc` ready for
 /// `gist_core::Core::init_encrypted`.
 pub fn open_default(data_dir: &Path) -> Result<Arc<LinuxKeyProvider>, KeyError> {
     LinuxKeyProvider::open(&SecretServiceStore::new(), &lock_path(data_dir)).map(Arc::new)
 }
 
+mod backend;
+mod dh;
+pub use backend::SecretServiceStore;
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wire_tests;

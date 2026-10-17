@@ -1,7 +1,7 @@
 # ADR 031 — Linux key custody: Secret Service
 
 **Date:** 2026-10-17
-**Status:** Proposed — blocked on one dependency-policy decision (see Open decision)
+**Status:** Proposed — implemented as a spike; real-daemon verification outstanding
 
 ## Context
 
@@ -20,9 +20,18 @@ so the provider is plain Rust implementing the existing trait; no new FFI surfac
   constructed provider always holds a valid 32-byte key (`Zeroizing`; `Debug` prints no key material). The
   shell calls `open` before `Core::init_with_read_key` and presents the error; no `gist-store` change.
 * **Two layers.** A small `SecretStore` trait (`list`, `add`; deliberately no delete/replace) carries the
-  policy and is tested with in-memory fakes. `SecretServiceStore` implements it over the `secret-service`
-  crate's blocking API, default collection, DH-encrypted session, items tagged
-  `xdg:schema=org.gist.ContentKey`.
+  policy and is tested with in-memory fakes. `SecretServiceStore` implements it with a purpose-built client
+  on **zbus 6** (`backend.rs`, about six D-Bus calls: `OpenSession`, `ReadAlias`, `Unlock`/`Prompt`,
+  `SearchItems`, `GetSecret`, `CreateItem`) on the default collection, items tagged
+  `xdg:schema=org.gist.ContentKey`. Every method call has a 15 s timeout so a wedged key service becomes
+  `Unavailable`, not a hung launch; waiting for the user to answer an unlock prompt is unbounded by design.
+  Call it from a worker thread, never the GTK main loop.
+* **Session crypto (`dh.rs`).** `dh-ietf1024-sha256-aes128-cbc-pkcs7`: DH over the RFC 2409 Second Oakley
+  Group, HKDF-SHA256 (no salt, empty info) to an AES-128 key, AES-128-CBC/PKCS#7 with a fresh IV per
+  message (`num-bigint`, `hkdf`, `sha2`, `aes`, `cbc`, all RustCrypto/permissive). `plain` is never used.
+  Degenerate peer values (0, 1, p-1, >= p) are rejected. Accepted limits: 1024-bit group and a
+  non-constant-time `modpow`, because the exchange is ephemeral, local and per connection, and it is what
+  every Secret Service implements.
 * **Race-safe creation.** Secret Service has no put-if-absent (`CreateItem` with `replace=false` makes a
   duplicate), so creation is serialised across processes with an advisory `flock` on
   `<data>/keys/content-key.lock` (std `File::lock`, no new dependency) and the entry is re-read afterwards.
@@ -33,31 +42,40 @@ so the provider is plain Rust implementing the existing trait; no new FFI surfac
   keyring means unencrypted items stay usable and the shell disables new encryption with an actionable
   message (shell responsibility, L1).
 
-## Open decision (needs the maintainer)
+## Dependency decision (resolved 2026-10-17: option 3)
 
-`secret-service` 5.2.0 (and `oo7` 0.7.0-beta, which also fails the licence allow-list) depend on
-`zbus` 5, whose `zvariant`, `zvariant_derive` and `zbus_names` crates now carry RustSec
-**unmaintained** advisories RUSTSEC-2026-0370/0371/0372. They are not vulnerabilities: upstream merged
-them into `zbus` 6.0. `cargo deny check advisories` is a blocking CI gate and `deny.toml` has
-`ignore = []`, so promoting this crate into the workspace needs one of:
-
-1. **Add the three IDs to `deny.toml` `ignore` with this rationale**, revisit when `secret-service` moves
-   to zbus 6. (Recommended: transitive, no vulnerability, one-line removal later.)
-2. Wait for a zbus-6 `secret-service`/`oo7` release; keep the crate in `spikes/` until then.
-3. Implement the Secret Service client directly on zbus 6 (more code and our own DH session handling).
-
-Until decided the crate stays in `spikes/`, outside the workspace and outside CI's deny scope.
+The ready-made crates (`secret-service` 5.2.0, `oo7` 0.7.0-beta) depend on `zbus` 5, whose `zvariant`,
+`zvariant_derive` and `zbus_names` crates carry RustSec *unmaintained* advisories RUSTSEC-2026-0370/0371/0372
+(merged into `zbus` 6.0 upstream, not vulnerabilities). `cargo deny check advisories` is a blocking CI gate
+with `ignore = []`, and `oo7` also fails the licence allow-list. The maintainer chose to write the client
+directly on zbus 6 rather than add advisory ignores or wait. `cargo deny check bans licenses sources
+advisories` is clean for the spike's shipping dependency tree (zbus 6.0.0 + RustCrypto; no `tokio`, no
+OpenSSL, no `secret-service`). Cost: we now own the protocol code and the DH session handling. zbus 6.0.0 is
+a new major version; revisit when `secret-service` itself moves to zbus 6.
 
 ## Verification (Linux, 2026-10-17)
 
-12 headless tests pass: create/reuse, distinct keys, no write when a key exists, corrupt entry untouched,
-corrupt-older-beats-valid-newer, duplicate resolution, typed propagation of Locked/Denied/Unavailable,
-failed write, 8-thread first-open convergence (mutation-checked: 8 entries without the lock, 1 with it),
-bad lock path, Debug redaction, and an end-to-end `gist-core` run (encrypt, no plaintext in the IR blobs,
-readable after reopen with the stored key, unreadable with a different key). `clippy -D warnings` and
-`fmt --check` clean. The real backend returns a typed `Unavailable` within ~30 ms on a private session bus
-with no Secret Service.
+28 headless tests pass (`GIST_REQUIRE_DBUS=1` makes the wire tests fail instead of skip when `dbus-daemon` is
+missing); `clippy --all-targets -D warnings` and `fmt --check` clean.
 
-**Not verified:** the `SecretServiceStore` against a real daemon (one `#[ignore]` test needs
-`gnome-keyring`, KWallet or KeePassXC on a disposable bus), locked-keyring unlock prompts, behaviour
-inside Flatpak. `originals/` stays plaintext (ADR-014, tracked gap `A5`).
+* **Policy (fakes):** create/reuse, distinct keys, no write when a key exists, corrupt entry untouched,
+  corrupt-older-beats-valid-newer, duplicate resolution, typed propagation of Locked/Denied/Unavailable,
+  failed write, 8-thread first-open convergence (mutation-checked: 8 entries without the lock, 1 with it),
+  bad lock path, Debug redaction, and an end-to-end `gist-core` run (encrypt; no plaintext in the IR blobs;
+  readable after reopen with the stored key; unreadable with a different key).
+* **Crypto:** same key both sides, fresh IV, wrong peer fails, degenerate peers rejected, malformed input is
+  an error not a panic, and a known-answer test whose expected key was computed independently in Python
+  (mutation-checked: changing the HKDF info makes it fail). The prime matches the `secret-service` crate's
+  constant byte for byte.
+* **Wire (fake service on a private `dbus-daemon` the tests start; never the user's bus):** stored secret is
+  decrypted correctly by the service and read back in a fresh session; existing key reused; wrong-length
+  entry fails closed with nothing added or removed; locked without prompt -> `Locked`; accepted prompt ->
+  key created; dismissed prompt -> `Denied` and nothing created; no service on the bus -> `Unavailable`;
+  unreachable bus -> `Unavailable`; a service that never answers -> `Unavailable` within the timeout (found
+  by a hang during mutation testing; the timeout is the fix).
+
+**Not verified:** the client against a real daemon. The wire tests prove conformance to the Secret Service
+spec *as read here*, with a fake written by the same author, and the shared `dh` module means a
+self-consistent mistake would not show on the wire (only the Python known-answer test guards that). The
+`#[ignore]` test needs GNOME Keyring, KWallet's bridge or KeePassXC on a disposable bus. Also unverified:
+real unlock prompts, Flatpak access. `originals/` stays plaintext (ADR-014, tracked gap `A5`).
