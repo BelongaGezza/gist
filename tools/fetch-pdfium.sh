@@ -20,11 +20,32 @@
 set -euo pipefail
 
 PDFIUM_TAG="chromium/8076"
-PDFIUM_ASSET="pdfium-mac-univ.tgz"   # universal2 (arm64 + x86_64) dylib
-PDFIUM_SHA256="3bdb93e229298dfdf083dc8ccc7d1a8cf87790b6917e5073335504fe2ff0bdc1"
-# SHA-256 of lib/libpdfium.dylib inside that (already verified) archive. Pinned
-# here, in git, so a tampered on-disk copy cannot vouch for itself via a stamp.
-PDFIUM_DYLIB_SHA256="3ed692213ade3cdab960198466adf1534d68632a4bfc1756f288b056939af1f4"
+# Per-OS pins. Each OS pins its own asset and the SHA-256 of the library inside
+# it. Only linux-x64 is supported on Linux for now (no arm64 asset is pinned).
+case "$(uname -s)" in
+    Darwin)
+        PDFIUM_ASSET="pdfium-mac-univ.tgz"   # universal2 (arm64 + x86_64) dylib
+        PDFIUM_LIB="libpdfium.dylib"
+        PDFIUM_SHA256="3bdb93e229298dfdf083dc8ccc7d1a8cf87790b6917e5073335504fe2ff0bdc1"
+        # SHA-256 of lib/libpdfium.dylib inside that (already verified) archive. Pinned
+        # here, in git, so a tampered on-disk copy cannot vouch for itself via a stamp.
+        PDFIUM_DYLIB_SHA256="3ed692213ade3cdab960198466adf1534d68632a4bfc1756f288b056939af1f4"
+        ;;
+    Linux)
+        if [ "$(uname -m)" != "x86_64" ]; then
+            echo "error: no pinned pdfium asset for Linux $(uname -m) (only x86_64)" >&2
+            exit 1
+        fi
+        PDFIUM_ASSET="pdfium-linux-x64.tgz"
+        PDFIUM_LIB="libpdfium.so"
+        PDFIUM_SHA256="d9d67bc40af03aef4fe28a60b19b1086f28ace019c8c9caf19cb7fe3d14ceca3"
+        PDFIUM_DYLIB_SHA256="fd4de9f91f183476d04b1bc3fd17dacd95aba349c55d2c376512d95e082b441e"
+        ;;
+    *)
+        echo "error: no pinned pdfium asset for $(uname -s)" >&2
+        exit 1
+        ;;
+esac
 
 sha256_of() {
     if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
@@ -131,13 +152,13 @@ STAMP="$OUT_DIR/.pinned-sha256"
 
 # Re-hash the real on-disk dylib every time (cheap: ~15 MB) rather than trusting
 # the stamp alone, so a modified or truncated artifacts/pdfium is never reused.
-if [ -f "$OUT_DIR/lib/libpdfium.dylib" ]; then
-    if [ "$(sha256_of "$OUT_DIR/lib/libpdfium.dylib")" = "$PDFIUM_DYLIB_SHA256" ]; then
+if [ -f "$OUT_DIR/lib/$PDFIUM_LIB" ]; then
+    if [ "$(sha256_of "$OUT_DIR/lib/$PDFIUM_LIB")" = "$PDFIUM_DYLIB_SHA256" ]; then
         echo "$PDFIUM_SHA256" > "$STAMP"
         echo "✓ pdfium $PDFIUM_TAG already present and verified ($OUT_DIR)"
         exit 0
     fi
-    echo "! existing $OUT_DIR/lib/libpdfium.dylib does not match the pinned hash; re-fetching" >&2
+    echo "! existing $OUT_DIR/lib/$PDFIUM_LIB does not match the pinned hash; re-fetching" >&2
 fi
 
 TMP="$(mktemp -d)"
@@ -163,9 +184,9 @@ validate_archive "$TMP/$PDFIUM_ASSET"
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 tar -xzf "$TMP/$PDFIUM_ASSET" -C "$OUT_DIR"
-[ -f "$OUT_DIR/lib/libpdfium.dylib" ] || { echo "error: archive has no lib/libpdfium.dylib" >&2; rm -rf "$OUT_DIR"; exit 1; }
-if [ "$(sha256_of "$OUT_DIR/lib/libpdfium.dylib")" != "$PDFIUM_DYLIB_SHA256" ]; then
-    echo "error: extracted libpdfium.dylib does not match the pinned PDFIUM_DYLIB_SHA256" >&2
+[ -f "$OUT_DIR/lib/$PDFIUM_LIB" ] || { echo "error: archive has no lib/$PDFIUM_LIB" >&2; rm -rf "$OUT_DIR"; exit 1; }
+if [ "$(sha256_of "$OUT_DIR/lib/$PDFIUM_LIB")" != "$PDFIUM_DYLIB_SHA256" ]; then
+    echo "error: extracted $PDFIUM_LIB does not match the pinned PDFIUM_DYLIB_SHA256" >&2
     rm -rf "$OUT_DIR"
     exit 1
 fi
