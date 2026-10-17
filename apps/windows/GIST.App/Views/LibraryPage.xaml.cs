@@ -385,6 +385,13 @@ public sealed partial class LibraryPage : Page
     private void OnRowMenuOpening(object? sender, object e)
     {
         var vm = _vm;
+        // Menu key / Shift+F10 on a focused row that is not selected acts on that row, the keyboard twin of the
+        // right-click rule above; without it the menu would be suppressed for a keyboard-only user.
+        if (vm is not null && FocusManager.GetFocusedElement(XamlRoot) is ListViewItem { Content: LibraryRow focused, IsSelected: false })
+        {
+            ItemsList.SelectedItems.Clear();
+            ItemsList.SelectedItems.Add(focused);
+        }
         if (vm is null || vm.SelectionCount == 0)
         {
             RowMenu.Hide();
