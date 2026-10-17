@@ -36,6 +36,14 @@ enum UiMessage {
         title: String,
         session: RsvpSession,
     },
+    /// An item was removed from the library (the reader may have it open).
+    ItemRemoved(String),
+    /// Saving reading progress failed. Never modal: a periodic save can fail
+    /// every second, and a dialog per failure is an unescapable loop (#123).
+    ProgressSaveFailed {
+        item_id: String,
+        error: String,
+    },
     /// `None` clears the key banner; `Some` explains a key-store problem.
     KeyStatus(Option<KeyError>),
     Status(String),
@@ -47,6 +55,34 @@ struct RsvpPlayback {
     session: RsvpSession,
     playing_since: Option<Instant>,
     last_saved: Instant,
+    /// Set once a save for this session has failed; stops the periodic saves.
+    save_failed: bool,
+}
+
+impl RsvpPlayback {
+    /// Is the once-a-second progress save due? Never after a failure.
+    fn periodic_save_due(&self) -> bool {
+        !self.save_failed && self.last_saved.elapsed() >= Duration::from_secs(1)
+    }
+}
+
+/// Drop the session if it is reading the removed item. True if it was.
+fn clear_playback_for_removed(playback: &mut Option<RsvpPlayback>, removed_id: &str) -> bool {
+    if playback.as_ref().is_some_and(|p| p.item_id == removed_id) {
+        *playback = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// Record a failed save. True if it should be reported: the first failure for
+/// the open session, or one with no matching session (a one-off action).
+fn note_save_failure(playback: &mut Option<RsvpPlayback>, item_id: &str) -> bool {
+    match playback.as_mut().filter(|p| p.item_id == item_id) {
+        Some(p) => !std::mem::replace(&mut p.save_failed, true),
+        None => true,
+    }
 }
 
 fn main() {
@@ -902,6 +938,7 @@ fn connect_messages(
                         session,
                         playing_since: None,
                         last_saved: Instant::now(),
+                        save_failed: false,
                     });
                     wpm_label.set_text(&format!("{wpm} WPM"));
                     wpm_scale.set_value(f64::from(wpm));
@@ -910,6 +947,26 @@ fn connect_messages(
                     }
                     wpm_scale.set_sensitive(true);
                     status.set_text("RSVP ready");
+                }
+                UiMessage::ItemRemoved(id) => {
+                    if clear_playback_for_removed(&mut playback.borrow_mut(), &id) {
+                        reader_title.set_text("Select a book to start reading");
+                        rsvp_word.set_text("Choose RSVP to begin");
+                        play_button.set_label("Play");
+                        for button in [&play_button, &back_button] {
+                            button.set_sensitive(false);
+                        }
+                        position_scale.set_sensitive(false);
+                        position_label.set_text("0 / 0");
+                        wpm_scale.set_sensitive(false);
+                    }
+                }
+                UiMessage::ProgressSaveFailed { item_id, error } => {
+                    if note_save_failure(&mut playback.borrow_mut(), &item_id) {
+                        status.set_text(&format!(
+                            "Could not save reading progress ({error}). Progress will not be saved for this session."
+                        ));
+                    }
                 }
                 UiMessage::KeyStatus(error) => match error {
                     Some(error) => {
@@ -1059,18 +1116,21 @@ fn encrypt_item(core: Arc<Core>, item_id: String, sender: mpsc::Sender<UiMessage
 }
 
 fn remove_item(core: Arc<Core>, item_id: String, sender: mpsc::Sender<UiMessage>) {
-    thread::spawn(move || match core.remove_items_detailed(&[item_id], true) {
-        Ok(outcome) => {
-            let _ = sender.send(UiMessage::Status(format!(
-                "Removed from library; internal files deleted: {}",
-                outcome.files_deleted
-            )));
-            let _ = sender.send(UiMessage::RefreshLibrary);
-        }
-        Err(error) => {
-            let _ = sender.send(UiMessage::Failed(format!("Could not remove item: {error}")));
-        }
-    });
+    thread::spawn(
+        move || match core.remove_items_detailed(std::slice::from_ref(&item_id), true) {
+            Ok(outcome) => {
+                let _ = sender.send(UiMessage::ItemRemoved(item_id));
+                let _ = sender.send(UiMessage::Status(format!(
+                    "Removed from library; internal files deleted: {}",
+                    outcome.files_deleted
+                )));
+                let _ = sender.send(UiMessage::RefreshLibrary);
+            }
+            Err(error) => {
+                let _ = sender.send(UiMessage::Failed(format!("Could not remove item: {error}")));
+            }
+        },
+    );
 }
 
 fn load_flow(core: Arc<Core>, item_id: String, title: String, sender: mpsc::Sender<UiMessage>) {
@@ -1262,19 +1322,21 @@ fn tick_rsvp(
             position_syncing,
             position_scrubbing,
         );
-        save_progress_async(
-            core_state,
-            playback.item_id.clone(),
-            playback.session.cursor,
-            sender.clone(),
-        );
+        if !playback.save_failed {
+            save_progress_async(
+                core_state,
+                playback.item_id.clone(),
+                playback.session.cursor,
+                sender.clone(),
+            );
+        }
         status.set_text("RSVP complete.");
         return;
     }
     set_current_word(word_label, &playback.session, index);
     let words = playback.session.words_shown_through(index);
     status.set_text(&format!("Word {}", words.saturating_add(1)));
-    if playback.last_saved.elapsed() >= Duration::from_secs(1) {
+    if playback.periodic_save_due() {
         playback.last_saved = Instant::now();
         save_progress_async(core_state, playback.item_id.clone(), index, sender.clone());
     }
@@ -1369,9 +1431,10 @@ fn save_progress_async(
     };
     thread::spawn(move || {
         if let Err(error) = core.save_progress(&item_id, token_index) {
-            let _ = sender.send(UiMessage::Failed(format!(
-                "Could not save reading progress: {error}"
-            )));
+            let _ = sender.send(UiMessage::ProgressSaveFailed {
+                item_id,
+                error: error.to_string(),
+            });
         }
     });
 }
@@ -1495,6 +1558,7 @@ mod tests {
             session,
             playing_since: None,
             last_saved: now,
+            save_failed: false,
         };
 
         let position = seek_playback(&mut playback, usize::MAX, now + Duration::from_secs(1));
@@ -1518,6 +1582,7 @@ mod tests {
             session,
             playing_since: Some(started),
             last_saved: started,
+            save_failed: false,
         };
         let seeked_at = started + Duration::from_secs(1);
 
@@ -1529,6 +1594,89 @@ mod tests {
         assert_eq!(playback.session.elapsed_at_pause, 1000);
         assert_eq!(playback.playing_since, Some(seeked_at));
         assert_eq!(playback.session.token_at_elapsed(0), 1);
+    }
+
+    fn playback_for(item_id: &str, last_saved: Instant) -> RsvpPlayback {
+        RsvpPlayback {
+            item_id: item_id.into(),
+            session: RsvpSession::new(vec![word("one"), word("two")], Config::default()),
+            playing_since: Some(Instant::now()),
+            last_saved,
+            save_failed: false,
+        }
+    }
+
+    #[test]
+    fn removing_the_open_item_clears_the_session_but_other_items_do_not() {
+        let mut open = Some(playback_for("a", Instant::now()));
+        assert!(!clear_playback_for_removed(&mut open, "b"));
+        assert!(
+            open.is_some(),
+            "removing a different item leaves the reader alone"
+        );
+        assert!(clear_playback_for_removed(&mut open, "a"));
+        assert!(open.is_none());
+        assert!(
+            !clear_playback_for_removed(&mut open, "a"),
+            "nothing open: nothing to clear"
+        );
+    }
+
+    #[test]
+    fn a_failed_save_is_reported_once_and_stops_periodic_saves() {
+        let overdue = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("monotonic clock has run for 5s");
+        let mut open = Some(playback_for("a", overdue));
+        assert!(open.as_ref().unwrap().periodic_save_due());
+
+        assert!(
+            note_save_failure(&mut open, "a"),
+            "first failure is reported"
+        );
+        assert!(
+            !open.as_ref().unwrap().periodic_save_due(),
+            "no more periodic saves"
+        );
+        assert!(
+            !note_save_failure(&mut open, "a"),
+            "later failures stay quiet"
+        );
+    }
+
+    #[test]
+    fn a_failure_for_another_item_does_not_disable_the_open_session() {
+        let overdue = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("monotonic clock has run for 5s");
+        let mut open = Some(playback_for("a", overdue));
+        assert!(note_save_failure(&mut open, "other"));
+        assert!(open.as_ref().unwrap().periodic_save_due());
+        let mut none = None;
+        assert!(
+            note_save_failure(&mut none, "a"),
+            "a one-off failure with no session is reported"
+        );
+    }
+
+    #[test]
+    fn saving_for_a_removed_item_fails_in_the_core_which_is_what_triggered_the_loop() {
+        let library = TempLibrary::new("removed-save");
+        let source = library.root.join("gone.txt");
+        fs::write(&source, "one two three four").expect("write");
+        let id = library
+            .core
+            .import_file(&source, &gist_core::NullObserver)
+            .expect("import");
+        library
+            .core
+            .save_progress(&id, 1)
+            .expect("saves while the item exists");
+        library
+            .core
+            .remove_items_detailed(std::slice::from_ref(&id), true)
+            .expect("remove");
+        assert!(library.core.save_progress(&id, 2).is_err());
     }
 
     #[test]
