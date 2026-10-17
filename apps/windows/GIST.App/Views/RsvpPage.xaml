@@ -62,16 +62,20 @@
         </StackPanel>
 
         <!-- The reader (spec 7.1): centred column. -->
-        <Grid x:Name="ReaderPanel" Grid.Row="1" Visibility="Collapsed" Margin="24">
+        <!-- Scrolls when large text sizes make the controls taller than the window; ReaderPanel is kept at least
+             viewport-high (code-behind) so the word and controls stay centred when there is room. -->
+        <ScrollViewer x:Name="ReaderScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      IsTabStop="False" SizeChanged="OnReaderScrollSizeChanged">
+        <Grid x:Name="ReaderPanel" Visibility="Collapsed" Margin="24">
             <Grid.RowDefinitions>
-                <RowDefinition Height="*" />
+                <RowDefinition x:Name="WordRow" Height="*" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
             <!-- 1. Word: 48 epx Georgia, centred, one line, no wrap/trim. Not live-announced (spec 8). -->
             <TextBlock x:Name="WordText" Grid.Row="0" HorizontalAlignment="Center" VerticalAlignment="Bottom"
-                       Margin="0,0,0,24" FontFamily="Georgia" FontSize="48" TextWrapping="NoWrap"
+                       Margin="0,0,0,24" FontFamily="Georgia" FontSize="48" TextWrapping="NoWrap" SizeChanged="OnWordSizeChanged"
                        TextTrimming="None" TextAlignment="Center"
                        AutomationProperties.AutomationId="RsvpPage_Word"
                        AutomationProperties.LiveSetting="Off" />
@@ -99,7 +103,7 @@
                             AutomationProperties.AutomationId="RsvpPage_WpmSlider"
                             AutomationProperties.Name="Words per minute"
                             ValueChanged="OnWpmSliderChanged" />
-                    <NumberBox x:Name="WpmBox" Width="120" Minimum="100" Maximum="1000" SmallChange="10"
+                    <NumberBox x:Name="WpmBox" MinWidth="120" Minimum="100" Maximum="1000" SmallChange="10"
                                LargeChange="50" SpinButtonPlacementMode="Inline" TabIndex="4"
                                ValidationMode="InvalidInputOverwritten"
                                AutomationProperties.AutomationId="RsvpPage_WpmBox"
@@ -123,5 +127,6 @@
                 </Button>
             </StackPanel>
         </Grid>
+        </ScrollViewer>
     </Grid>
 </Page>

@@ -114,7 +114,7 @@ the UI spec and ADR-006's addendum.
 - [ ] Mica backdrop renders behind System/Light/Dark, and the title bar matches the theme; Sepia and OLED show a solid background with no Mica tint.
 - [ ] Layout at 800, 1100 and 1600 px wide and at 125/150/200 % display scaling: no clipping, header search stays right-aligned.
 - [ ] Narrator: reads the page title, the list ("Library items"), each row ("Title, Author, encrypted"), the commands and dialogs' titles/bodies in a sensible order.
-- [ ] High contrast (Aquatic, Desert, Night sky): GIST's own palette is bypassed entirely (no Mica, no forced light/dark) and all controls and glyphs remain visible using the OS high-contrast colours.
+- [ ] [automated for the system "Night sky"-style theme the test machine applies: SystemAccessibilityTests.High_contrast_*; Aquatic, Desert and the white themes are manual] High contrast (Aquatic, Desert, Night sky): GIST's own palette is bypassed entirely (no Mica, no forced light/dark) and all controls and glyphs remain visible using the OS high-contrast colours.
 - [ ] Nothing shows a raw exception message, GUID or file path anywhere.
 
 ## RSVP reader (W4)
@@ -126,7 +126,7 @@ the UI spec and ADR-006's addendum.
 - [ ] [manual only] Visual pass in all five themes: 48 px Georgia word centred on a solid theme background (OLED exactly black), accent Play button legible, progress caption, slider/number box legible; High contrast bypasses the palette.
 - [ ] [manual only] Narrator: Play/Pause announces "Play"/"Pause"; words are NOT announced as they change; "Read current word" announces the current word once.
 - [ ] [manual only] Reading feel at 300 and 600 WPM: no visible stutter, pauses at sentence/paragraph ends; a long soak shows no drift (measured numbers are in the W4 closeout in docs/windows-development-plan.md).
-- [ ] [manual only] Text scaling (Settings > Accessibility > Text size) enlarges the word; reduced animations produce no transitions (there are none).
+- [ ] [automated at 150/200/225 %: SystemAccessibilityTests.Text_size_grows_the_text_without_clipping_or_overlap] Text scaling (Settings > Accessibility > Text size) enlarges the word; reduced animations produce no transitions (there are none).
 
 ## Flow reader (W5)
 
@@ -146,7 +146,7 @@ Spec §7.2. Tags are provisional; role R2 retags with real test names.
 - [ ] [manual only] Tables (if the document has any): rows/columns align, header row distinct, readable in every theme.
 - [ ] [manual only] Themes: Light, Dark, Sepia, OLED (exactly black) and System each give a legible reading surface, selection colour and progress bar; High contrast bypasses the palette.
 - [ ] [manual only] Narrator: reading column is navigable by paragraph/heading; headings announce their level; images announce alt text; Find and Contents are reachable and announce match count/position where available; progress is announced as a value, not spoken on every scroll.
-- [ ] [manual only] Text scaling (Settings > Accessibility > Text size, up to 225%): text and controls enlarge without clipping; the reading column stays centred.
+- [ ] [automated for the Library, RSVP reader and Remove dialog; Flow reader text scaling is still manual] Text scaling (Settings > Accessibility > Text size, up to 225%): text and controls enlarge without clipping; the reading column stays centred.
 - [ ] [manual only] Window resize and narrow width: column reflows, command bar collapses to overflow, no horizontal scrollbar.
 - [ ] [manual only] Nothing shows a raw exception message, GUID or file path; opening an item whose document cannot be loaded shows a plain message and a way back.
 

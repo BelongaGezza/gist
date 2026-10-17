@@ -52,3 +52,6 @@ From the repo root in Git Bash (Windows 11, MSVC Rust toolchain per `rust-toolch
 4. Optional reproducibility check: `tools/check-bindings-reproducible.sh`.
 5. `cd apps/windows && dotnet build && dotnet test`.
 6. Dev/test only: set `GIST_DATA_ROOT=<dir>` before launching `GIST.exe` to use a scratch store (`GistStoragePaths.ForRoot`) instead of the real profile; the app also appends state/item-count (never titles or paths) to `<dir>/diag.log`. `apps/windows/GIST.App/verify-library.ps1 -Scenario Library|Corrupt` uses it with the seed tool (`cd apps/windows/spikes/seed && dotnet build`) and UI Automation for an end-to-end check.
+
+## Windows system-accessibility UI tests (2026-10-17)
+`apps/windows/GIST.App.UITests/SystemAccessibilityTests.cs` temporarily changes **machine-wide** Windows settings (Text size and the high-contrast switch), so it is a second opt-in on top of `GIST_RUN_UI_TESTS=1`: also set `GIST_RUN_SYSTEM_A11Y_TESTS=1`. Needs an unlocked interactive desktop (it reads real pixels). Settings are restored when each test ends; if a run is killed mid-test, run `pwsh apps/windows/GIST.App.UITests/restore-system-accessibility.ps1` (it reads the originals from `%TEMP%\gist-a11y-restore.txt`). Optional: `GIST_A11Y_SHOTS=<dir>` saves screenshots, `GIST_A11Y_LOG=<file>` appends measurements.
