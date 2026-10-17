@@ -147,6 +147,20 @@ public sealed partial class RsvpPage : Page
         }
     }
 
+    // Large text sizes (Settings > Accessibility > Text size) can make the controls taller than the window. Keep the
+    // panel at least viewport-high so the star rows still centre the word when there is room, and let the
+    // ScrollViewer scroll when there is not, instead of clipping the word under the header.
+    private void OnReaderScrollSizeChanged(object sender, SizeChangedEventArgs e) =>
+        ReaderPanel.MinHeight = Math.Max(0, ReaderScroll.ActualHeight - ReaderPanel.Margin.Top - ReaderPanel.Margin.Bottom);
+
+    // The word row must always be tall enough for the word itself. Only ever grows (an empty TextBlock reports no
+    // height, which would otherwise make the layout jump between words).
+    private void OnWordSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var needed = WordText.ActualHeight + WordText.Margin.Bottom;
+        if (needed > WordRow.MinHeight) WordRow.MinHeight = needed;
+    }
+
     private void UpdateView()
     {
         var vm = _vm;
