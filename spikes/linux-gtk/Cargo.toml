@@ -13,3 +13,4 @@ gist-rsvp = { path = "../../crates/gist-rsvp" }
 gist-store = { path = "../../crates/gist-store" }
 gtk = { package = "gtk4", version = "0.10" }
 serde_json = "1"
+gist-linux-keyring-spike = { path = "../linux-keyring" }
