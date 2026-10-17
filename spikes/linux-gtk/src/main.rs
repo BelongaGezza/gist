@@ -15,6 +15,7 @@ use gist_rsvp::{Config, RsvpSession};
 use gist_store::LibraryItem;
 use gtk::{glib, prelude::*};
 
+mod chooser;
 mod keys;
 
 const PAGE_SIZE: usize = 200;
@@ -338,41 +339,26 @@ fn connect_import(
     sender: mpsc::Sender<UiMessage>,
 ) {
     let weak_window = window.downgrade();
+    let slot = chooser::ChooserSlot::default();
     button.connect_clicked(move |_| {
         let Some(window) = weak_window.upgrade() else {
             return;
         };
         let Some(core) = core_state.borrow().as_ref().map(Arc::clone) else {
+            let _ = sender.send(UiMessage::Status(
+                "The library is still opening. Try again in a moment.".into(),
+            ));
             return;
         };
-        let chooser = gtk::FileChooserNative::new(
-            Some("Import a document"),
-            Some(&window),
-            gtk::FileChooserAction::Open,
-            Some("Import"),
-            Some("Cancel"),
-        );
-        let filter = gtk::FileFilter::new();
-        filter.set_name(Some("Supported documents"));
-        for extension in ["txt", "text", "md", "epub", "docx", "pdf"] {
-            filter.add_pattern(&format!("*.{extension}"));
-        }
-        chooser.add_filter(&filter);
         let sender = sender.clone();
-        chooser.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                match dialog.file().and_then(|file| file.path()) {
-                    Some(path) => import_file(Arc::clone(&core), path, sender.clone()),
-                    None => {
-                        let _ = sender.send(UiMessage::Failed(
-                            "The selected document has no local file path.".into(),
-                        ));
-                    }
-                }
+        slot.present(&window, move |path| match path {
+            Some(path) => import_file(Arc::clone(&core), path, sender.clone()),
+            None => {
+                let _ = sender.send(UiMessage::Failed(
+                    "The selected document has no local file path.".into(),
+                ));
             }
-            dialog.destroy();
         });
-        chooser.show();
     });
 }
 

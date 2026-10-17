@@ -26,6 +26,11 @@ selected item's internal copy, and a banner explains key-store problems. With no
 unencrypted items still work and Encrypt reports it. The import-time copy under `originals/` is not
 encrypted (ADR-014, `A5`).
 
+## Display checks
+
+`cargo run --example chooser_probe` needs a graphical session. It opens the real Import chooser and
+checks that a dialog window appears, that a second open is ignored and that cancelling releases it.
+
 ## Prerequisites
 
 - Rust toolchain pinned by the repository.
