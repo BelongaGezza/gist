@@ -20,8 +20,16 @@ and provides an incremental first pass at the library and reading workflow:
 The current UI is a development spike, not a supported Linux release. It is
 not yet feature-complete: collections, tags, sorting/filtering, URL import,
 encryption/keyring integration, integrity UI, annotations, OCR, accessibility
-verification, and packaging remain out of scope. Encryption is not
-implemented.
+verification, and packaging remain out of scope. Encryption uses a key held in the
+desktop Secret Service (GNOME Keyring, KWallet, KeePassXC; ADR-031): the **Encrypt** button encrypts the
+selected item's internal copy, and a banner explains key-store problems. With no key service,
+unencrypted items still work and Encrypt reports it. The import-time copy under `originals/` is not
+encrypted (ADR-014, `A5`).
+
+## Display checks
+
+`cargo run --example chooser_probe` needs a graphical session. It opens the real Import chooser and
+checks that a dialog window appears, that a second open is ignored and that cancelling releases it.
 
 ## Prerequisites
 

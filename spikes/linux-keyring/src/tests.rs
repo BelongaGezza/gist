@@ -90,6 +90,33 @@ fn first_open_creates_one_random_key_and_later_opens_return_it() {
 }
 
 #[test]
+fn open_existing_never_creates_and_reports_missing() {
+    let dir = temp_dir("existing-missing");
+    let store = FakeStore::default();
+    let err = LinuxKeyProvider::open_existing(&store, &lock_path(&dir)).unwrap_err();
+    assert!(matches!(err, KeyError::Missing), "{err:?}");
+    assert_eq!(store.len(), 0, "a missing key must not be quietly replaced");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn open_existing_returns_the_stored_key_and_still_fails_closed_on_corruption() {
+    let dir = temp_dir("existing-ok");
+    let good = FakeStore::with(vec![entry(1, "/item/a", 0x33)]);
+    let provider = LinuxKeyProvider::open_existing(&good, &lock_path(&dir)).unwrap();
+    assert_eq!(provider.get_or_create_key(), [0x33; KEY_LEN]);
+
+    let bad = FakeStore::with(vec![Entry {
+        created: 1,
+        id: "/item/b".into(),
+        secret: vec![1; 5],
+    }]);
+    let err = LinuxKeyProvider::open_existing(&bad, &lock_path(&dir)).unwrap_err();
+    assert!(matches!(err, KeyError::Corrupt(5)), "{err:?}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn independent_stores_get_different_keys() {
     let dir = temp_dir("distinct");
     let a = LinuxKeyProvider::open(&FakeStore::default(), &lock_path(&dir)).unwrap();
