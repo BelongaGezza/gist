@@ -6,9 +6,10 @@ and provides an incremental first pass at the library and reading workflow:
 - Browse up to 200 library items and search document text, titles, and source
   filenames with the Rust search path.
 - Request TXT, ePub, DOCX, or PDF imports through GTK's native file chooser.
-  TXT import has been manually verified. PDF import is currently unavailable
-  because this spike has no Linux PDFium setup; it is not a supported format
-  here.
+  TXT import has been manually verified. PDF import uses the pinned
+  `libpdfium.so` from `./tools/fetch-pdfium.sh` (run it first; debug builds
+  find it in `artifacts/pdfium/lib`). Without it, PDF import reports a typed
+  "PDF support unavailable" error. GUI PDF import is not yet manually verified.
 - Remove an item after confirmation; only GIST's internal copy and metadata
   are deleted, never the original selected file.
 - Read document text in a basic Flow view or use RSVP playback backed by
@@ -19,8 +20,16 @@ and provides an incremental first pass at the library and reading workflow:
 The current UI is a development spike, not a supported Linux release. It is
 not yet feature-complete: collections, tags, sorting/filtering, URL import,
 encryption/keyring integration, integrity UI, annotations, OCR, accessibility
-verification, and packaging remain out of scope. Encryption is not
-implemented, and PDF import is unavailable without a Linux PDFium setup.
+verification, and packaging remain out of scope. Encryption uses a key held in the
+desktop Secret Service (GNOME Keyring, KWallet, KeePassXC; ADR-031): the **Encrypt** button encrypts the
+selected item's internal copy, and a banner explains key-store problems. With no key service,
+unencrypted items still work and Encrypt reports it. The import-time copy under `originals/` is not
+encrypted (ADR-014, `A5`).
+
+## Display checks
+
+`cargo run --example chooser_probe` needs a graphical session. It opens the real Import chooser and
+checks that a dialog window appears, that a second open is ignored and that cancelling releases it.
 
 ## Prerequisites
 

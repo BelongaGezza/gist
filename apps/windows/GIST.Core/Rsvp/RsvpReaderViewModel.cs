@@ -38,6 +38,8 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
     private readonly IRsvpTimer _timer;
     private readonly uint _initialWpm;
     private readonly Action<uint>? _persistWpm;
+    private readonly bool _initialPauseOnPunctuation;
+    private readonly Action<bool>? _persistPauseOnPunctuation;
 
     private RsvpPlaybackController? _controller;
     private RsvpLoadState _loadState = RsvpLoadState.Loading;
@@ -59,7 +61,9 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
         IRsvpClock clock,
         IRsvpTimer timer,
         uint initialWpm = RsvpWpm.Default,
-        Action<uint>? persistWpm = null)
+        Action<uint>? persistWpm = null,
+        bool initialPauseOnPunctuation = true,
+        Action<bool>? persistPauseOnPunctuation = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(itemId);
         ArgumentNullException.ThrowIfNull(openEngine);
@@ -74,6 +78,8 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
         _timer = timer;
         _initialWpm = initialWpm;
         _persistWpm = persistWpm;
+        _initialPauseOnPunctuation = initialPauseOnPunctuation;
+        _persistPauseOnPunctuation = persistPauseOnPunctuation;
     }
 
     public string ItemId { get; }
@@ -147,6 +153,12 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
             }
 
             _controller = new RsvpPlaybackController(engine, _clock, _timer);
+
+            // Apply the remembered preference before any playback (elapsed 0, nothing to anchor).
+            if (_controller.PauseOnPunctuation != _initialPauseOnPunctuation)
+            {
+                _controller.SetPauseOnPunctuation(_initialPauseOnPunctuation);
+            }
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
@@ -184,6 +196,23 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
     public void SeekTo(ulong index) => Guarded(c =>
     {
         if (index != Position) c.Seek(index);
+    });
+
+    /// <summary>Whether sentence/comma/paragraph pauses are on (the remembered choice before the session is ready).</summary>
+    public bool PauseOnPunctuation => _controller?.PauseOnPunctuation ?? _initialPauseOnPunctuation;
+
+    public void SetPauseOnPunctuation(bool enabled) => Guarded(c =>
+    {
+        if (enabled == c.PauseOnPunctuation) return;
+        c.SetPauseOnPunctuation(enabled);
+        try
+        {
+            _persistPauseOnPunctuation?.Invoke(enabled);
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            // Remembering the preference is a convenience; never interrupt reading for it.
+        }
     });
 
     public void SetWpm(double wpm) => Guarded(c =>
@@ -305,6 +334,7 @@ public sealed class RsvpReaderViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(PlayPauseLabel));
         OnPropertyChanged(nameof(Wpm));
         OnPropertyChanged(nameof(WpmLabel));
+        OnPropertyChanged(nameof(PauseOnPunctuation));
         OnPropertyChanged(nameof(TokenCount));
         OnPropertyChanged(nameof(Position));
         OnPropertyChanged(nameof(MaxPosition));

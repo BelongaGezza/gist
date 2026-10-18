@@ -26,13 +26,23 @@ public sealed record LibraryItemVM
         string title,
         IReadOnlyList<string> authors,
         string? sourcePath = null,
-        bool contentEncrypted = false)
+        bool contentEncrypted = false,
+        string sourceType = "",
+        long? lastOpenedAt = null,
+        double progressFraction = 0,
+        uint wordCount = 0,
+        uint readingSeconds = 0)
     {
         Id = id;
         Title = title;
         Authors = authors;
         SourcePath = sourcePath;
         ContentEncrypted = contentEncrypted;
+        SourceType = sourceType;
+        LastOpenedAt = lastOpenedAt;
+        ProgressFraction = progressFraction;
+        WordCount = wordCount;
+        ReadingSeconds = readingSeconds;
     }
 
     /// <summary>Stable document id (UUIDv7) as produced by the Rust core.</summary>
@@ -55,6 +65,26 @@ public sealed record LibraryItemVM
     /// </summary>
     public bool ContentEncrypted { get; init; }
 
+    /// <summary>
+    /// Normalised source format (txt/epub/docx/web/pdf/ocr), or the empty string when unknown (ADR-021).
+    /// </summary>
+    public string SourceType { get; init; }
+
+    /// <summary>Unix milliseconds when a reader last opened the item; null = never (ADR-021).</summary>
+    public long? LastOpenedAt { get; init; }
+
+    /// <summary>
+    /// Derived RSVP progress, 0..1 (ADR-021). Accepted limitation: counts RSVP reading only, so an
+    /// item read only in the flow view shows a last-read date but 0 %.
+    /// </summary>
+    public double ProgressFraction { get; init; }
+
+    /// <summary>Words in the document (SC-15); 0 when unknown or empty.</summary>
+    public uint WordCount { get; init; }
+
+    /// <summary>Estimated reading time in seconds at the reader's WPM (SC-15).</summary>
+    public uint ReadingSeconds { get; init; }
+
     /// <summary>First author, or the empty string when there is none (see sort semantics).</summary>
     public string PrimaryAuthor => Authors.Count > 0 ? Authors[0] : string.Empty;
 
@@ -64,6 +94,11 @@ public sealed record LibraryItemVM
         && Title == other.Title
         && SourcePath == other.SourcePath
         && ContentEncrypted == other.ContentEncrypted
+        && SourceType == other.SourceType
+        && LastOpenedAt == other.LastOpenedAt
+        && ProgressFraction.Equals(other.ProgressFraction)
+        && WordCount == other.WordCount
+        && ReadingSeconds == other.ReadingSeconds
         && Authors.SequenceEqual(other.Authors);
 
     public override int GetHashCode()
@@ -73,6 +108,11 @@ public sealed record LibraryItemVM
         hash.Add(Title);
         hash.Add(SourcePath);
         hash.Add(ContentEncrypted);
+        hash.Add(SourceType);
+        hash.Add(LastOpenedAt);
+        hash.Add(ProgressFraction);
+        hash.Add(WordCount);
+        hash.Add(ReadingSeconds);
         foreach (var author in Authors)
         {
             hash.Add(author);

@@ -51,8 +51,8 @@ public static class NativePicker
         var edit = name.ControlType == ControlType.Edit ? name : name.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit)) ?? name;
         edit.Focus();
         edit.AsTextBox().Text = path;
-        var open = LibraryDriver.Poll(() => picker.FindFirstDescendant(cf => cf.ByControlType(ControlType.Button).And(cf.ByAutomationId("1"))),
-            "picker Open button");
-        LibraryDriver.Activate(open);
+        // The Open control is a SplitButton on newer Windows 11, where Invoke can open its menu; Enter is the dialog's default action on every build.
+        edit.Focus();
+        Keyboard.Type(VirtualKeyShort.ENTER);
     }
 }

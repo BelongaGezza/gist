@@ -58,7 +58,14 @@ internal sealed class FlowRenderContext
     /// <summary>UTF-16 start (within that entry's PlainText) of the current find match.</summary>
     public int CurrentStart { get; set; } = -1;
 
-    public double FontSize => Typography.FontSize;
+    /// <summary>
+    /// Windows Text size (<c>UISettings.TextScaleFactor</c>). Applied here, uniformly, instead of by WinUI per element: the
+    /// automatic scaling grows the glyphs but not the explicit <see cref="LineHeight"/>, so at 200 % and above lines
+    /// collided. Every text element built from this context sets <c>IsTextScaleFactorEnabled = false</c>.
+    /// </summary>
+    public double TextScale { get; init; } = 1;
+
+    public double FontSize => Typography.FontSize * TextScale;
 
     /// <summary>Roughly 70 characters at the average glyph width (about half an em).</summary>
     public double ColumnMaxWidth => FontSize * 35;
@@ -127,6 +134,7 @@ internal static class FlowBlockRenderer
         {
             IsTextSelectionEnabled = true,
             TextWrapping = TextWrapping.Wrap,
+            IsTextScaleFactorEnabled = false,
             FontSize = fontSize,
             FontFamily = ctx.BodyFont,
             LineHeight = fontSize / ctx.FontSize * ctx.LineHeight,
@@ -228,6 +236,7 @@ internal static class FlowBlockRenderer
             var prefix = new TextBlock
             {
                 Text = list.Ordered ? string.Create(CultureInfo.InvariantCulture, $"{i + list.StartNumber}.") : "•",
+                IsTextScaleFactorEnabled = false,
                 FontSize = ctx.FontSize,
                 FontFamily = ctx.BodyFont,
                 HorizontalAlignment = HorizontalAlignment.Right,
@@ -277,6 +286,7 @@ internal static class FlowBlockRenderer
                     Text = cellText,
                     TextWrapping = TextWrapping.Wrap,
                     IsTextSelectionEnabled = true,
+                    IsTextScaleFactorEnabled = false,
                     FontSize = ctx.FontSize * 0.95,
                     FontFamily = ctx.BodyFont,
                     FontWeight = isHeader ? FontWeights.SemiBold : FontWeights.Normal,
@@ -343,6 +353,7 @@ internal static class FlowBlockRenderer
                 Text = string.IsNullOrWhiteSpace(image.Alt) ? "Image not shown" : image.Alt,
                 TextWrapping = TextWrapping.Wrap,
                 VerticalAlignment = VerticalAlignment.Center,
+                IsTextScaleFactorEnabled = false,
                 FontFamily = ctx.BodyFont,
                 FontSize = ctx.FontSize,
             };
@@ -374,6 +385,7 @@ internal static class FlowBlockRenderer
                 Text = image.Caption,
                 TextWrapping = TextWrapping.Wrap,
                 FontStyle = Windows.UI.Text.FontStyle.Italic,
+                IsTextScaleFactorEnabled = false,
                 FontSize = ctx.FontSize * 0.9,
                 FontFamily = ctx.BodyFont,
                 IsTextSelectionEnabled = true,

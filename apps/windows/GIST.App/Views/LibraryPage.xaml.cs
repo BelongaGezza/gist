@@ -15,21 +15,34 @@ using Windows.System;
 namespace Gist.App.Views;
 
 /// <summary>Display projection of a library item (title, authors, encrypted glyph). Never carries paths.</summary>
-public sealed record LibraryRow(string Id, string Title, string Authors, bool Encrypted)
+public sealed record LibraryRow(
+    string Id, string Title, string Authors, bool Encrypted, string ReadState = "", int ProgressPercent = 0, string? SizeText = null, string? SizeSpoken = null)
 {
+    public Visibility SizeVisibility => string.IsNullOrEmpty(SizeText) ? Visibility.Collapsed : Visibility.Visible;
+
+    public Visibility ProgressVisibility => ProgressPercent > 0 ? Visibility.Visible : Visibility.Collapsed;
+
     public Visibility AuthorsVisibility => Authors.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
     public Visibility LockVisibility => Encrypted ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>Accessible name of the list row.</summary>
     public string AutomationName =>
-        (Authors.Length > 0 ? $"{Title}, {Authors}" : Title) + (Encrypted ? ", encrypted" : string.Empty);
+        (Authors.Length > 0 ? $"{Title}, {Authors}" : Title)
+        + (SizeSpoken is { Length: > 0 } ? $", {SizeSpoken}" : string.Empty)
+        + (ReadState.Length > 0 ? $", {ReadState}" : string.Empty)
+        + (ProgressPercent > 0 ? $", {ProgressPercent} percent read" : string.Empty)
+        + (Encrypted ? ", encrypted" : string.Empty);
 
     public static LibraryRow From(LibraryItemVM item) => new(
         item.Id,
         string.IsNullOrWhiteSpace(item.Title) ? "Untitled" : item.Title,
         item.Authors.Count > 0 ? string.Join(", ", item.Authors) : string.Empty,
-        item.ContentEncrypted);
+        item.ContentEncrypted,
+        ReadingStateText.LastRead(item.LastOpenedAt, DateTimeOffset.Now),
+        ReadingStateText.ProgressPercent(item.ProgressFraction),
+        ReadingTimeFormat.Caption(item.WordCount, item.ReadingSeconds),
+        ReadingTimeFormat.AccessibilityLabel(item.WordCount, item.ReadingSeconds));
 }
 
 public sealed partial class LibraryPage : Page
@@ -184,11 +197,24 @@ public sealed partial class LibraryPage : Page
         }
 
         UpdateRemoveWarning(vm);
+        UpdateImportNotice(vm);
 
         if (vm.PendingDialog != LibraryDialog.None && !_handlingDialog)
         {
             _ = SafeAsync(() => RunPendingDialogAsync(vm));
         }
+    }
+
+    private void UpdateImportNotice(LibraryViewModel vm)
+    {
+        var notice = vm.ImportNotice;
+        ImportNoticeBar.IsOpen = notice is not null;
+        if (notice is not null) ImportNoticeBar.Message = notice;
+    }
+
+    private void OnImportNoticeClosed(InfoBar sender, InfoBarClosedEventArgs args)
+    {
+        if (args.Reason == InfoBarCloseReason.CloseButton) _vm?.DismissImportNotice();
     }
 
     private void UpdateRemoveWarning(LibraryViewModel vm)
@@ -271,6 +297,11 @@ public sealed partial class LibraryPage : Page
         SortTitleAz.IsChecked = _vm.SortOrder == LibrarySortOrder.TitleAZ;
         SortTitleZa.IsChecked = _vm.SortOrder == LibrarySortOrder.TitleZA;
         SortAuthorAz.IsChecked = _vm.SortOrder == LibrarySortOrder.AuthorAZ;
+        SortType.IsChecked = _vm.SortOrder == LibrarySortOrder.SourceType;
+        SortLastReadNewest.IsChecked = _vm.SortOrder == LibrarySortOrder.LastReadNewest;
+        SortLastReadOldest.IsChecked = _vm.SortOrder == LibrarySortOrder.LastReadOldest;
+        SortProgressHigh.IsChecked = _vm.SortOrder == LibrarySortOrder.ProgressHighest;
+        SortProgressLow.IsChecked = _vm.SortOrder == LibrarySortOrder.ProgressLowest;
     }
 
     private void SyncSearchBox(LibraryViewModel vm)
@@ -354,6 +385,13 @@ public sealed partial class LibraryPage : Page
     private void OnRowMenuOpening(object? sender, object e)
     {
         var vm = _vm;
+        // Menu key / Shift+F10 on a focused row that is not selected acts on that row, the keyboard twin of the
+        // right-click rule above; without it the menu would be suppressed for a keyboard-only user.
+        if (vm is not null && FocusManager.GetFocusedElement(XamlRoot) is ListViewItem { Content: LibraryRow focused, IsSelected: false })
+        {
+            ItemsList.SelectedItems.Clear();
+            ItemsList.SelectedItems.Add(focused);
+        }
         if (vm is null || vm.SelectionCount == 0)
         {
             RowMenu.Hide();
@@ -437,6 +475,11 @@ public sealed partial class LibraryPage : Page
     private void OnRemove(object sender, RoutedEventArgs e)
     {
         if (_vm is { CanRemove: true }) _vm.RequestDialog(LibraryDialog.RemoveConfirm);
+    }
+
+    private void OnInfo(object sender, RoutedEventArgs e)
+    {
+        if (_vm is { CanShowInfo: true }) _vm.RequestDialog(LibraryDialog.ItemInfo);
     }
 
     private void OnTags(object sender, RoutedEventArgs e)

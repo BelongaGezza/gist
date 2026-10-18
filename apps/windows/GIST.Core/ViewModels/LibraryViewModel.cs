@@ -41,6 +41,8 @@ public sealed class LibraryViewModel : LibraryViewModelBase
     private IReadOnlyList<LibraryItemVM> _tagFilteredItems = NoItems;
     private CancellationTokenSource? _searchCts;
     private EncryptItemsSummary? _lastEncryptSummary;
+    private PendingEncodingImport? _pendingEncoding;
+    private string? _importNotice;
 
     /// <param name="core">The client this screen drives.</param>
     /// <param name="scheduler">
@@ -312,13 +314,60 @@ public sealed class LibraryViewModel : LibraryViewModelBase
             return null;
         }
 
+        // SC-01: a plain-text file whose encoding is uncertain or lossy stops here and asks. A
+        // failed probe falls through to a normal import (which auto-detects) rather than blocking.
+        if (TextEncodingChoices.IsPlainTextFile(path))
+        {
+            var probe = await Core.DetectTextEncodingAsync(path).ConfigureAwait(false);
+            if (probe is { NeedsPrompt: true })
+            {
+                BeginUserOperation();
+                PendingEncoding = new PendingEncodingImport(path, probe.Name, probe.Lossy);
+                RequestDialog(LibraryDialog.EncodingPrompt);
+                return null;
+            }
+        }
+
+        return await RunImportAsync(path, encoding: null).ConfigureAwait(false);
+    }
+
+    /// <summary>Completes a paused plain-text import with the encoding the user chose (SC-01).</summary>
+    public async Task<string?> ImportFileWithEncodingAsync(string path, string encodingLabel)
+    {
+        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(encodingLabel))
+        {
+            return null;
+        }
+
+        PendingEncoding = null;
+        return await RunImportAsync(path, encodingLabel).ConfigureAwait(false);
+    }
+
+    /// <summary>Whether <paramref name="encodingLabel"/> would replace characters when decoding <paramref name="path"/>.</summary>
+    public async Task<bool?> ProbeLossyAsync(string path, string encodingLabel) =>
+        (await Core.DetectTextEncodingAsync(path, encodingLabel).ConfigureAwait(false))?.Lossy;
+
+    /// <summary>Cancelling the encoding prompt imports nothing.</summary>
+    public void CancelEncodingPrompt() => PendingEncoding = null;
+
+    private async Task<string?> RunImportAsync(string path, string? encoding)
+    {
         BeginUserOperation();
+        ImportNotice = null;
         IsBusy = true;
         try
         {
-            var id = await Core.ImportFileAsync(path).ConfigureAwait(false);
+            var id = await Core.ImportFileAsync(path, encoding).ConfigureAwait(false);
             CaptureOutcome();
             await AfterLibraryMutationAsync().ConfigureAwait(false);
+
+            // SC-03: a DOCX with unresolved tracked changes gets a non-blocking notice.
+            if (id is not null && string.Equals(Path.GetExtension(path), ".docx", StringComparison.OrdinalIgnoreCase)
+                && await Core.GetItemMetadataAsync(id).ConfigureAwait(false) is { TrackedChanges: true })
+            {
+                ImportNotice = DialogContent.TrackedChangesNotice;
+            }
+
             return id;
         }
         finally
@@ -326,6 +375,23 @@ public sealed class LibraryViewModel : LibraryViewModelBase
             IsBusy = false;
         }
     }
+
+    /// <summary>The plain-text import waiting on the user's encoding choice, if any.</summary>
+    public PendingEncodingImport? PendingEncoding
+    {
+        get => _pendingEncoding;
+        private set => SetProperty(ref _pendingEncoding, value);
+    }
+
+    /// <summary>A non-blocking, path-free notice about the last import (SC-03); null when none.</summary>
+    public string? ImportNotice
+    {
+        get => _importNotice;
+        private set => SetProperty(ref _importNotice, value);
+    }
+
+    /// <summary>Dismisses <see cref="ImportNotice"/>.</summary>
+    public void DismissImportNotice() => ImportNotice = null;
 
     /// <summary>
     /// Imports a web page. A blank URL is rejected here, before any FFI call — the dialog's Import
