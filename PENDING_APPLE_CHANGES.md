@@ -33,9 +33,8 @@ this file when it contains entries.
 **Related commit/PR:** branch `feat/core-hardening-2026-10-12`.
 **Action:** on macOS, confirm `apple-build` CI was green on the PR (shared Rust), optionally adjust the wording, delete this entry.
 
-## Pending Apple Change — 2026-10-18 (verification todo for issue #123: removing the open item)
-**File:** none yet — check first. Likely places to read: `apps/apple/macOS/RsvpView.swift` (progress saves while playing), `apps/apple/Shared/CoreClient.swift` (`removeItems`, save-progress calls), `apps/apple/Shared/FlowDocumentModel.swift`.
-**Change required:** none known. Linux found a bug where removing the library item that is open in the RSVP reader left the reader saving progress for the deleted item once a second; every failure opened a modal error and closing it just triggered the next, so the app had to be killed. Confirm whether the macOS app has the same problem.
-**Reason:** GitHub issue #123. The Linux fix is in the PR that closes it; macOS has not been checked.
-**Related commit/PR:** issue #123.
-**Action:** on macOS: (1) import a document, open it in the RSVP reader and press Play; (2) remove that same document from the library; (3) see whether errors repeat or the reader keeps running on a removed item. Also try removing the item while it is open in the Flow reader and from a collection view. If it reproduces: clear/stop the reader session when its item is removed and make a failed progress save report once, not per tick; add a test. Tick the macOS box in #123, record the result in `PLATFORM_VERIFICATION.md`, then delete this entry.
+## Pending Apple Change — 2026-10-18 (issue #123: removing the open item) — fixed, human repro remaining
+**File:** `apps/apple/Shared/CoreClient.swift` (`saveProgress`), `apps/apple/Tests/ReadingStateTests.swift`.
+**Change made:** code reading showed the macOS reader saves only on view disappear (no per-second loop) and Remove is unreachable while the reader is pushed, so the Linux loop cannot occur. A save for a removed item still raised one "FOREIGN KEY constraint failed" alert; `saveProgress` now ignores a failed save when the item can no longer be loaded. Tests `testSaveProgressForARemovedItemIsSilent` (fails without the fix) and `testSaveProgressForAnExistingItemStillSucceedsWithoutError` added; `ReadingStateTests` 18/18 pass.
+**Action:** on a Mac, import a document, open it in RSVP, press Play, and try to reach Remove; confirm no alert on leaving. Then delete this entry.
+
