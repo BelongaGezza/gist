@@ -931,11 +931,21 @@ final class CoreClient: ObservableObject {
     }
 
     /// Persists the current token index so playback can resume later.
+    ///
+    /// A save for an item that has since been removed from the library
+    /// (issue #123) is silently ignored: there is nothing left to resume,
+    /// and an alert about it is noise. The FFI has no typed "not found"
+    /// error (everything arrives as `GistError.Core`), so on failure this
+    /// checks whether the item can still be loaded at all; only when it
+    /// can, the original error is surfaced.
     func saveProgress(itemId: String, tokenIndex: Int) async {
         guard let core else { return }
         do {
             try core.saveProgress(itemId: itemId, tokenIndex: UInt64(tokenIndex))
         } catch {
+            if (try? core.getItemMetadata(itemId: itemId)) == nil {
+                return
+            }
             self.error = "\(error)"
         }
     }
