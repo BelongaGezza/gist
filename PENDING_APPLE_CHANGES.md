@@ -32,9 +32,3 @@ this file when it contains entries.
 **Reason:** F39 (Windows review): a second process's startup sweep could delete an import that had written its blobs but not committed its row.
 **Related commit/PR:** branch `feat/core-hardening-2026-10-12`.
 **Action:** on macOS, confirm `apple-build` CI was green on the PR (shared Rust), optionally adjust the wording, delete this entry.
-
-## Pending Apple Change — 2026-10-18 (issue #123: removing the open item) — fixed, human repro remaining
-**File:** `apps/apple/Shared/CoreClient.swift` (`saveProgress`), `apps/apple/Tests/ReadingStateTests.swift`.
-**Change made:** code reading showed the macOS reader saves only on view disappear (no per-second loop) and Remove is unreachable while the reader is pushed, so the Linux loop cannot occur. A save for a removed item still raised one "FOREIGN KEY constraint failed" alert; `saveProgress` now ignores a failed save when the item can no longer be loaded. Tests `testSaveProgressForARemovedItemIsSilent` (fails without the fix) and `testSaveProgressForAnExistingItemStillSucceedsWithoutError` added; `ReadingStateTests` 18/18 pass.
-**Action:** on a Mac, import a document, open it in RSVP, press Play, and try to reach Remove; confirm no alert on leaving. Then delete this entry.
-
