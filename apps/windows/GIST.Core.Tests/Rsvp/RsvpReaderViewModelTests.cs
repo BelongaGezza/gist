@@ -165,6 +165,38 @@ public sealed class RsvpReaderViewModelTests
         vm.Dispose();
     }
 
+    // Issue #123: the item open in the reader was removed, so every save fails.
+    [Fact]
+    public async Task Saves_for_a_removed_item_fail_quietly_and_no_more_often_than_the_save_interval()
+    {
+        var attempts = 0;
+        var vm = new RsvpReaderViewModel(
+            "removed-item",
+            "t",
+            Engine(Enumerable.Range(0, 200).Select(i => "w" + i).ToArray()),
+            _ =>
+            {
+                attempts++;
+                throw new InvalidOperationException("FOREIGN KEY constraint failed");
+            },
+            _clock,
+            _timer);
+        await vm.LoadAsync();
+        vm.TogglePlayPause();
+
+        // Ten seconds of playback; the default 300 WPM shows a word every 200 ms.
+        for (var i = 0; i < 50; i++)
+        {
+            _clock.Advance(200);
+            _timer.Fire();
+        }
+
+        Assert.Equal(RsvpLoadState.Ready, vm.LoadState);
+        Assert.InRange(attempts, 1, 1 + (int)(10_000 / RsvpReaderViewModel.SaveInterval.TotalMilliseconds));
+
+        await vm.LeaveAsync(); // leaving after failed saves still completes and releases the engine
+    }
+
     [Fact]
     public async Task SetWpm_clamps_and_ignores_a_no_op()
     {

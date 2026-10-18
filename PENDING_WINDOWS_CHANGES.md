@@ -61,13 +61,6 @@ This entry is **not** deleted, because its ask was a *visual* confirmation and p
 ## Pending Windows Change — 2026-10-11 (SC-06 web byline/dates UI) — applied 2026-10-13, human look remaining
 **Applied and verified 2026-10-13:** `ItemMetadata` now carries title, author, import/published/retrieved dates, language and canonical URL (`CoreClient.GetItemMetadataAsync`); `ItemInfoPresentation` (`SafeLink` http/https only, `DisplayDate`, `HasWebDetails`) mirrors Apple's; a "Get Info…" row-menu item on Library and Collection opens an item-info dialog (`LibraryDialog.ItemInfo`, `LibraryDialogHost.ShowItemInfoAsync`) showing the fields that exist, the tracked-changes notice, and the canonical URL as a link only when it is http(s) (the user's own click follows it; never auto-opened). Build 0 warnings; `GIST.Core.Tests` 461 pass / 2 skipped (18 new incl. a real-core file-import info test). **Remaining:** a human look at the dialog (dark/light/high contrast) and with a real web item (needs network); no FlaUI test yet. **Delete this entry once that is done or declined.**
 
-## Pending Windows Change — 2026-10-18 (verification todo for issue #123: removing the open item)
-**File:** none yet — check first. Likely places to read: `apps/windows/GIST.Core/Rsvp/RsvpReaderViewModel.cs`, `apps/windows/GIST.App/Views/RsvpPage.xaml.cs` (progress saves while playing), `apps/windows/GIST.Core/Client/CoreClient.cs` (remove, save-progress calls).
-**Change required:** none known. Linux found a bug where removing the library item that is open in the RSVP reader left the reader saving progress for the deleted item once a second; every failure opened a modal error and closing it just triggered the next, so the app had to be killed. Confirm whether the Windows app has the same problem.
-**Reason:** GitHub issue #123. The Linux fix is in the PR that closes it; Windows has not been checked.
-**Related commit/PR:** issue #123.
-**Action:** on Windows: (1) import a document, open it in the RSVP reader and press Play; (2) remove that same document from the library; (3) see whether errors repeat or the reader keeps running on a removed item. Also try removing the item while it is open in the Flow reader. If it reproduces: stop/clear the reader view model when its item is removed and make a failed progress save report once, not per tick; add a test. Tick the Windows box in #123, record the result in `PLATFORM_VERIFICATION.md`, then delete this entry.
-
 ## Pending Windows Change — 2026-10-11
 **File:** `apps/windows/**` library row view-model / C# FFI wrapper
 **Change required:** Surface `FfiLibraryItem.word_count` and `estimate_reading_seconds(word_count, wpm)` (SC-15, ADR-030) as "N words, ~M min" on library rows; the generated C# bindings need regenerating.
