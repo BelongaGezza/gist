@@ -45,8 +45,8 @@ also get PNGs of the empty / seeded / corrupt-key states for the visual pass.
 - [ ] [automated: CtrlA_selects_every_row] Ctrl+A selects all rows.
 - [ ] [automated: Enter_on_a_row_opens_the_reader] Enter on a row triggers Open, which opens the RSVP reader (W4). Open in Flow View opens the flow reader (W5).
 - [ ] [automated: CtrlO_opens_the_native_picker_which_can_be_cancelled] Ctrl+O opens the file picker.
-- [ ] [manual only] Tab order: search box -> command bar -> list; arrow keys move through rows; Space toggles the row checkbox; focus rings visible in every theme.
-- [ ] [manual only] Right-click a row: context menu (Open in Reader, Open in Flow View, Manage Tags..., Encrypt..., Remove...); right-click on an unselected row selects it first; "Encrypt..." is hidden when every selected item is already encrypted.
+- [ ] [automated: KeyboardOnlyTests.Library_tab_order_is_search_then_commands_then_list_and_focus_stays_visible, Arrow_keys_move_through_rows_and_Home_End_jump, Selection_is_operable_by_keyboard_Shift_extends_Ctrl_Space_toggles] Tab order: nav pane -> search box -> command bar -> list; arrow keys move through rows; Space selects the row. [manual only] focus rings visible in every theme (UIA proves focus is on-screen, not that the ring is drawn).
+- [ ] [automated for keyboard: KeyboardOnlyTests.Context_menu_opens_with_the_Menu_key_is_arrow_navigable_and_Esc_returns_focus_to_the_row] [manual only for mouse] Right-click a row (or Menu key on a focused row): context menu (Open in Reader, Open in Flow View, Manage Tags..., Encrypt..., Remove...); right-click on an unselected row selects it first; "Encrypt..." is hidden when every selected item is already encrypted.
 - [ ] [manual only] Double-click a row opens it (notice for now).
 
 ## 3. Search
@@ -114,7 +114,7 @@ the UI spec and ADR-006's addendum.
 - [ ] Mica backdrop renders behind System/Light/Dark, and the title bar matches the theme; Sepia and OLED show a solid background with no Mica tint.
 - [ ] Layout at 800, 1100 and 1600 px wide and at 125/150/200 % display scaling: no clipping, header search stays right-aligned.
 - [ ] Narrator: reads the page title, the list ("Library items"), each row ("Title, Author, encrypted"), the commands and dialogs' titles/bodies in a sensible order.
-- [ ] High contrast (Aquatic, Desert, Night sky): GIST's own palette is bypassed entirely (no Mica, no forced light/dark) and all controls and glyphs remain visible using the OS high-contrast colours.
+- [ ] [automated for the system "Night sky"-style theme the test machine applies: SystemAccessibilityTests.High_contrast_*; Aquatic, Desert and the white themes are manual] High contrast (Aquatic, Desert, Night sky): GIST's own palette is bypassed entirely (no Mica, no forced light/dark) and all controls and glyphs remain visible using the OS high-contrast colours.
 - [ ] Nothing shows a raw exception message, GUID or file path anywhere.
 
 ## RSVP reader (W4)
@@ -126,7 +126,7 @@ the UI spec and ADR-006's addendum.
 - [ ] [manual only] Visual pass in all five themes: 48 px Georgia word centred on a solid theme background (OLED exactly black), accent Play button legible, progress caption, slider/number box legible; High contrast bypasses the palette.
 - [ ] [manual only] Narrator: Play/Pause announces "Play"/"Pause"; words are NOT announced as they change; "Read current word" announces the current word once.
 - [ ] [manual only] Reading feel at 300 and 600 WPM: no visible stutter, pauses at sentence/paragraph ends; a long soak shows no drift (measured numbers are in the W4 closeout in docs/windows-development-plan.md).
-- [ ] [manual only] Text scaling (Settings > Accessibility > Text size) enlarges the word; reduced animations produce no transitions (there are none).
+- [ ] [automated at 150/200/225 %: SystemAccessibilityTests.Text_size_grows_the_text_without_clipping_or_overlap] Text scaling (Settings > Accessibility > Text size) enlarges the word; reduced animations produce no transitions (there are none).
 
 ## Flow reader (W5)
 
@@ -146,7 +146,7 @@ Spec §7.2. Tags are provisional; role R2 retags with real test names.
 - [ ] [manual only] Tables (if the document has any): rows/columns align, header row distinct, readable in every theme.
 - [ ] [manual only] Themes: Light, Dark, Sepia, OLED (exactly black) and System each give a legible reading surface, selection colour and progress bar; High contrast bypasses the palette.
 - [ ] [manual only] Narrator: reading column is navigable by paragraph/heading; headings announce their level; images announce alt text; Find and Contents are reachable and announce match count/position where available; progress is announced as a value, not spoken on every scroll.
-- [ ] [manual only] Text scaling (Settings > Accessibility > Text size, up to 225%): text and controls enlarge without clipping; the reading column stays centred.
+- [ ] [automated for the Library, RSVP reader, Flow reader and every Library dialog except the encoding prompt and DRM dialog] Text scaling (Settings > Accessibility > Text size, up to 225%): text and controls enlarge without clipping; the reading column stays centred.
 - [ ] [manual only] Window resize and narrow width: column reflows, command bar collapses to overflow, no horizontal scrollbar.
 - [ ] [manual only] Nothing shows a raw exception message, GUID or file path; opening an item whose document cannot be loaded shows a plain message and a way back.
 
@@ -168,3 +168,10 @@ Spec §7.2. Tags are provisional; role R2 retags with real test names.
   session, while every other automated test in both files passed, including the rest of that same file's native-picker
   coverage. Reproduced twice in isolation, so not test-ordering related; not yet root-caused, and unrelated to any W3
   (sidebar/collections/theme) code. If it recurs, re-run it alone before assuming a regression.
+
+## Item info (SC-03 / SC-06) — added 2026-10-13
+
+- [ ] [manual only] Right-click an item → "Get Info…": the dialog titled with the item shows Type and Imported; a web item also shows Author, Published, Retrieved and the canonical URL.
+- [ ] [manual only] The canonical URL is a link only for http/https; clicking it opens the default browser; nothing opens on its own.
+- [ ] [manual only] A DOCX that had tracked changes shows the tracked-changes sentence; Narrator reads each row as "Label: value".
+- [ ] [manual only] Check the dialog in Light, Dark, Sepia, OLED and a high-contrast theme.

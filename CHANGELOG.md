@@ -18,6 +18,11 @@ limitations" at the bottom of this file for what's explicitly still open.
 No version has been tagged and there is no public release yet — this section is a running log of
 pre-1.0 work, not a shipped release note.
 
+### Fixed — Rust core (all platforms, 2026-10-12)
+
+- Text typed into a vertically merged Word table cell (a `w:vMerge` continuation) is no longer dropped on import; it is appended to the merged cell (F77). Affects new imports only.
+- The startup clean-up of leftover storage files no longer deletes anything modified in the last ten minutes, so a second GIST window or process starting during a large import cannot remove that import's files (F39). A file left behind by a failed removal is still reclaimed, at a later launch.
+
 ### Added — import fidelity and library info (macOS, 2026-10-11)
 
 - Text files in other encodings (UTF-16, Windows-1252/1251, Shift_JIS, GBK and more) now import; when GIST is unsure it asks which encoding to use. Previously a non-UTF-8 .txt failed to import, and a leading UTF-8 BOM is now stripped.

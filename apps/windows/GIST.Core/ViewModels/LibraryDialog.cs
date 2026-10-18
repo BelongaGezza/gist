@@ -24,6 +24,9 @@ public enum LibraryDialog
     /// <summary>Import URL prompt (§4.5). Import is disabled while the box is blank.</summary>
     ImportUrl,
 
+    /// <summary>SC-01: pick the encoding of a plain-text file the core could not detect with confidence.</summary>
+    EncodingPrompt,
+
     /// <summary>New Collection name prompt (§4.5).</summary>
     NewCollection,
 
@@ -38,6 +41,9 @@ public enum LibraryDialog
 
     /// <summary>Tag editor for the single selected item (§6).</summary>
     TagEditor,
+
+    /// <summary>Item info (SC-03 / SC-06) for the single selected item.</summary>
+    ItemInfo,
 
     /// <summary>
     /// The DRM dialog. Raised only from a structurally typed

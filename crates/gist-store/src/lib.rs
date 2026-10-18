@@ -189,6 +189,19 @@ fn checksum_sidecar_path(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Set `path`'s modification time to now, best effort (F39). Opens for
+/// write without truncating, so the content is never touched; a missing file
+/// or a refused open is logged at `debug!` and otherwise ignored.
+fn touch_mtime(path: &Path) {
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    if let Err(e) = result {
+        tracing::debug!("gist-store: could not refresh mtime of {:?}: {}", path, e);
+    }
+}
+
 /// Write (or overwrite) the checksum sidecar for `path`, recording the
 /// BLAKE3 digest of `bytes` — the exact bytes being written to `path` (i.e.
 /// post-encryption ciphertext when this `Store` is encrypted, ADR-011;
@@ -506,8 +519,6 @@ pub struct LibraryItem {
     pub source_path: Option<String>,
     pub cover_path: Option<String>,
     pub created_at: i64,
-    // TODO M2: populate from tokens table
-    pub token_count: Option<usize>,
     /// Mirrors the row's `content_encrypted` column (ADR-011) — `true` once
     /// [`Store::encrypt_item`]/`insert_item` (under [`Store::open_encrypted`])
     /// has encrypted this item's `.json`/`.tokens.json` blobs at rest. Reads
@@ -531,7 +542,9 @@ pub struct LibraryItem {
     pub progress_fraction: f64,
     /// Number of `TokenKind::Word` tokens in the item's token stream (ADR-030,
     /// SC-15) — the same units the RSVP reader plays and the `tokens` table
-    /// indexes. Stored in `library_items.word_count` (schema v8).
+    /// indexes. Stored in `library_items.word_count` (schema v8). This
+    /// replaced an always-`None` `token_count` placeholder field (removed
+    /// 2026-10-12; nothing read it).
     pub word_count: u32,
 }
 
@@ -577,7 +590,6 @@ fn library_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryIte
         source_path: row.get(3)?,
         cover_path: row.get(4)?,
         created_at: row.get(5)?,
-        token_count: None, // TODO M2: populate from tokens table
         content_encrypted: row.get(6)?,
         source_type,
         last_opened_at: row.get(7)?,
@@ -1243,6 +1255,14 @@ impl Store {
             };
             std::fs::write(&copy_path, &on_disk)?;
             write_checksum_sidecar(&copy_path, &on_disk)?;
+        } else {
+            // F39: an existing copy may be an unreferenced orphan that the
+            // orphan sweep would otherwise consider old enough to delete
+            // before this import's row commits. Refreshing its modification
+            // time puts it inside the sweep's minimum-age window. Best
+            // effort: a failure only means the pre-F39 behaviour.
+            touch_mtime(&copy_path);
+            touch_mtime(&checksum_sidecar_path(&copy_path));
         }
 
         Ok(copy_path.to_string_lossy().into_owned())

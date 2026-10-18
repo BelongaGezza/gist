@@ -128,6 +128,11 @@ public sealed partial class CollectionPage : Page
         SortTitleAz.IsChecked = _vm.SortOrder == LibrarySortOrder.TitleAZ;
         SortTitleZa.IsChecked = _vm.SortOrder == LibrarySortOrder.TitleZA;
         SortAuthorAz.IsChecked = _vm.SortOrder == LibrarySortOrder.AuthorAZ;
+        SortType.IsChecked = _vm.SortOrder == LibrarySortOrder.SourceType;
+        SortLastReadNewest.IsChecked = _vm.SortOrder == LibrarySortOrder.LastReadNewest;
+        SortLastReadOldest.IsChecked = _vm.SortOrder == LibrarySortOrder.LastReadOldest;
+        SortProgressHigh.IsChecked = _vm.SortOrder == LibrarySortOrder.ProgressHighest;
+        SortProgressLow.IsChecked = _vm.SortOrder == LibrarySortOrder.ProgressLowest;
     }
 
     private void RebuildList(CollectionViewModel vm)
@@ -213,6 +218,11 @@ public sealed partial class CollectionPage : Page
     private void OnRemove(object sender, RoutedEventArgs e)
     {
         if (_vm is { CanRemove: true }) _vm.RequestDialog(LibraryDialog.RemoveConfirm);
+    }
+
+    private void OnInfo(object sender, RoutedEventArgs e)
+    {
+        if (_vm is { CanShowInfo: true }) _vm.RequestDialog(LibraryDialog.ItemInfo);
     }
 
     private void OnTags(object sender, RoutedEventArgs e)

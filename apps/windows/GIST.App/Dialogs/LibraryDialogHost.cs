@@ -1,4 +1,5 @@
 using Gist.Core.Client;
+using Gist.Core.Models;
 using Gist.Core.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -191,6 +192,7 @@ public sealed class LibraryDialogHost
     private Task ShowAsync(LibraryViewModel vm, XamlRoot xamlRoot, LibraryDialog which) => which switch
     {
         LibraryDialog.ImportUrl => ShowImportUrlAsync(vm, xamlRoot),
+        LibraryDialog.EncodingPrompt => ShowEncodingPromptAsync(vm, xamlRoot),
         LibraryDialog.NewCollection => ShowNewCollectionAsync(vm, xamlRoot),
         LibraryDialog.RemoveConfirm => ShowRemoveAsync(vm, xamlRoot),
         LibraryDialog.EncryptConfirm => ShowEncryptAsync(vm, xamlRoot),
@@ -200,6 +202,7 @@ public sealed class LibraryDialogHost
         LibraryDialog.Error => ShowMessageAsync(
             xamlRoot, DialogContent.ErrorTitle, DialogContent.ErrorMessage(vm.LastError?.Kind)),
         LibraryDialog.TagEditor => ShowTagEditorAsync(vm, xamlRoot),
+        LibraryDialog.ItemInfo => ShowItemInfoAsync(vm, xamlRoot),
         _ => Task.CompletedTask,
     };
 
@@ -207,6 +210,7 @@ public sealed class LibraryDialogHost
     {
         LibraryDialog.RemoveConfirm => ShowCollectionRemoveAsync(vm, xamlRoot),
         LibraryDialog.TagEditor => ShowTagEditorAsync(vm, xamlRoot),
+        LibraryDialog.ItemInfo => ShowItemInfoAsync(vm, xamlRoot),
         LibraryDialog.Error => ShowMessageAsync(
             xamlRoot, DialogContent.ErrorTitle, DialogContent.ErrorMessage(vm.LastError?.Kind)),
         _ => Task.CompletedTask,
@@ -245,7 +249,7 @@ public sealed class LibraryDialogHost
         dialog.PrimaryButtonText = DialogContent.CollectionRemoveButton;
         dialog.CloseButtonText = DialogContent.CancelButton;
         dialog.DefaultButton = ContentDialogButton.Close;
-        dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 360 };
+        dialog.Content = DialogKeyboardScroll.Body(panel, 360, dialog.Title as string ?? "Dialog");
 
         if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
@@ -295,6 +299,53 @@ public sealed class LibraryDialogHost
         if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
             await vm.ImportUrlAsync(box.Text);
+        }
+    }
+
+    // ── Encoding prompt (SC-01) ────────────────────────────────────────────
+
+    private static async Task ShowEncodingPromptAsync(LibraryViewModel vm, XamlRoot xamlRoot)
+    {
+        if (vm.PendingEncoding is not { } pending) return;
+
+        var combo = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+        AutomationProperties.SetName(combo, "Encoding");
+        foreach (var option in TextEncodingChoices.Options(pending.DetectedName)) combo.Items.Add(new ComboBoxItem { Content = option.Name, Tag = option.Label });
+        var selection = TextEncodingChoices.Selection(pending.DetectedName);
+        combo.SelectedItem = combo.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == selection);
+
+        var warning = new TextBlock
+        {
+            Text = DialogContent.EncodingLossyWarning,
+            TextWrapping = TextWrapping.Wrap,
+            Visibility = pending.Lossy ? Visibility.Visible : Visibility.Collapsed,
+        };
+
+        var dialog = NewDialog(xamlRoot, DialogContent.EncodingTitle);
+        dialog.PrimaryButtonText = DialogContent.EncodingPrimary;
+        dialog.CloseButtonText = DialogContent.CancelButton;
+        dialog.IsPrimaryButtonEnabled = combo.SelectedItem is not null;
+        dialog.Content = Stack(Body(DialogContent.EncodingBody(pending.DetectedName, pending.FileName)), combo, warning);
+
+        // Re-probe when the choice changes so the lossy warning reflects the encoding picked.
+        combo.SelectionChanged += async (_, _) =>
+        {
+            dialog.IsPrimaryButtonEnabled = combo.SelectedItem is not null;
+            if (combo.SelectedItem is ComboBoxItem { Tag: string label })
+            {
+                var lossy = await vm.ProbeLossyAsync(pending.Path, label);
+                warning.Visibility = lossy == true ? Visibility.Visible : Visibility.Collapsed;
+            }
+        };
+
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary
+            && combo.SelectedItem is ComboBoxItem { Tag: string chosen })
+        {
+            await vm.ImportFileWithEncodingAsync(pending.Path, chosen);
+        }
+        else
+        {
+            vm.CancelEncodingPrompt();
         }
     }
 
@@ -354,7 +405,7 @@ public sealed class LibraryDialogHost
         dialog.PrimaryButtonStyle = (Style)XamlReader.Load(DestructiveButtonStyleXaml);
         dialog.CloseButtonText = DialogContent.CancelButton;
         dialog.DefaultButton = ContentDialogButton.Close;
-        dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 360 };
+        dialog.Content = DialogKeyboardScroll.Body(panel, 360, dialog.Title as string ?? "Dialog");
 
         if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
@@ -390,7 +441,7 @@ public sealed class LibraryDialogHost
         dialog.CloseButtonText = DialogContent.CancelButton;
         // Irreversible on key loss: make Cancel, not Encrypt, the Enter default.
         dialog.DefaultButton = ContentDialogButton.Close;
-        dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 420 };
+        dialog.Content = DialogKeyboardScroll.Body(panel, 420, dialog.Title as string ?? "Dialog");
 
         if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
@@ -411,6 +462,84 @@ public sealed class LibraryDialogHost
         dialog.DefaultButton = ContentDialogButton.Close;
         dialog.Content = panel;
         await ShowDialogAsync(dialog);
+    }
+
+    // ── Item info (SC-03 / SC-06) ──────────────────────────────────────────
+
+    private static async Task ShowItemInfoAsync(LibraryViewModelBase vm, XamlRoot xamlRoot)
+    {
+        var item = vm.SingleSelectedItem;
+        if (item is null)
+        {
+            return;
+        }
+
+        var info = await vm.ItemInfoAsync(item.Id);
+        var dialog = NewDialog(xamlRoot, item.Title);
+        dialog.CloseButtonText = DialogContent.ItemInfoDoneButton;
+        dialog.DefaultButton = ContentDialogButton.Close;
+
+        var panel = new StackPanel { Spacing = 12 };
+        if (info is null)
+        {
+            panel.Children.Add(Body(DialogContent.ItemInfoUnavailable));
+        }
+        else
+        {
+            AddInfoRow(panel, "Author", info.Author);
+            AddInfoRow(panel, "Type", info.SourceType);
+            AddInfoRow(panel, "Language", info.Language);
+            AddInfoRow(panel, "Imported", ItemInfoPresentation.DisplayDate(info.ImportDate));
+            AddInfoRow(panel, "Published", ItemInfoPresentation.DisplayDate(info.PublishedDate));
+            AddInfoRow(panel, "Retrieved", ItemInfoPresentation.DisplayDate(info.RetrievedDate));
+
+            // Only http(s) becomes a link, and only the user's own click follows it.
+            if (!string.IsNullOrWhiteSpace(info.CanonicalUrl))
+            {
+                var link = ItemInfoPresentation.SafeLink(info.CanonicalUrl);
+                FrameworkElement value = link is null
+                    ? new TextBlock { Text = info.CanonicalUrl.Trim(), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true }
+                    : new HyperlinkButton
+                    {
+                        Content = new TextBlock { Text = link.AbsoluteUri, TextWrapping = TextWrapping.Wrap },
+                        NavigateUri = link,
+                        Padding = new Thickness(0),
+                    };
+                AutomationProperties.SetName(value, "Canonical URL: " + info.CanonicalUrl.Trim());
+                AddInfoRow(panel, "Canonical URL", value);
+            }
+
+            if (info.TrackedChanges)
+            {
+                panel.Children.Add(Body(DialogContent.TrackedChangesNotice));
+            }
+        }
+
+        dialog.Content = DialogKeyboardScroll.Body(panel, 420, dialog.Title as string ?? "Dialog");
+        await ShowDialogAsync(dialog);
+    }
+
+    private static void AddInfoRow(StackPanel panel, string label, string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+        var value = new TextBlock { Text = text.Trim(), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
+        AutomationProperties.SetName(value, label + ": " + text.Trim());
+        AddInfoRow(panel, label, value);
+    }
+
+    private static void AddInfoRow(StackPanel panel, string label, FrameworkElement value)
+    {
+        var caption = new TextBlock
+        {
+            Text = label,
+            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        };
+        AutomationProperties.SetAccessibilityView(caption, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        var row = new StackPanel { Spacing = 2 };
+        row.Children.Add(caption);
+        row.Children.Add(value);
+        panel.Children.Add(row);
     }
 
     // ── DRM / Error ────────────────────────────────────────────────────────
@@ -503,11 +632,7 @@ public sealed class LibraryDialogHost
         addRow.Children.Add(box);
         addRow.Children.Add(add);
 
-        dialog.Content = new ScrollViewer
-        {
-            MaxHeight = 380,
-            Content = Stack(empty, tagPanel, addRow),
-        };
+        dialog.Content = DialogKeyboardScroll.Body(Stack(empty, tagPanel, addRow), 380, dialog.Title as string ?? "Dialog");
         dialog.Opened += async (_, _) =>
         {
             await ReloadAsync();

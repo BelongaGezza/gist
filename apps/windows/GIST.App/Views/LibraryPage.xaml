@@ -17,6 +17,9 @@
         <!-- Header: title left, search right (spec 4.1). -->
         <StackPanel Grid.Row="0" Spacing="8">
         <!-- Fixed-text warning when a removal left stored files behind (never paths/titles). -->
+        <!-- SC-03: non-blocking, path-free notice about the last import. -->
+        <InfoBar x:Name="ImportNoticeBar" Severity="Informational" IsOpen="False" IsClosable="True"
+                 Closed="OnImportNoticeClosed" AutomationProperties.AutomationId="LibraryPage_ImportNotice" />
         <InfoBar x:Name="RemoveWarningBar" Severity="Warning" IsOpen="False" IsClosable="True"
                  Closed="OnRemoveWarningClosed" Loaded="OnRemoveWarningLoaded"
                  AutomationProperties.AutomationId="LibraryPage_RemoveWarning" />
@@ -59,6 +62,11 @@
                         <RadioMenuFlyoutItem x:Name="SortTitleAz" Text="Title A–Z" GroupName="Sort" Tag="TitleAZ" Click="OnSortClick" />
                         <RadioMenuFlyoutItem x:Name="SortTitleZa" Text="Title Z–A" GroupName="Sort" Tag="TitleZA" Click="OnSortClick" />
                         <RadioMenuFlyoutItem x:Name="SortAuthorAz" Text="Author A–Z" GroupName="Sort" Tag="AuthorAZ" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortType" Text="Type" GroupName="Sort" Tag="SourceType" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortLastReadNewest" Text="Last Read (Most Recent)" GroupName="Sort" Tag="LastReadNewest" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortLastReadOldest" Text="Last Read (Oldest)" GroupName="Sort" Tag="LastReadOldest" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortProgressHigh" Text="Progress (Most Read)" GroupName="Sort" Tag="ProgressHighest" Click="OnSortClick" />
+                        <RadioMenuFlyoutItem x:Name="SortProgressLow" Text="Progress (Least Read)" GroupName="Sort" Tag="ProgressLowest" Click="OnSortClick" />
                     </MenuFlyout>
                 </AppBarButton.Flyout>
             </AppBarButton>
@@ -130,6 +138,15 @@
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind SizeText}" Visibility="{x:Bind SizeVisibility}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind ReadState}" Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <ProgressBar Value="{x:Bind ProgressPercent}" Minimum="0" Maximum="100" Height="3" Margin="0,4,0,0"
+                                         Visibility="{x:Bind ProgressVisibility}" AutomationProperties.AccessibilityView="Raw" />
                         </StackPanel>
                         <FontIcon Grid.Column="1" Glyph="&#xE72E;" FontSize="14" Visibility="{x:Bind LockVisibility}"
                                   VerticalAlignment="Center" AutomationProperties.Name="Encrypted at rest"
@@ -143,6 +160,7 @@
                     <MenuFlyoutItem Text="Open in Reader" Click="OnOpen" />
                     <MenuFlyoutItem Text="Open in Flow View" Click="OnOpenFlow" />
                     <MenuFlyoutItem Text="Manage Tags…" Click="OnTags" />
+                    <MenuFlyoutItem Text="Get Info…" Click="OnInfo" />
                     <MenuFlyoutItem x:Name="RowEncrypt" Text="Encrypt…" Click="OnEncrypt" />
                     <MenuFlyoutSeparator />
                     <MenuFlyoutItem Text="Remove…" Click="OnRemove" />

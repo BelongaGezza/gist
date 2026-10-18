@@ -9,10 +9,14 @@ use std::{
 };
 
 use gist_core::Core;
+use gist_linux_keyring_spike::{KeyError, SecretServiceStore};
 use gist_model::{Block, Document, TokenKind};
 use gist_rsvp::{Config, RsvpSession};
 use gist_store::LibraryItem;
 use gtk::{glib, prelude::*};
+
+mod chooser;
+mod keys;
 
 const PAGE_SIZE: usize = 200;
 
@@ -32,6 +36,16 @@ enum UiMessage {
         title: String,
         session: RsvpSession,
     },
+    /// An item was removed from the library (the reader may have it open).
+    ItemRemoved(String),
+    /// Saving reading progress failed. Never modal: a periodic save can fail
+    /// every second, and a dialog per failure is an unescapable loop (#123).
+    ProgressSaveFailed {
+        item_id: String,
+        error: String,
+    },
+    /// `None` clears the key banner; `Some` explains a key-store problem.
+    KeyStatus(Option<KeyError>),
     Status(String),
     Failed(String),
 }
@@ -41,6 +55,34 @@ struct RsvpPlayback {
     session: RsvpSession,
     playing_since: Option<Instant>,
     last_saved: Instant,
+    /// Set once a save for this session has failed; stops the periodic saves.
+    save_failed: bool,
+}
+
+impl RsvpPlayback {
+    /// Is the once-a-second progress save due? Never after a failure.
+    fn periodic_save_due(&self) -> bool {
+        !self.save_failed && self.last_saved.elapsed() >= Duration::from_secs(1)
+    }
+}
+
+/// Drop the session if it is reading the removed item. True if it was.
+fn clear_playback_for_removed(playback: &mut Option<RsvpPlayback>, removed_id: &str) -> bool {
+    if playback.as_ref().is_some_and(|p| p.item_id == removed_id) {
+        *playback = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// Record a failed save. True if it should be reported: the first failure for
+/// the open session, or one with no matching session (a one-off action).
+fn note_save_failure(playback: &mut Option<RsvpPlayback>, item_id: &str) -> bool {
+    match playback.as_mut().filter(|p| p.item_id == item_id) {
+        Some(p) => !std::mem::replace(&mut p.save_failed, true),
+        None => true,
+    }
 }
 
 fn main() {
@@ -62,10 +104,14 @@ fn build_window(app: &gtk::Application) {
     let remove_button = gtk::Button::with_label("Remove");
     let flow_button = gtk::Button::with_label("Flow");
     let rsvp_button = gtk::Button::with_label("RSVP");
+    let encrypt_button = gtk::Button::with_label("Encrypt");
+    encrypt_button.set_tooltip_text(Some(
+        "Encrypt the selected document with a key held in your desktop key service",
+    ));
     let search_entry = gtk::SearchEntry::new();
     search_entry.set_placeholder_text(Some("Search your library"));
     search_entry.set_hexpand(true);
-    for button in [&remove_button, &flow_button, &rsvp_button] {
+    for button in [&remove_button, &flow_button, &rsvp_button, &encrypt_button] {
         button.set_sensitive(false);
     }
 
@@ -75,6 +121,7 @@ fn build_window(app: &gtk::Application) {
     toolbar.append(&remove_button);
     toolbar.append(&flow_button);
     toolbar.append(&rsvp_button);
+    toolbar.append(&encrypt_button);
 
     let library_list = gtk::ListBox::new();
     library_list.set_selection_mode(gtk::SelectionMode::Single);
@@ -188,12 +235,19 @@ fn build_window(app: &gtk::Application) {
     status.set_xalign(0.0);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
+    let key_banner = gtk::Label::new(None);
+    key_banner.set_wrap(true);
+    key_banner.set_xalign(0.0);
+    key_banner.add_css_class("warning");
+    key_banner.set_visible(false);
+
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
     root.set_margin_top(12);
     root.set_margin_bottom(12);
     root.set_margin_start(12);
     root.set_margin_end(12);
     root.append(&toolbar);
+    root.append(&key_banner);
     root.append(&body);
     root.append(&status);
 
@@ -218,6 +272,14 @@ fn build_window(app: &gtk::Application) {
         &remove_button,
         &flow_button,
         &rsvp_button,
+        &encrypt_button,
+    );
+    connect_encrypt(
+        &encrypt_button,
+        &window,
+        Rc::clone(&core_state),
+        Rc::clone(&selected_item),
+        sender.clone(),
     );
     connect_open_reader(
         &flow_button,
@@ -270,6 +332,8 @@ fn build_window(app: &gtk::Application) {
         &remove_button,
         &flow_button,
         &rsvp_button,
+        &encrypt_button,
+        &key_banner,
         &play_button,
         &position_scale,
         &position_label,
@@ -311,41 +375,26 @@ fn connect_import(
     sender: mpsc::Sender<UiMessage>,
 ) {
     let weak_window = window.downgrade();
+    let slot = chooser::ChooserSlot::default();
     button.connect_clicked(move |_| {
         let Some(window) = weak_window.upgrade() else {
             return;
         };
         let Some(core) = core_state.borrow().as_ref().map(Arc::clone) else {
+            let _ = sender.send(UiMessage::Status(
+                "The library is still opening. Try again in a moment.".into(),
+            ));
             return;
         };
-        let chooser = gtk::FileChooserNative::new(
-            Some("Import a document"),
-            Some(&window),
-            gtk::FileChooserAction::Open,
-            Some("Import"),
-            Some("Cancel"),
-        );
-        let filter = gtk::FileFilter::new();
-        filter.set_name(Some("Supported documents"));
-        for extension in ["txt", "text", "md", "epub", "docx", "pdf"] {
-            filter.add_pattern(&format!("*.{extension}"));
-        }
-        chooser.add_filter(&filter);
         let sender = sender.clone();
-        chooser.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                match dialog.file().and_then(|file| file.path()) {
-                    Some(path) => import_file(Arc::clone(&core), path, sender.clone()),
-                    None => {
-                        let _ = sender.send(UiMessage::Failed(
-                            "The selected document has no local file path.".into(),
-                        ));
-                    }
-                }
+        slot.present(&window, move |path| match path {
+            Some(path) => import_file(Arc::clone(&core), path, sender.clone()),
+            None => {
+                let _ = sender.send(UiMessage::Failed(
+                    "The selected document has no local file path.".into(),
+                ));
             }
-            dialog.destroy();
         });
-        chooser.show();
     });
 }
 
@@ -356,7 +405,9 @@ fn connect_library_selection(
     remove_button: &gtk::Button,
     flow_button: &gtk::Button,
     rsvp_button: &gtk::Button,
+    encrypt_button: &gtk::Button,
 ) {
+    let encrypt_button = encrypt_button.downgrade();
     let remove_button = remove_button.downgrade();
     let flow_button = flow_button.downgrade();
     let rsvp_button = rsvp_button.downgrade();
@@ -367,7 +418,13 @@ fn connect_library_selection(
                 .and_then(|index| visible_items.borrow().get(index).cloned())
         });
         let enabled = selected.is_some();
+        let can_encrypt = selected
+            .as_ref()
+            .is_some_and(|item| !item.content_encrypted);
         *selected_item.borrow_mut() = selected;
+        if let Some(button) = encrypt_button.upgrade() {
+            button.set_sensitive(can_encrypt);
+        }
         if let Some(button) = remove_button.upgrade() {
             button.set_sensitive(enabled);
         }
@@ -426,6 +483,47 @@ fn connect_open_reader(
             ReaderMode::Flow => load_flow(core, item.id, item.title.unwrap_or_default(), sender),
             ReaderMode::Rsvp => load_rsvp(core, item.id, item.title.unwrap_or_default(), sender),
         }
+    });
+}
+
+fn connect_encrypt(
+    button: &gtk::Button,
+    window: &gtk::ApplicationWindow,
+    core_state: Rc<RefCell<Option<Arc<Core>>>>,
+    selected_item: Rc<RefCell<Option<LibraryItem>>>,
+    sender: mpsc::Sender<UiMessage>,
+) {
+    let weak_window = window.downgrade();
+    button.connect_clicked(move |_| {
+        let (Some(window), Some(core), Some(item)) = (
+            weak_window.upgrade(),
+            core_state.borrow().as_ref().map(Arc::clone),
+            selected_item.borrow().clone(),
+        ) else {
+            return;
+        };
+        let title = item.title.as_deref().unwrap_or("Untitled");
+        let dialog = gtk::MessageDialog::builder()
+            .transient_for(&window)
+            .modal(true)
+            .message_type(gtk::MessageType::Question)
+            .buttons(gtk::ButtonsType::Cancel)
+            .text(format!("Encrypt “{title}”?"))
+            .secondary_text(
+                "GIST's internal copy of this document's text is encrypted with a key kept in your desktop key service (GNOME Keyring, KWallet or KeePassXC). \
+                 The copy GIST made of the original file is not encrypted yet, and the file you originally selected is untouched. \
+                 If the key is lost, the document cannot be recovered.",
+            )
+            .build();
+        dialog.add_button("Encrypt", gtk::ResponseType::Accept);
+        let sender = sender.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                encrypt_item(Arc::clone(&core), item.id.clone(), sender.clone());
+            }
+            dialog.close();
+        });
+        dialog.present();
     });
 }
 
@@ -677,6 +775,8 @@ fn connect_messages(
     remove_button: &gtk::Button,
     flow_button: &gtk::Button,
     rsvp_button: &gtk::Button,
+    encrypt_button: &gtk::Button,
+    key_banner: &gtk::Label,
     play_button: &gtk::Button,
     position_scale: &gtk::Scale,
     position_label: &gtk::Label,
@@ -698,6 +798,8 @@ fn connect_messages(
     let remove_button = remove_button.downgrade();
     let flow_button = flow_button.downgrade();
     let rsvp_button = rsvp_button.downgrade();
+    let encrypt_button = encrypt_button.downgrade();
+    let key_banner = key_banner.downgrade();
     let play_button = play_button.downgrade();
     let position_scale = position_scale.downgrade();
     let position_label = position_label.downgrade();
@@ -724,6 +826,8 @@ fn connect_messages(
                 Some(remove_button),
                 Some(flow_button),
                 Some(rsvp_button),
+                Some(encrypt_button),
+                Some(key_banner),
                 Some(play_button),
                 Some(position_scale),
                 Some(position_label),
@@ -742,6 +846,8 @@ fn connect_messages(
                 remove_button.upgrade(),
                 flow_button.upgrade(),
                 rsvp_button.upgrade(),
+                encrypt_button.upgrade(),
+                key_banner.upgrade(),
                 play_button.upgrade(),
                 position_scale.upgrade(),
                 position_label.upgrade(),
@@ -776,6 +882,7 @@ fn connect_messages(
                     remove_button.set_sensitive(false);
                     flow_button.set_sensitive(false);
                     rsvp_button.set_sensitive(false);
+                    encrypt_button.set_sensitive(false);
                     if count == 0 {
                         status.set_text(if query.is_empty() {
                             "Your library is empty. Import a document to get started."
@@ -831,6 +938,7 @@ fn connect_messages(
                         session,
                         playing_since: None,
                         last_saved: Instant::now(),
+                        save_failed: false,
                     });
                     wpm_label.set_text(&format!("{wpm} WPM"));
                     wpm_scale.set_value(f64::from(wpm));
@@ -840,6 +948,33 @@ fn connect_messages(
                     wpm_scale.set_sensitive(true);
                     status.set_text("RSVP ready");
                 }
+                UiMessage::ItemRemoved(id) => {
+                    if clear_playback_for_removed(&mut playback.borrow_mut(), &id) {
+                        reader_title.set_text("Select a book to start reading");
+                        rsvp_word.set_text("Choose RSVP to begin");
+                        play_button.set_label("Play");
+                        for button in [&play_button, &back_button] {
+                            button.set_sensitive(false);
+                        }
+                        position_scale.set_sensitive(false);
+                        position_label.set_text("0 / 0");
+                        wpm_scale.set_sensitive(false);
+                    }
+                }
+                UiMessage::ProgressSaveFailed { item_id, error } => {
+                    if note_save_failure(&mut playback.borrow_mut(), &item_id) {
+                        status.set_text(&format!(
+                            "Could not save reading progress ({error}). Progress will not be saved for this session."
+                        ));
+                    }
+                }
+                UiMessage::KeyStatus(error) => match error {
+                    Some(error) => {
+                        key_banner.set_text(&keys::key_message(&error));
+                        key_banner.set_visible(true);
+                    }
+                    None => key_banner.set_visible(false),
+                },
                 UiMessage::Status(message) => status.set_text(&message),
                 UiMessage::Failed(error) => {
                     status.set_text(&error);
@@ -879,8 +1014,9 @@ fn connect_messages(
 
 fn initialize_library(sender: mpsc::Sender<UiMessage>) {
     thread::spawn(move || match initialize_core() {
-        Ok(core) => {
+        Ok((core, key_error)) => {
             let _ = sender.send(UiMessage::Ready(core));
+            let _ = sender.send(UiMessage::KeyStatus(key_error));
         }
         Err(error) => {
             let _ = sender.send(UiMessage::Failed(error));
@@ -888,15 +1024,24 @@ fn initialize_library(sender: mpsc::Sender<UiMessage>) {
     });
 }
 
-fn initialize_core() -> Result<Arc<Core>, String> {
+/// Opens the library. The key store is only consulted when the library
+/// already holds encrypted items; a key problem leaves a working keyless core
+/// (unencrypted items stay usable) and is returned for the banner.
+fn initialize_core() -> Result<(Arc<Core>, Option<KeyError>), String> {
     let data_dir = data_dir()
         .ok_or_else(|| "Could not determine a home directory for the Linux GTK app.".to_string())?;
-    let storage_dir = data_dir.join("storage");
+    let layout = keys::Layout::new(data_dir);
+    let storage_dir = layout.storage_dir();
     fs::create_dir_all(&storage_dir)
         .map_err(|error| format!("Could not create {}: {error}", storage_dir.display()))?;
-    Core::init(&data_dir.join("gist.sqlite3"), &storage_dir)
-        .map(Arc::new)
-        .map_err(|error| format!("Could not initialize the GIST core: {error}"))
+    let core = Core::init(&layout.db_path(), &storage_dir)
+        .map_err(|error| format!("Could not initialize the GIST core: {error}"))?;
+    let has_encrypted = keys::any_encrypted(&core)?;
+    match keys::open_keyed(&layout, &SecretServiceStore::new(), has_encrypted, false) {
+        Ok(Some(keyed)) => Ok((keyed.core, None)),
+        Ok(None) => Ok((Arc::new(core), None)),
+        Err(error) => Ok((Arc::new(core), Some(error))),
+    }
 }
 
 fn list_items(core: Arc<Core>, query: String, sender: mpsc::Sender<UiMessage>) {
@@ -936,19 +1081,56 @@ fn import_file(core: Arc<Core>, path: PathBuf, sender: mpsc::Sender<UiMessage>) 
     });
 }
 
-fn remove_item(core: Arc<Core>, item_id: String, sender: mpsc::Sender<UiMessage>) {
-    thread::spawn(move || match core.remove_items_detailed(&[item_id], true) {
-        Ok(outcome) => {
-            let _ = sender.send(UiMessage::Status(format!(
-                "Removed from library; internal files deleted: {}",
-                outcome.files_deleted
-            )));
-            let _ = sender.send(UiMessage::RefreshLibrary);
-        }
-        Err(error) => {
-            let _ = sender.send(UiMessage::Failed(format!("Could not remove item: {error}")));
+fn encrypt_item(core: Arc<Core>, item_id: String, sender: mpsc::Sender<UiMessage>) {
+    thread::spawn(move || {
+        let Some(data_dir) = data_dir() else {
+            let _ = sender.send(UiMessage::Failed(
+                "Could not determine a home directory for the Linux GTK app.".into(),
+            ));
+            return;
+        };
+        let layout = keys::Layout::new(data_dir);
+        match keys::encrypt_item(&layout, &SecretServiceStore::new(), &core, &item_id) {
+            Ok(done) => {
+                let message = if done.already {
+                    "Already encrypted"
+                } else {
+                    "Encrypted"
+                };
+                // Switch to the key-backed core so the item stays readable.
+                let _ = sender.send(UiMessage::Ready(done.keyed.core));
+                let _ = sender.send(UiMessage::KeyStatus(None));
+                let _ = sender.send(UiMessage::Status(message.into()));
+            }
+            Err(keys::EncryptError::Key(error)) => {
+                let _ = sender.send(UiMessage::KeyStatus(Some(error)));
+                let _ = sender.send(UiMessage::Status(
+                    "Encryption is unavailable; nothing was changed.".into(),
+                ));
+            }
+            Err(keys::EncryptError::Other(error)) => {
+                let _ = sender.send(UiMessage::Failed(error));
+            }
         }
     });
+}
+
+fn remove_item(core: Arc<Core>, item_id: String, sender: mpsc::Sender<UiMessage>) {
+    thread::spawn(
+        move || match core.remove_items_detailed(std::slice::from_ref(&item_id), true) {
+            Ok(outcome) => {
+                let _ = sender.send(UiMessage::ItemRemoved(item_id));
+                let _ = sender.send(UiMessage::Status(format!(
+                    "Removed from library; internal files deleted: {}",
+                    outcome.files_deleted
+                )));
+                let _ = sender.send(UiMessage::RefreshLibrary);
+            }
+            Err(error) => {
+                let _ = sender.send(UiMessage::Failed(format!("Could not remove item: {error}")));
+            }
+        },
+    );
 }
 
 fn load_flow(core: Arc<Core>, item_id: String, title: String, sender: mpsc::Sender<UiMessage>) {
@@ -1140,19 +1322,21 @@ fn tick_rsvp(
             position_syncing,
             position_scrubbing,
         );
-        save_progress_async(
-            core_state,
-            playback.item_id.clone(),
-            playback.session.cursor,
-            sender.clone(),
-        );
+        if !playback.save_failed {
+            save_progress_async(
+                core_state,
+                playback.item_id.clone(),
+                playback.session.cursor,
+                sender.clone(),
+            );
+        }
         status.set_text("RSVP complete.");
         return;
     }
     set_current_word(word_label, &playback.session, index);
     let words = playback.session.words_shown_through(index);
     status.set_text(&format!("Word {}", words.saturating_add(1)));
-    if playback.last_saved.elapsed() >= Duration::from_secs(1) {
+    if playback.periodic_save_due() {
         playback.last_saved = Instant::now();
         save_progress_async(core_state, playback.item_id.clone(), index, sender.clone());
     }
@@ -1247,9 +1431,10 @@ fn save_progress_async(
     };
     thread::spawn(move || {
         if let Err(error) = core.save_progress(&item_id, token_index) {
-            let _ = sender.send(UiMessage::Failed(format!(
-                "Could not save reading progress: {error}"
-            )));
+            let _ = sender.send(UiMessage::ProgressSaveFailed {
+                item_id,
+                error: error.to_string(),
+            });
         }
     });
 }
@@ -1373,6 +1558,7 @@ mod tests {
             session,
             playing_since: None,
             last_saved: now,
+            save_failed: false,
         };
 
         let position = seek_playback(&mut playback, usize::MAX, now + Duration::from_secs(1));
@@ -1396,6 +1582,7 @@ mod tests {
             session,
             playing_since: Some(started),
             last_saved: started,
+            save_failed: false,
         };
         let seeked_at = started + Duration::from_secs(1);
 
@@ -1409,10 +1596,258 @@ mod tests {
         assert_eq!(playback.session.token_at_elapsed(0), 1);
     }
 
+    fn playback_for(item_id: &str, last_saved: Instant) -> RsvpPlayback {
+        RsvpPlayback {
+            item_id: item_id.into(),
+            session: RsvpSession::new(vec![word("one"), word("two")], Config::default()),
+            playing_since: Some(Instant::now()),
+            last_saved,
+            save_failed: false,
+        }
+    }
+
+    #[test]
+    fn removing_the_open_item_clears_the_session_but_other_items_do_not() {
+        let mut open = Some(playback_for("a", Instant::now()));
+        assert!(!clear_playback_for_removed(&mut open, "b"));
+        assert!(
+            open.is_some(),
+            "removing a different item leaves the reader alone"
+        );
+        assert!(clear_playback_for_removed(&mut open, "a"));
+        assert!(open.is_none());
+        assert!(
+            !clear_playback_for_removed(&mut open, "a"),
+            "nothing open: nothing to clear"
+        );
+    }
+
+    #[test]
+    fn a_failed_save_is_reported_once_and_stops_periodic_saves() {
+        let overdue = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("monotonic clock has run for 5s");
+        let mut open = Some(playback_for("a", overdue));
+        assert!(open.as_ref().unwrap().periodic_save_due());
+
+        assert!(
+            note_save_failure(&mut open, "a"),
+            "first failure is reported"
+        );
+        assert!(
+            !open.as_ref().unwrap().periodic_save_due(),
+            "no more periodic saves"
+        );
+        assert!(
+            !note_save_failure(&mut open, "a"),
+            "later failures stay quiet"
+        );
+    }
+
+    #[test]
+    fn a_failure_for_another_item_does_not_disable_the_open_session() {
+        let overdue = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("monotonic clock has run for 5s");
+        let mut open = Some(playback_for("a", overdue));
+        assert!(note_save_failure(&mut open, "other"));
+        assert!(open.as_ref().unwrap().periodic_save_due());
+        let mut none = None;
+        assert!(
+            note_save_failure(&mut none, "a"),
+            "a one-off failure with no session is reported"
+        );
+    }
+
+    #[test]
+    fn saving_for_a_removed_item_fails_in_the_core_which_is_what_triggered_the_loop() {
+        let library = TempLibrary::new("removed-save");
+        let source = library.root.join("gone.txt");
+        fs::write(&source, "one two three four").expect("write");
+        let id = library
+            .core
+            .import_file(&source, &gist_core::NullObserver)
+            .expect("import");
+        library
+            .core
+            .save_progress(&id, 1)
+            .expect("saves while the item exists");
+        library
+            .core
+            .remove_items_detailed(std::slice::from_ref(&id), true)
+            .expect("remove");
+        assert!(library.core.save_progress(&id, 2).is_err());
+    }
+
     #[test]
     fn position_label_shows_one_based_token_progress() {
         assert_eq!(position_text(0, 0), "0 / 0");
         assert_eq!(position_text(0, 12), "1/12");
         assert_eq!(position_text(usize::MAX, 12), "12/12");
+    }
+
+    struct TempLibrary {
+        root: PathBuf,
+        core: Core,
+    }
+
+    impl TempLibrary {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "gist-linux-gtk-spike-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            let storage = root.join("storage");
+            fs::create_dir_all(&storage).expect("create temp storage");
+            let core = Core::init(&root.join("gist.sqlite3"), &storage).expect("init core");
+            Self { root, core }
+        }
+    }
+
+    impl Drop for TempLibrary {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn fixture(relative: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures")
+            .join(relative)
+    }
+
+    /// Imports a fixture through the same core calls the GTK handlers use and
+    /// returns the item id, the Flow text and the RSVP token count.
+    fn import_and_open(library: &TempLibrary, relative: &str) -> (String, String, usize) {
+        let path = fixture(relative);
+        let id = library
+            .core
+            .import_file(&path, &gist_core::NullObserver)
+            .unwrap_or_else(|error| panic!("import {relative}: {error}"));
+        let document: Document =
+            serde_json::from_str(&library.core.get_document(&id).expect("get document"))
+                .expect("document json");
+        let session = library
+            .core
+            .new_rsvp_session(&id, Config::default())
+            .expect("rsvp session");
+        (id, document_text(&document), session.tokens.len())
+    }
+
+    #[test]
+    fn imports_open_in_flow_and_rsvp_for_txt_epub_and_docx() {
+        let library = TempLibrary::new("formats");
+        for relative in [
+            "txt/basic_ascii.txt",
+            "txt/unicode_utf8.txt",
+            "epub/minimal_valid.epub",
+            "epub/multi_chapter.epub",
+            "epub/utf8_content.epub",
+            "docx/minimal_valid.docx",
+            "docx/headings_and_paragraphs.docx",
+            "docx/with_table.docx",
+        ] {
+            let (_, text, tokens) = import_and_open(&library, relative);
+            assert!(!text.trim().is_empty(), "{relative}: empty Flow text");
+            assert!(tokens > 0, "{relative}: no RSVP tokens");
+        }
+        let items = library.core.list_items(0, PAGE_SIZE).expect("list");
+        assert_eq!(items.len(), 8);
+    }
+
+    #[test]
+    fn pdf_import_works_with_pdfium_or_reports_a_typed_unavailable_error() {
+        let library = TempLibrary::new("pdf");
+        let path = fixture("pdf/plain_text.pdf");
+        match library.core.import_file(&path, &gist_core::NullObserver) {
+            Ok(id) => {
+                let document: Document =
+                    serde_json::from_str(&library.core.get_document(&id).expect("get document"))
+                        .expect("document json");
+                assert!(!document_text(&document).trim().is_empty());
+            }
+            Err(gist_core::ImportError::PdfUnavailable(why)) => {
+                assert_ne!(
+                    std::env::var("GIST_REQUIRE_PDFIUM").as_deref(),
+                    Ok("1"),
+                    "pdfium required but unavailable: {why}"
+                );
+                eprintln!("skipping PDF content check: pdfium unavailable ({why})");
+            }
+            Err(error) => panic!("unexpected PDF import error: {error}"),
+        }
+    }
+
+    #[test]
+    fn image_only_pdf_is_rejected_with_no_text_layer() {
+        let library = TempLibrary::new("ocr-pdf");
+        match library
+            .core
+            .import_file(&fixture("pdf/image_only.pdf"), &gist_core::NullObserver)
+        {
+            Err(gist_core::ImportError::PdfNoTextLayer) => {}
+            Err(gist_core::ImportError::PdfUnavailable(_))
+                if std::env::var("GIST_REQUIRE_PDFIUM").as_deref() != Ok("1") => {}
+            other => panic!("expected PdfNoTextLayer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_finds_an_imported_document_and_removal_deletes_only_the_internal_copy() {
+        let library = TempLibrary::new("search-remove");
+        let source = library.root.join("source.txt");
+        fs::write(&source, "Quartz lanterns glow over the harbour tonight.").expect("write");
+        let id = library
+            .core
+            .import_file(&source, &gist_core::NullObserver)
+            .expect("import");
+
+        let hits = library
+            .core
+            .search_items("lanterns", PAGE_SIZE)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
+
+        let outcome = library
+            .core
+            .remove_items_detailed(&[id], true)
+            .expect("remove");
+        assert!(outcome.files_deleted > 0);
+        assert!(
+            source.exists(),
+            "the user's original file must survive removal"
+        );
+        assert!(library
+            .core
+            .list_items(0, PAGE_SIZE)
+            .expect("list")
+            .is_empty());
+        assert!(library
+            .core
+            .search_items("lanterns", PAGE_SIZE)
+            .expect("search")
+            .is_empty());
+    }
+
+    #[test]
+    fn scrubber_progress_survives_reopening_an_item() {
+        let library = TempLibrary::new("progress");
+        let source = library.root.join("progress.txt");
+        fs::write(&source, "one two three four five six seven eight").expect("write");
+        let id = library
+            .core
+            .import_file(&source, &gist_core::NullObserver)
+            .expect("import");
+        library.core.save_progress(&id, 5).expect("save progress");
+        let session = library
+            .core
+            .new_rsvp_session(&id, Config::default())
+            .expect("session");
+        assert_eq!(session.cursor, 5);
     }
 }

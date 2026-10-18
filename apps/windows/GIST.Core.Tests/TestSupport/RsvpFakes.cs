@@ -159,5 +159,16 @@ public sealed class ScriptedRsvpEngine : IRsvpEngine
         _wpm = Math.Clamp(wpm, 100u, 1000u);
     }
 
+    public bool PauseOnPunctuation { get; private set; } = true;
+
+    public List<(bool Enabled, ulong ElapsedMs)> PunctuationCalls { get; } = new();
+
+    public void SetPauseOnPunctuation(bool enabled, ulong elapsedMs)
+    {
+        PunctuationCalls.Add((enabled, elapsedMs));
+        _cursor = FrameAtElapsed(elapsedMs)!.Index;
+        PauseOnPunctuation = enabled;
+    }
+
     public void Dispose() => Disposed = true;
 }
