@@ -112,6 +112,23 @@ final class ReadingStateTests: XCTestCase {
         XCTAssertLessThanOrEqual(item.progressFraction, 1)
     }
 
+    /// Issue #123: saving progress for an item removed while its reader was
+    /// open must not raise an error alert (and must not loop).
+    func testSaveProgressForARemovedItemIsSilent() async throws {
+        let id = try await importFixture()
+        _ = await client.removeItems(ids: [id], deleteSourceFiles: false)
+        await client.saveProgress(itemId: id, tokenIndex: 5)
+        XCTAssertNil(client.error)
+        await client.saveProgress(itemId: "never-existed", tokenIndex: 1)
+        XCTAssertNil(client.error)
+    }
+
+    func testSaveProgressForAnExistingItemStillSucceedsWithoutError() async throws {
+        let id = try await importFixture()
+        await client.saveProgress(itemId: id, tokenIndex: 3)
+        XCTAssertNil(client.error)
+    }
+
     func testRefreshLoadedItemsPicksUpReaderChangesWithoutResettingTheList() async throws {
         let id = try await importFixture()
         let before = client.items.count
