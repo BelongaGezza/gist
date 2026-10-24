@@ -27,7 +27,13 @@ allow = [
 # Block crates with published RUSTSEC advisories.
 # Set to "deny" to treat any advisory as a hard failure.
 version = 2
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0374: basic-toml unmaintained, no safe upgrade. Build-time
+    # only: askama_derive <- uniffi_bindgen (binding generation), never in a
+    # shipped artefact's runtime path. Accepted 2026-10-24; revisit when
+    # uniffi/askama drop it.
+    "RUSTSEC-2026-0374",
+]
 
 [bans]
 # Prevent duplicate versions of the same crate (can loosen with `allow`).
