@@ -3,13 +3,15 @@
 //! Policy: ADR-005 (TLS-only, 5-redirect max, 50 MB cap, 30s connect / 60s read,
 //! no cookies, robots.txt pre-check). Also enforces an SSRF resolver policy
 //! (security register F14): every connection — including each redirect hop —
-//! is resolved through [`safe_resolve`], which rejects any address that isn't
+//! is resolved through [`SafeResolver`], which rejects any address that isn't
 //! globally routable, so a DNS-controlled hostname with a valid TLS certificate
 //! can't be used to reach loopback/RFC1918/link-local targets.
 
 use gist_model::{normalize_cell_text, Block, Document, Metadata, ParseLimits, Section, TextRun};
 use scraper::{Html, Selector};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr};
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::NextTimeout;
 use url::Url;
 
 // ── Limits ────────────────────────────────────────────────────────────────────
@@ -64,10 +66,10 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
     // 4xx/5xx or network error → treat as allowed (ADR-005).
     if let Ok(resp) = robots_agent
         .get(&robots_url)
-        .set("User-Agent", USER_AGENT_ROBOTS)
+        .header("User-Agent", USER_AGENT_ROBOTS)
         .call()
     {
-        let body = read_limited(resp.into_reader(), 512 * 1024).unwrap_or_default();
+        let body = read_limited(resp.into_body().into_reader(), 512 * 1024).unwrap_or_default();
         let text = String::from_utf8_lossy(&body);
         if is_path_disallowed(&text, parsed.path()) {
             return Err(ParseError::RobotsDisallowed);
@@ -80,19 +82,19 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
     // 5. GET the URL.
     let response = agent
         .get(raw_url)
-        .set("User-Agent", USER_AGENT_MAIN)
+        .header("User-Agent", USER_AGENT_MAIN)
         .call()
         .map_err(|e| match &e {
-            ureq::Error::Status(code, _) if (300..400).contains(code) => {
-                // Redirect limit exceeded — ureq surfaces it as a 3xx status error.
+            // Redirect limit exceeded (`max_redirects_will_error`).
+            ureq::Error::TooManyRedirects => {
                 ParseError::ResourceLimitExceeded(gist_model::LimitKind::Other)
             }
-            ureq::Error::Status(code, _) => ParseError::InvalidInput(format!("HTTP {code}")),
+            ureq::Error::StatusCode(code) => ParseError::InvalidInput(format!("HTTP {code}")),
             _ => ParseError::InvalidInput(e.to_string()),
         })?;
 
     // Double-check for an unconsumed redirect response (ureq may vary by build).
-    let status = response.status();
+    let status = response.status().as_u16();
     if (300..400).contains(&status) {
         return Err(ParseError::ResourceLimitExceeded(
             gist_model::LimitKind::Other,
@@ -101,7 +103,7 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
 
     // 6. Stream body, capped at min(limits.max_bytes, WEB_MAX_BYTES).
     let cap = limits.max_bytes.min(WEB_MAX_BYTES);
-    let body_bytes = read_limited(response.into_reader(), cap)?;
+    let body_bytes = read_limited(response.into_body().into_reader(), cap)?;
     let html = String::from_utf8_lossy(&body_bytes);
 
     // 7-8. Extract content and build Document.
@@ -117,17 +119,25 @@ pub fn fetch_url(raw_url: &str, limits: &ParseLimits) -> Result<Document, ParseE
 // ── Agent builder ─────────────────────────────────────────────────────────────
 
 fn build_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .redirects(MAX_REDIRECTS)
+    let config = ureq::Agent::config_builder()
+        .max_redirects(MAX_REDIRECTS)
+        .max_redirects_will_error(true)
         // Re-enforced on every redirect hop, not just the initial URL (F14/M-1):
         // ureq checks this against each hop's URL before connecting.
         .https_only(true)
-        // SSRF guard (F14): filters resolved addresses on every connection
-        // attempt, including redirect hops — see `safe_resolve`.
-        .resolver(safe_resolve)
-        .timeout_connect(std::time::Duration::from_secs(30))
-        .timeout_read(std::time::Duration::from_secs(60))
-        .build()
+        // ureq 3 honours HTTP(S)_PROXY from the environment by default; a proxy
+        // would resolve the target itself and bypass `SafeResolver` (F14).
+        .proxy(None)
+        .timeout_connect(Some(std::time::Duration::from_secs(30)))
+        .timeout_recv_body(Some(std::time::Duration::from_secs(60)))
+        .build();
+    // SSRF guard (F14): filters resolved addresses on every connection
+    // attempt, including redirect hops — see `SafeResolver`.
+    ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::default(),
+        SafeResolver::default(),
+    )
 }
 
 // ── SSRF-safe DNS resolution ─────────────────────────────────────────────────
@@ -141,18 +151,29 @@ fn build_agent() -> ureq::Agent {
 /// filtering happens on the already-resolved `SocketAddr`s that `ureq` then
 /// connects to directly, there's no re-resolution window for a DNS-rebinding
 /// attack to exploit between this check and the actual connection.
-fn safe_resolve(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
-    let filtered: Vec<SocketAddr> = netloc
-        .to_socket_addrs()?
-        .filter(|addr| is_globally_routable(addr.ip()))
-        .collect();
+#[derive(Debug, Default)]
+struct SafeResolver(DefaultResolver);
 
-    if filtered.is_empty() {
-        return Err(std::io::Error::other(format!(
-            "'{netloc}' did not resolve to a permitted public address"
-        )));
+impl Resolver for SafeResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let resolved = self.0.resolve(uri, config, timeout)?;
+        let mut permitted = self.empty();
+        for addr in resolved.iter().filter(|a| is_globally_routable(a.ip())) {
+            permitted.push(*addr);
+        }
+        if permitted.is_empty() {
+            return Err(ureq::Error::Io(std::io::Error::other(format!(
+                "'{}' did not resolve to a permitted public address",
+                uri.host().unwrap_or("")
+            ))));
+        }
+        Ok(permitted)
     }
-    Ok(filtered)
 }
 
 /// True if `ip` is not loopback, private, link-local, multicast, broadcast,
@@ -1002,6 +1023,19 @@ mod tests {
         assert!(is_globally_routable(
             "2001:4860:4860::8888".parse().unwrap()
         ));
+    }
+
+    /// Runs `SafeResolver` on an IP-literal `host:port`, with no timeout.
+    fn safe_resolve(netloc: &str) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        use ureq::unversioned::transport::time::Duration;
+        let uri: ureq::http::Uri = format!("https://{netloc}/").parse().unwrap();
+        let timeout = NextTimeout {
+            after: Duration::NotHappening,
+            reason: ureq::Timeout::Global,
+            per_read: None,
+            per_write: None,
+        };
+        SafeResolver::default().resolve(&uri, &ureq::config::Config::default(), timeout)
     }
 
     #[test]
