@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 gist-model = { path = "../gist-model" }
-rusqlite = { version = "0.40", features = ["bundled", "backup", "serde_json"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup", "serde_json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -25,7 +25,7 @@ criterion = "0.8"
 # dev-dependencies, so these two must be repeated here even though they are
 # already regular dependencies above.
 gist-model = { path = "../gist-model" }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 [[bench]]
 name = "store_bench"
