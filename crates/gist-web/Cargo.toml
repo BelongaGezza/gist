@@ -9,7 +9,7 @@ license = "MIT"
 # ureq 3 (rustls + ring + webpki-roots 1.x). ureq 2 pinned webpki-roots 0.26,
 # which carries RUSTSEC-2026-0381 (distrusted emSign roots) -- see N10.
 ureq      = { version = "3", default-features = false, features = ["rustls"] }
-scraper   = "0.27"
+scraper   = "0.29"
 url       = "2"
 gist-model = { path = "../gist-model" }
 thiserror = { workspace = true }
