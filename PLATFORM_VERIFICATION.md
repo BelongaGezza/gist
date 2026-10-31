@@ -1,3 +1,4 @@
+| macOS RSVP long-word scale-to-fit (issue #131, 2026-10-31) | **verified (logic only)**: `OrpWordView` now scales to fit via the pure `OrpWordFit` helper (never below 8 pt; far ends truncated beyond that); 7 new `RsvpPacingTests`, `xcodebuild test -only-testing:GISTTests/RsvpPacingTests` 36 passed / 0 failed. Pre-fix rendering reproduced by an offscreen `NSHostingView` harness (`Pneumon…icroscop…`; pivot glyph lost at the minimum window width). **Not verified:** the live app on screen, a rendered-pixel test (none added), macOS 14/15, VoiceOver | **not changed, unverified**: `RsvpPage` draws the word in one non-wrapping `TextBlock` and is expected to clip long words; fix sketch (`Viewbox` `DownOnly`) not applied | n/a | Windows follow-up for #131 is open |
 # PLATFORM_VERIFICATION.md
 
 What has actually been verified, on which machine, when. Update the row whenever you build,

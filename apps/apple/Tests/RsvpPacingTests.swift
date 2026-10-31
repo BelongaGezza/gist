@@ -194,6 +194,85 @@ final class RsvpPacingTests: XCTestCase {
         XCTAssertEqual(split.before + split.focus + split.after, "")
     }
 
+    // MARK: - OrpWordFit (long-word scale-to-fit, issue #131)
+
+    func testOrpFitScaleIsOneWhenWordFits() {
+        let s = OrpWordFit.scale(
+            prefixWidth: 100, focusWidth: 34, suffixWidth: 100, availableWidth: 700, fontSize: 56)
+        XCTAssertEqual(s, 1.0)
+    }
+
+    func testOrpFitScaleShrinksToFitExactly() {
+        // half needed = 400 + 17 = 417; available/2 = 350 -> 350/417.
+        let s = OrpWordFit.scale(
+            prefixWidth: 400, focusWidth: 34, suffixWidth: 100, availableWidth: 700, fontSize: 56)
+        XCTAssertEqual(s, 350.0 / 417.0, accuracy: 0.0001)
+    }
+
+    func testOrpFitUsesTheWiderSideSoPivotStaysCentred() {
+        let a = OrpWordFit.scale(
+            prefixWidth: 400, focusWidth: 34, suffixWidth: 50, availableWidth: 700, fontSize: 56)
+        let b = OrpWordFit.scale(
+            prefixWidth: 50, focusWidth: 34, suffixWidth: 400, availableWidth: 700, fontSize: 56)
+        XCTAssertEqual(a, b, accuracy: 0.0001)
+    }
+
+    func testOrpFitNeverDrawsBelowEightPoints() {
+        let floor = OrpWordFit.minimumScale(fontSize: 56)
+        XCTAssertEqual(floor * 56, 8, accuracy: 0.0001)
+        // A 256-character token in a 700 pt pane would need ~0.06 unfloored.
+        let s = OrpWordFit.scale(
+            prefixWidth: 4400, focusWidth: 34, suffixWidth: 4400, availableWidth: 700, fontSize: 56)
+        XCTAssertEqual(s, floor, accuracy: 0.0001)
+        XCTAssertGreaterThanOrEqual(s * 56, 8 - 0.0001)
+    }
+
+    func testOrpFitDegenerateInputsDoNotProduceNaNOrZero() {
+        // Empty token (paragraph break): nothing to measure.
+        XCTAssertEqual(
+            OrpWordFit.scale(
+                prefixWidth: 0, focusWidth: 0, suffixWidth: 0, availableWidth: 700, fontSize: 56), 1)
+        // No room at all.
+        XCTAssertEqual(
+            OrpWordFit.scale(
+                prefixWidth: 100, focusWidth: 34, suffixWidth: 100, availableWidth: 0, fontSize: 56), 1)
+        XCTAssertEqual(OrpWordFit.minimumScale(fontSize: 0), 1)
+        // Font already at or below the floor never scales up past 1.
+        XCTAssertEqual(OrpWordFit.minimumScale(fontSize: 6), 1)
+    }
+
+    func testOrpFitSideWidthKeepsScaledRowTheAvailableWidth() {
+        let scale: CGFloat = 0.5
+        let side = OrpWordFit.sideWidth(availableWidth: 700, focusWidth: 34, scale: scale)
+        XCTAssertEqual((2 * side + 34) * scale, 700, accuracy: 0.0001)
+        XCTAssertEqual(OrpWordFit.sideWidth(availableWidth: 700, focusWidth: 34, scale: 0), 0)
+    }
+
+    func testOrpFitLongWordsFitTheDefaultPaneWithRealOrpSplit() throws {
+        // 756 pt pane (900 pt window, 144 pt sidebar), the default RSVP font size.
+        let available: CGFloat = 756 - 2 * OrpWordFit.horizontalMargin
+        let font = NSFont.monospacedSystemFont(ofSize: 56, weight: .regular)
+        for word in [
+            "Pneumonoultramicroscopicsilicovolcanoconiosis",
+            "https://example.com/a/very/long/path?q=1",
+            "straightforward",
+        ] {
+            let split = try rsvpOrpSplit(word: word)
+            let focus = OrpWordFit.width(split.focus, font: font)
+            let scale = OrpWordFit.scale(
+                prefixWidth: OrpWordFit.width(split.before, font: font),
+                focusWidth: focus,
+                suffixWidth: OrpWordFit.width(split.after, font: font),
+                availableWidth: available, fontSize: 56)
+            XCTAssertGreaterThanOrEqual(scale * 56, 8 - 0.0001, word)
+            let side = OrpWordFit.sideWidth(availableWidth: available, focusWidth: focus, scale: scale)
+            // The wider of prefix/suffix fits its side frame at this scale.
+            XCTAssertLessThanOrEqual(
+                max(OrpWordFit.width(split.before, font: font), OrpWordFit.width(split.after, font: font)),
+                side + 1, word)
+        }
+    }
+
     // MARK: - RsvpScrubMath (scrub/seek pure math)
 
     func testScrubIndexForFractionEndpoints() {
