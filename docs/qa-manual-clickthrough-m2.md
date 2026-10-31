@@ -160,6 +160,15 @@ them, so do the reading steps first.)*
 - [ ] Closing and reopening resumes roughly where you left off (separate
       persistence mechanism from Flow View's — see CLAUDE.md's note on why
       the two don't share storage).
+- [ ] Long words (issue #131): import a text file containing
+      `Pneumonoultramicroscopicsilicovolcanoconiosis`, `straightforward` and a
+      ~40-character URL. Each shows in full (shrunk, never below ~8 pt), the
+      accent-coloured pivot letter stays on the centre line, and nothing is
+      cut with an "…" beside the pivot.
+- [ ] Narrow the window to its minimum while a short word such as `reading`
+      is shown: the pivot letter is still visible (it used to vanish).
+- [ ] During playback the window does not resize or jump when a long word
+      appears.
 
 ## Reporting back
 

@@ -34,9 +34,9 @@ import SwiftUI
 // `FlowViewSwiftUINative`'s own reading typography (the retired rotary dial,
 // `OrpWordView`, and Flow View's `TypographySettings.fontSize`-driven body
 // text) is intentionally decoupled from the OS's Dynamic Type setting --
-// both already expose their own dedicated, app-level font-size control
-// (the RSVP WPM/size controls' sibling "Aa" typography menu in Flow View,
-// and `TypographySettings.range`), the same "reading apps get their own
+// Flow View exposes its own app-level font-size control (the "Aa" typography
+// menu, `TypographySettings.range`); RSVP does NOT yet (`OrpWordView` is fixed
+// at 56 pt and only scales *down* to fit, issue #131), the same "reading apps get their own
 // font-size slider, separate from system Dynamic Type" convention Apple
 // Books/Kindle use. That is a deliberate, pre-existing design choice, not a
 // gap this pass introduces or needs to fix -- verified by inspection of
