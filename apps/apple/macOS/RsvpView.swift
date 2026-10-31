@@ -366,21 +366,85 @@ struct OrpWordView: View {
     private var word: String { split.before + split.focus + split.after }
 
     var body: some View {
-        HStack(spacing: 0) {
-            Text(split.before)
-                .frame(width: fontSize * 5, alignment: .trailing)
-            Text(split.focus)
-                .foregroundStyle(theme.accent)
-            Text(split.after)
-                .frame(width: fontSize * 5, alignment: .leading)
+        GeometryReader { proxy in
+            let available = max(0, proxy.size.width - 2 * OrpWordFit.horizontalMargin)
+            let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+            let focusWidth = OrpWordFit.width(split.focus, font: font)
+            let scale = OrpWordFit.scale(
+                prefixWidth: OrpWordFit.width(split.before, font: font),
+                focusWidth: focusWidth,
+                suffixWidth: OrpWordFit.width(split.after, font: font),
+                availableWidth: available,
+                fontSize: fontSize)
+            let sideWidth = OrpWordFit.sideWidth(
+                availableWidth: available, focusWidth: focusWidth, scale: scale)
+            // Equal side frames keep the pivot exactly at the centre. Words that
+            // still do not fit at the minimum scale are cut at their far ends.
+            HStack(spacing: 0) {
+                Text(split.before)
+                    .lineLimit(1).truncationMode(.head)
+                    .frame(width: sideWidth, alignment: .trailing)
+                Text(split.focus)
+                    .fixedSize()  // the pivot glyph must never be squeezed out
+                    .foregroundStyle(theme.accent)
+                Text(split.after)
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(width: sideWidth, alignment: .leading)
+            }
+            .font(.system(size: fontSize, weight: .regular, design: .monospaced))
+            .foregroundStyle(theme.foreground)
+            .scaleEffect(scale)
+            // Bounding frame: a bare `.fixedSize().scaleEffect` leaks the
+            // unscaled width into layout and grows the window's minimum width.
+            .frame(width: proxy.size.width, height: fontSize * 1.5)
         }
-        .font(.system(size: fontSize, weight: .regular, design: .monospaced))
-        .foregroundStyle(theme.foreground)
         // Fixed height: an empty token (paragraph/section break) renders no
         // glyphs, which would otherwise collapse the row and make the page jump.
         .frame(height: fontSize * 1.5)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(word)
+    }
+}
+
+/// Pure fit maths for `OrpWordView`, kept out of the view so it is
+/// unit-testable without rendering (like `RsvpScrubMath`).
+enum OrpWordFit {
+    /// The word is never drawn smaller than this many points.
+    static let minimumPointSize: CGFloat = 8
+    /// Clear space kept on each side of the pane.
+    static let horizontalMargin: CGFloat = 24
+
+    /// Measured, not `count * advance`, so CJK/emoji/combining fallbacks are right.
+    static func width(_ text: String, font: NSFont) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        return ceil((text as NSString).size(withAttributes: [.font: font]).width)
+    }
+
+    /// Smallest allowed scale at `fontSize` (`minimumPointSize / fontSize`, capped at 1).
+    static func minimumScale(fontSize: CGFloat) -> CGFloat {
+        guard fontSize > 0 else { return 1 }
+        return min(1, minimumPointSize / fontSize)
+    }
+
+    /// Uniform scale at which a pivot-centred word fits `availableWidth`. The
+    /// pivot stays at the pane centre, so each side may use only half the pane:
+    /// `available / 2 / (max(prefix, suffix) + focus / 2)`, clamped to
+    /// `minimumScale(fontSize:)...1`. Degenerate input (empty token, no width) is 1.
+    static func scale(
+        prefixWidth: CGFloat, focusWidth: CGFloat, suffixWidth: CGFloat,
+        availableWidth: CGFloat, fontSize: CGFloat
+    ) -> CGFloat {
+        let halfNeeded = max(prefixWidth, suffixWidth) + focusWidth / 2
+        guard halfNeeded > 0, availableWidth > 0 else { return 1 }
+        let fit = availableWidth / 2 / halfNeeded
+        return max(minimumScale(fontSize: fontSize), min(1, fit))
+    }
+
+    /// Width of each (equal) side frame so the scaled row is exactly
+    /// `availableWidth` wide with the pivot at the centre.
+    static func sideWidth(availableWidth: CGFloat, focusWidth: CGFloat, scale: CGFloat) -> CGFloat {
+        guard scale > 0 else { return 0 }
+        return max(0, (availableWidth / scale - focusWidth) / 2)
     }
 }
 
