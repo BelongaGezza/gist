@@ -5,10 +5,18 @@ edition = "2021"
 publish = false
 license = "MIT"
 
+[features]
+default = ["encoding-detection"]
+# BOM / UTF-16 / legacy code-page detection and named-encoding overrides.
+# Off => UTF-8 only (strip a UTF-8 BOM, `ParseError::Utf8` on invalid bytes).
+# Turn it off for size-sensitive consumers (e.g. a WASM build); ~200 KB of
+# encoding tables are not compiled. See issue #132.
+encoding-detection = ["dep:encoding_rs", "dep:chardetng"]
+
 [dependencies]
 gist-model = { path = "../gist-model" }
-encoding_rs = "0.8"
-chardetng = "1.0"
+encoding_rs = { version = "0.8", optional = true }
+chardetng = { version = "1.0", optional = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
