@@ -73,10 +73,10 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <!-- 1. Word: 48 epx Georgia, centred, one line, no wrap/trim. Not live-announced (spec 8). -->
+            <!-- 1. Word: 48 epx Georgia, centred, one line, no wrap; shrunk to fit by FitWord (#131), ellipsis only below the minimum size. Not live-announced (spec 8). -->
             <TextBlock x:Name="WordText" Grid.Row="0" HorizontalAlignment="Center" VerticalAlignment="Bottom"
                        Margin="0,0,0,24" FontFamily="Georgia" FontSize="48" TextWrapping="NoWrap" SizeChanged="OnWordSizeChanged"
-                       TextTrimming="None" TextAlignment="Center"
+                       TextTrimming="CharacterEllipsis" TextAlignment="Center"
                        AutomationProperties.AutomationId="RsvpPage_Word"
                        AutomationProperties.LiveSetting="Off" />
 

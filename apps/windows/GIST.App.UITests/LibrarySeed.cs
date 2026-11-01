@@ -66,6 +66,20 @@ public static class LibrarySeed
         return new SeededLibrary(seeded, CollectionName, userFiles);
     }
 
+    /// <summary>
+    /// Adds one more text item to an already-seeded scratch root (call after <see cref="SeedAsync"/>, before the app
+    /// starts). Kept separate so the five-item library most tests assert on is unchanged.
+    /// </summary>
+    public static async Task<SeededItem> AddTextItemAsync(string root, string fileName, string text)
+    {
+        var paths = GistStoragePaths.ForRoot(root);
+        var path = Path.Combine(root, "user-files", fileName);
+        await File.WriteAllTextAsync(path, text);
+        using var core = new CoreClient(new CoreClientOptions(paths.DbPath, paths.StorageDir, new DpapiKeyProvider(paths.KeyDir)));
+        Assert.True(await core.InitializeAsync(), $"add-item init failed: {core.State}");
+        return await ImportAsync(core, path, "", Array.Empty<string>());
+    }
+
     private static async Task<SeededItem> ImportAsync(CoreClient core, string path, string word, string[] tags)
     {
         var id = await core.ImportFileAsync(path);
