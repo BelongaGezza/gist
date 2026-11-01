@@ -9,27 +9,26 @@ updates:
   # "Dependabot alerts" and "Dependabot security updates" enabled in the
   # repo's Settings > Security page — that's an account-level toggle, not
   # something a config file can turn on.
+  # One entry covers both Cargo workspaces. fuzz/ is its own workspace with its
+  # own tracked Cargo.lock, which "/" alone does not index; without it the fuzz
+  # lockfile silently goes stale and accumulates advisories (quick-xml,
+  # rustls-webpki, time). Listing both directories here, with grouped
+  # patch/minor bumps, avoids raising the same bump twice.
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories:
+      - "/"
+      - "/fuzz"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
       - "rust"
-
-  # fuzz/ is its own Cargo workspace with its own tracked Cargo.lock, which the
-  # "/" entry above does not index. Without this, the fuzz lockfile silently
-  # goes stale and accumulates advisories (quick-xml, rustls-webpki, time).
-  - package-ecosystem: "cargo"
-    directory: "/fuzz"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "rust"
-      - "fuzz"
+    groups:
+      cargo-patch-minor:
+        update-types:
+          - "patch"
+          - "minor"
 
   # Companion to F3's SHA-pinning policy (every `uses:` line pinned to a full
   # commit SHA) — Dependabot opens a PR to bump the pin (with the version
