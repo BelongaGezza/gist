@@ -138,6 +138,38 @@ public class RsvpReaderTests
         Shot(c.S, "rsvp-playing");
     }
 
+    // Issue #131: a token can be up to 256 bytes (URLs, identifiers, German compounds). The word must be shrunk to fit
+    // the window, not left wider than the reader and clipped. The fit maths is proven in RsvpWordFitTests; this proves
+    // the page applies it at the default window size.
+    [UiFact]
+    public async Task A_long_word_is_fitted_inside_the_reader_instead_of_overflowing_it()
+    {
+        const string longWord = "https://example.org/a/very/long/path/segment/that/keeps/going/and/going/until/it/is/far/wider/than/the/window";
+        using var s = await GistAppSession.StartAsync(async root =>
+        {
+            await LibrarySeed.SeedAsync(root);
+            await LibrarySeed.AddTextItemAsync(root, "long-word.txt", longWord + " then a short tail.\n");
+        });
+        var d = new LibraryDriver(s);
+        d.WaitForLibrary();
+        d.WaitForTitles(t => t.Length == 6, "six seeded rows");
+
+        OpenReader(d, "long-word");
+
+        Assert.Equal(longWord, Word(d)); // the whole token is still exposed to assistive tech, never truncated
+        var longHeight = d.Need("RsvpPage_Word").BoundingRectangle.Height;
+        Shot(s, "rsvp-long-word");
+
+        d.Press(VirtualKeyShort.RIGHT);
+        LibraryDriver.PollUntil(() => Word(d) == "then", "stepped to a short word");
+        var shortHeight = d.Need("RsvpPage_Word").BoundingRectangle.Height;
+
+        // UIA reports the layout slot (clamped to the reader width), not the unclipped text, so overflow itself is
+        // invisible to it. What it does show is the line height, which tracks the font size: the long word must have
+        // been scaled below the size a short word gets. Relative, so it holds at any DPI.
+        Assert.True(longHeight < shortHeight, $"long word line height {longHeight} should be below the short word's {shortHeight}");
+    }
+
     /// <summary>Best-effort PNG for the human visual check; only when GIST_UI_SCREENSHOT_DIR is set.</summary>
     private static void Shot(GistAppSession s, string name)
     {

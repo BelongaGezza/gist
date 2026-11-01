@@ -150,8 +150,40 @@ public sealed partial class RsvpPage : Page
     // Large text sizes (Settings > Accessibility > Text size) can make the controls taller than the window. Keep the
     // panel at least viewport-high so the star rows still centre the word when there is room, and let the
     // ScrollViewer scroll when there is not, instead of clipping the word under the header.
-    private void OnReaderScrollSizeChanged(object sender, SizeChangedEventArgs e) =>
+    private void OnReaderScrollSizeChanged(object sender, SizeChangedEventArgs e)
+    {
         ReaderPanel.MinHeight = Math.Max(0, ReaderScroll.ActualHeight - ReaderPanel.Margin.Top - ReaderPanel.Margin.Bottom);
+        FitWord(); // a narrower window can make the current word too wide (issue #131)
+    }
+
+    // Long words (URLs, identifiers, compounds; tokens can be up to 256 bytes) must shrink to fit rather than clip
+    // (issue #131). The size comes from the pure RsvpWordFit helper; anything still too wide at the minimum size is
+    // cut with an ellipsis. WordText.Text is never altered, so Narrator and "Read current word" get the whole token.
+    private const double BaseWordFontSize = 48;
+
+    private void FitWord()
+    {
+        var available = ReaderScroll.ViewportWidth - ReaderPanel.Margin.Left - ReaderPanel.Margin.Right
+                        - WordText.Margin.Left - WordText.Margin.Right;
+        var limit = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
+
+        WordText.MaxWidth = double.PositiveInfinity;
+        WordText.FontSize = BaseWordFontSize;
+        if (string.IsNullOrEmpty(WordText.Text) || available <= 0) return;
+
+        WordText.Measure(limit);
+        var size = RsvpWordFit.FittedFontSize(BaseWordFontSize, WordText.DesiredSize.Width, available);
+        if (size < BaseWordFontSize)
+        {
+            WordText.FontSize = size;
+            // Glyph widths are not perfectly linear in size (hinting), so correct once.
+            WordText.Measure(limit);
+            size = RsvpWordFit.FittedFontSize(size, WordText.DesiredSize.Width, available);
+            WordText.FontSize = size;
+        }
+
+        WordText.MaxWidth = available;
+    }
 
     // The word row must always be tall enough for the word itself. Only ever grows (an empty TextBlock reports no
     // height, which would otherwise make the layout jump between words).
@@ -183,7 +215,11 @@ public sealed partial class RsvpPage : Page
         _syncing = true;
         try
         {
-            if (WordText.Text != vm.Word) WordText.Text = vm.Word;
+            if (WordText.Text != vm.Word)
+            {
+                WordText.Text = vm.Word;
+                FitWord();
+            }
             if (ProgressText.Text != vm.ProgressText) ProgressText.Text = vm.ProgressText;
             if (WpmLabel.Text != vm.WpmLabel) WpmLabel.Text = vm.WpmLabel;
 
