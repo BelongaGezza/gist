@@ -15,10 +15,13 @@ tracing    = { workspace = true }
 # static archive); the dylib is embedded in the app bundle and loaded at
 # runtime by path (see ADR-002 addendum, N8).
 #   default-features = false drops `image_latest` (we never render pages, so
-#   the `image` crate is not needed) while keeping `pdfium_latest` bindings
-#   and `thread_safe` (pdfium itself is not thread-safe; the feature
-#   serialises calls) selected explicitly.
-pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+#   the `image` crate is not needed) while keeping `thread_safe`
+#   (pdfium itself is not thread-safe; the feature serialises calls).
+#   The bindings feature is pinned to `pdfium_7881` (highest <= the pinned
+#   chromium/8076 binary), NOT `pdfium_latest`: 0.9.5 moved `latest` to 8125,
+#   whose symbols the pinned library lacks, so every bind failed. Raise it
+#   only together with PDFIUM_TAG in tools/fetch-pdfium.sh.
+pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
