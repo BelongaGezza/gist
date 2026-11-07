@@ -1,16 +1,20 @@
+#[cfg(feature = "encoding-detection")]
 use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8};
 use gist_model::{Block, Document, Metadata, ParseLimits, Section, TextRun};
 use std::borrow::Cow;
 
 /// Maximum bytes fed to the statistical detector. Detection quality does not
 /// improve meaningfully past this, and it bounds the cost on huge files.
+#[cfg(feature = "encoding-detection")]
 const DETECT_SAMPLE_BYTES: usize = 1 << 20;
 
 /// Longest encoding label accepted from a caller (labels are short ASCII).
+#[cfg(feature = "encoding-detection")]
 const MAX_LABEL_LEN: usize = 64;
 
 /// Fewer non-ASCII bytes than this in the sample makes a legacy-code-page
 /// guess "uncertain" (too little evidence to tell code pages apart).
+#[cfg(feature = "encoding-detection")]
 const MIN_NON_ASCII_FOR_CONFIDENCE: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +74,7 @@ pub struct ParsedText {
     pub encoding: EncodingInfo,
 }
 
+#[cfg(feature = "encoding-detection")]
 fn expanded_too_large(worst: usize, limits: &ParseLimits) -> ParseError {
     ParseError::ResourceLimitExceeded {
         limit: format!("max_expanded_bytes={}", limits.max_expanded_bytes),
@@ -80,6 +85,7 @@ fn expanded_too_large(worst: usize, limits: &ParseLimits) -> ParseError {
 
 /// Heuristic for BOM-less UTF-16 of mostly-Latin text: one byte of each pair
 /// is NUL. Returns `(encoding, confident)`.
+#[cfg(feature = "encoding-detection")]
 fn sniff_utf16_without_bom(bytes: &[u8]) -> Option<(&'static Encoding, bool)> {
     let pairs = bytes.len() / 2;
     if pairs == 0 {
@@ -102,6 +108,7 @@ fn sniff_utf16_without_bom(bytes: &[u8]) -> Option<(&'static Encoding, bool)> {
     Some((enc, pairs >= 4))
 }
 
+#[cfg(feature = "encoding-detection")]
 fn pick_encoding(bytes: &[u8]) -> (&'static Encoding, EncodingSource, bool) {
     if let Some((enc, _)) = Encoding::for_bom(bytes) {
         return (enc, EncodingSource::Bom, false);
@@ -128,12 +135,7 @@ fn pick_encoding(bytes: &[u8]) -> (&'static Encoding, EncodingSource, bool) {
     )
 }
 
-/// Decode `bytes` per `choice`, enforcing `limits` before allocating.
-fn decode<'a>(
-    bytes: &'a [u8],
-    choice: EncodingChoice<'_>,
-    limits: &ParseLimits,
-) -> Result<(Cow<'a, str>, EncodingInfo), ParseError> {
+fn check_max_bytes(bytes: &[u8], limits: &ParseLimits) -> Result<(), ParseError> {
     if bytes.len() > limits.max_bytes {
         return Err(ParseError::ResourceLimitExceeded {
             limit: format!("max_bytes={}", limits.max_bytes),
@@ -141,6 +143,46 @@ fn decode<'a>(
             kind: gist_model::LimitKind::TooLarge,
         });
     }
+    Ok(())
+}
+
+/// UTF-8-only decode (the `encoding-detection` feature is off): strips a
+/// UTF-8 BOM and returns [`ParseError::Utf8`] for invalid bytes. Any named
+/// encoding is [`ParseError::UnknownEncoding`].
+#[cfg(not(feature = "encoding-detection"))]
+fn decode<'a>(
+    bytes: &'a [u8],
+    choice: EncodingChoice<'_>,
+    limits: &ParseLimits,
+) -> Result<(Cow<'a, str>, EncodingInfo), ParseError> {
+    check_max_bytes(bytes, limits)?;
+    if matches!(choice, EncodingChoice::Named(_)) {
+        return Err(ParseError::UnknownEncoding);
+    }
+    let (body, source) = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF][..]) {
+        Some(rest) => (rest, EncodingSource::Bom),
+        None => (bytes, EncodingSource::Utf8),
+    };
+    let text = std::str::from_utf8(body)?;
+    Ok((
+        Cow::Borrowed(text),
+        EncodingInfo {
+            name: "UTF-8".to_string(),
+            source,
+            uncertain: false,
+            lossy: false,
+        },
+    ))
+}
+
+/// Decode `bytes` per `choice`, enforcing `limits` before allocating.
+#[cfg(feature = "encoding-detection")]
+fn decode<'a>(
+    bytes: &'a [u8],
+    choice: EncodingChoice<'_>,
+    limits: &ParseLimits,
+) -> Result<(Cow<'a, str>, EncodingInfo), ParseError> {
+    check_max_bytes(bytes, limits)?;
 
     let (enc, source, uncertain) = match choice {
         EncodingChoice::Auto => pick_encoding(bytes),
@@ -314,10 +356,12 @@ mod tests {
             .collect()
     }
 
+    #[cfg(feature = "encoding-detection")]
     fn info(bytes: &[u8]) -> EncodingInfo {
         detect_encoding(bytes, EncodingChoice::Auto, &ParseLimits::default()).unwrap()
     }
 
+    #[cfg(feature = "encoding-detection")]
     fn utf16(s: &str, le: bool, bom: bool) -> Vec<u8> {
         let mut out = Vec::new();
         if bom {
@@ -411,225 +455,287 @@ mod tests {
         );
     }
 
-    // ── Encoding detection (SC-01) ─────────────────────────────────────────
+    #[cfg(not(feature = "encoding-detection"))]
+    mod utf8_only {
+        use super::*;
 
-    #[test]
-    fn plain_utf8_is_confident_and_unchanged() {
-        let i = info("Héllo wörld — 日本語".as_bytes());
-        assert_eq!(i.name, "UTF-8");
-        assert_eq!(i.source, EncodingSource::Utf8);
-        assert!(!i.uncertain && !i.lossy);
-        assert_eq!(
-            paragraphs_of("Héllo wörld — 日本語".as_bytes()),
-            vec!["Héllo wörld — 日本語"]
-        );
-    }
-
-    #[test]
-    fn empty_input_is_utf8_and_confident() {
-        let i = info(b"");
-        assert_eq!(i.name, "UTF-8");
-        assert!(!i.uncertain);
-    }
-
-    #[test]
-    fn utf8_bom_is_detected_and_stripped() {
-        let mut b = vec![0xEF, 0xBB, 0xBF];
-        b.extend("Hello".as_bytes());
-        let i = info(&b);
-        assert_eq!((i.name.as_str(), i.source), ("UTF-8", EncodingSource::Bom));
-        assert_eq!(paragraphs_of(&b), vec!["Hello"]);
-    }
-
-    #[test]
-    fn utf16_le_and_be_with_bom() {
-        for le in [true, false] {
-            let b = utf16("Hello\n\nWörld 日本", le, true);
-            let i = info(&b);
-            assert_eq!(i.name, if le { "UTF-16LE" } else { "UTF-16BE" });
-            assert_eq!(i.source, EncodingSource::Bom);
-            assert!(!i.uncertain);
-            assert_eq!(paragraphs_of(&b), vec!["Hello", "Wörld 日本"]);
+        fn info(bytes: &[u8]) -> Result<EncodingInfo, ParseError> {
+            detect_encoding(bytes, EncodingChoice::Auto, &ParseLimits::default())
         }
-    }
 
-    #[test]
-    fn utf16_without_bom_latin_text_is_sniffed() {
-        for le in [true, false] {
-            let b = utf16("The quick brown fox jumps.\n\nSecond paragraph.", le, false);
-            let i = info(&b);
-            assert_eq!(i.name, if le { "UTF-16LE" } else { "UTF-16BE" });
-            assert_eq!(i.source, EncodingSource::Detected);
-            assert!(!i.uncertain);
-            assert_eq!(
-                paragraphs_of(&b),
-                vec!["The quick brown fox jumps.", "Second paragraph."]
+        #[test]
+        fn valid_utf8_decodes() {
+            let i = info("Héllo — 日本語".as_bytes()).unwrap();
+            assert_eq!((i.name.as_str(), i.source), ("UTF-8", EncodingSource::Utf8));
+            assert!(!i.uncertain && !i.lossy);
+        }
+
+        #[test]
+        fn utf8_bom_is_stripped() {
+            let mut b = vec![0xEF, 0xBB, 0xBF];
+            b.extend("Hello".as_bytes());
+            assert_eq!(info(&b).unwrap().source, EncodingSource::Bom);
+            assert_eq!(paragraphs_of(&b), vec!["Hello"]);
+        }
+
+        #[test]
+        fn invalid_utf8_is_an_error() {
+            for b in [&b"caf\xE9"[..], &[0xFF, 0xFE, b'a', 0]] {
+                assert!(matches!(
+                    parse(b, "t", &ParseLimits::default()),
+                    Err(ParseError::Utf8(_))
+                ));
+            }
+        }
+
+        #[test]
+        fn named_encoding_is_unknown() {
+            let r = parse_with_encoding(
+                b"abc",
+                "t",
+                &ParseLimits::default(),
+                EncodingChoice::Named("windows-1252"),
             );
+            assert!(matches!(r, Err(ParseError::UnknownEncoding)));
         }
-    }
 
-    #[test]
-    fn tiny_bomless_utf16_is_flagged_uncertain() {
-        let i = info(&utf16("A", true, false));
-        assert_eq!(i.name, "UTF-16LE");
-        assert!(i.uncertain);
-    }
-
-    #[test]
-    fn legacy_windows_1252_is_decoded() {
-        // "café – “quoted”" in windows-1252 (0x96 en dash, 0x93/0x94 quotes).
-        let b =
-            b"Le caf\xE9 \x96 \x93bonjour\x94, dit-il. Voil\xE0 une longue phrase fran\xE7aise.";
-        let i = info(b);
-        assert_eq!(i.source, EncodingSource::Detected);
-        assert!(!i.lossy);
-        let text = paragraphs_of(b).remove(0);
-        assert!(text.contains("café"), "{text}");
-        assert!(text.contains('\u{2013}'), "{text}");
-    }
-
-    #[test]
-    fn sparse_legacy_evidence_is_uncertain_and_rich_evidence_is_not() {
-        assert!(info(b"caf\xE9").uncertain);
-        let rich = b"Voil\xE0 une longue phrase fran\xE7aise avec beaucoup d'accents \xE9\xE8\xEA\xEB \xE0\xE2 \xF4\xFB \xE7 et encore \xE9t\xE9, \xE0 l'\xE9cole d'\xE9t\xE9 pr\xE8s de l'\xEEle.";
-        assert!(!info(rich).uncertain);
-    }
-
-    #[test]
-    fn invalid_utf8_never_errors_and_is_never_utf8_source() {
-        let b = [b'a', 0xFF, 0xFE, 0xFD, b'b', 0x80, 0x81, b'\n'];
-        let p = parse_with_encoding(&b, "t", &ParseLimits::default(), EncodingChoice::Auto)
-            .expect("must not fail");
-        assert_ne!(p.encoding.source, EncodingSource::Utf8);
-    }
-
-    #[test]
-    fn override_names_an_encoding_and_wins_over_detection() {
-        // KOI8-R bytes for "Привет" ; forcing windows-1251 yields different text.
-        let koi8: &[u8] = &[0xF0, 0xD2, 0xC9, 0xD7, 0xC5, 0xD4];
-        let p = parse_with_encoding(
-            koi8,
-            "t",
-            &ParseLimits::default(),
-            EncodingChoice::Named("koi8-r"),
-        )
-        .unwrap();
-        assert_eq!(p.encoding.name, "KOI8-R");
-        assert_eq!(p.encoding.source, EncodingSource::Override);
-        assert!(!p.encoding.uncertain);
-        assert_eq!(p.document.sections[0].blocks[0].plain_text(), "Привет");
-    }
-
-    #[test]
-    fn override_strips_matching_bom_but_ignores_it_for_choice() {
-        let b = utf16("Hi", true, true);
-        let p = parse_with_encoding(
-            &b,
-            "t",
-            &ParseLimits::default(),
-            EncodingChoice::Named("utf-16le"),
-        )
-        .unwrap();
-        assert_eq!(p.document.sections[0].blocks[0].plain_text(), "Hi");
-    }
-
-    #[test]
-    fn override_on_malformed_bytes_is_lossy_not_an_error() {
-        let p = parse_with_encoding(
-            &[b'a', 0xFF, b'b'],
-            "t",
-            &ParseLimits::default(),
-            EncodingChoice::Named("utf-8"),
-        )
-        .unwrap();
-        assert!(p.encoding.lossy);
-        assert_eq!(p.document.sections[0].blocks[0].plain_text(), "a\u{FFFD}b");
-    }
-
-    #[test]
-    fn unknown_or_hostile_labels_are_rejected() {
-        let l = ParseLimits::default();
-        for label in ["", "nope", "replacement", &"x".repeat(10_000)] {
+        #[test]
+        fn max_bytes_is_enforced() {
+            let limits = ParseLimits {
+                max_bytes: 4,
+                ..ParseLimits::default()
+            };
             assert!(matches!(
-                parse_with_encoding(b"abc", "t", &l, EncodingChoice::Named(label)),
-                Err(ParseError::UnknownEncoding)
+                parse(b"hello", "t", &limits),
+                Err(ParseError::ResourceLimitExceeded { .. })
             ));
         }
     }
 
-    #[test]
-    fn mixed_valid_utf8_then_legacy_bytes_does_not_panic() {
-        let mut b = "Grüße ".as_bytes().to_vec();
-        b.extend([0xE9, 0xE8, 0xE0, 0x20]);
-        let p = parse_with_encoding(&b, "t", &ParseLimits::default(), EncodingChoice::Auto)
-            .expect("lossy or guessed, but never an error");
-        assert!(!p.document.sections.is_empty());
-    }
+    #[cfg(feature = "encoding-detection")]
+    mod detection {
+        use super::*;
 
-    #[test]
-    fn max_bytes_is_enforced_before_decoding() {
-        let limits = ParseLimits {
-            max_bytes: 10,
-            ..ParseLimits::default()
-        };
-        let err = parse(&[b'a'; 11], "t", &limits).unwrap_err();
-        assert!(matches!(
-            err,
-            ParseError::ResourceLimitExceeded {
-                kind: gist_model::LimitKind::TooLarge,
-                ..
+        // ── Encoding detection (SC-01) ─────────────────────────────────────────
+
+        #[test]
+        fn plain_utf8_is_confident_and_unchanged() {
+            let i = info("Héllo wörld — 日本語".as_bytes());
+            assert_eq!(i.name, "UTF-8");
+            assert_eq!(i.source, EncodingSource::Utf8);
+            assert!(!i.uncertain && !i.lossy);
+            assert_eq!(
+                paragraphs_of("Héllo wörld — 日本語".as_bytes()),
+                vec!["Héllo wörld — 日本語"]
+            );
+        }
+
+        #[test]
+        fn empty_input_is_utf8_and_confident() {
+            let i = info(b"");
+            assert_eq!(i.name, "UTF-8");
+            assert!(!i.uncertain);
+        }
+
+        #[test]
+        fn utf8_bom_is_detected_and_stripped() {
+            let mut b = vec![0xEF, 0xBB, 0xBF];
+            b.extend("Hello".as_bytes());
+            let i = info(&b);
+            assert_eq!((i.name.as_str(), i.source), ("UTF-8", EncodingSource::Bom));
+            assert_eq!(paragraphs_of(&b), vec!["Hello"]);
+        }
+
+        #[test]
+        fn utf16_le_and_be_with_bom() {
+            for le in [true, false] {
+                let b = utf16("Hello\n\nWörld 日本", le, true);
+                let i = info(&b);
+                assert_eq!(i.name, if le { "UTF-16LE" } else { "UTF-16BE" });
+                assert_eq!(i.source, EncodingSource::Bom);
+                assert!(!i.uncertain);
+                assert_eq!(paragraphs_of(&b), vec!["Hello", "Wörld 日本"]);
             }
-        ));
-    }
+        }
 
-    #[test]
-    fn expansion_budget_is_enforced_before_decoding_legacy_text() {
-        let limits = ParseLimits {
-            max_expanded_bytes: 100,
-            ..ParseLimits::default()
-        };
-        // 50 windows-1252 bytes could expand to 150 UTF-8 bytes in the worst case.
-        let r = parse_with_encoding(
-            &[b'a'; 50],
-            "t",
-            &limits,
-            EncodingChoice::Named("windows-1252"),
-        );
-        assert!(matches!(
-            r,
-            Err(ParseError::ResourceLimitExceeded {
-                kind: gist_model::LimitKind::ExpandedTooLarge,
-                ..
-            })
-        ));
-        // Valid UTF-8 never expands, so the same budget does not reject it.
-        assert!(parse(&[b'a'; 50], "t", &limits).is_ok());
-    }
+        #[test]
+        fn utf16_without_bom_latin_text_is_sniffed() {
+            for le in [true, false] {
+                let b = utf16("The quick brown fox jumps.\n\nSecond paragraph.", le, false);
+                let i = info(&b);
+                assert_eq!(i.name, if le { "UTF-16LE" } else { "UTF-16BE" });
+                assert_eq!(i.source, EncodingSource::Detected);
+                assert!(!i.uncertain);
+                assert_eq!(
+                    paragraphs_of(&b),
+                    vec!["The quick brown fox jumps.", "Second paragraph."]
+                );
+            }
+        }
 
-    #[test]
-    fn single_bom_only_files_are_empty_documents() {
-        assert_eq!(paragraphs_of(&[0xEF, 0xBB, 0xBF]), vec![""]);
-        assert_eq!(paragraphs_of(&[0xFF, 0xFE]), vec![""]);
-    }
+        #[test]
+        fn tiny_bomless_utf16_is_flagged_uncertain() {
+            let i = info(&utf16("A", true, false));
+            assert_eq!(i.name, "UTF-16LE");
+            assert!(i.uncertain);
+        }
 
-    #[test]
-    fn odd_length_utf16_tail_does_not_panic() {
-        let mut b = utf16("Hello world", true, true);
-        b.push(0x41);
-        assert!(parse(&b, "t", &ParseLimits::default()).is_ok());
-    }
+        #[test]
+        fn legacy_windows_1252_is_decoded() {
+            // "café – “quoted”" in windows-1252 (0x96 en dash, 0x93/0x94 quotes).
+            let b =
+            b"Le caf\xE9 \x96 \x93bonjour\x94, dit-il. Voil\xE0 une longue phrase fran\xE7aise.";
+            let i = info(b);
+            assert_eq!(i.source, EncodingSource::Detected);
+            assert!(!i.lossy);
+            let text = paragraphs_of(b).remove(0);
+            assert!(text.contains("café"), "{text}");
+            assert!(text.contains('\u{2013}'), "{text}");
+        }
 
-    #[test]
-    fn arbitrary_binary_never_panics() {
-        let mut x: u32 = 12345;
-        for len in [1usize, 2, 3, 7, 64, 1000] {
-            let b: Vec<u8> = (0..len)
-                .map(|_| {
-                    x = x.wrapping_mul(1664525).wrapping_add(1013904223);
-                    (x >> 24) as u8
+        #[test]
+        fn sparse_legacy_evidence_is_uncertain_and_rich_evidence_is_not() {
+            assert!(info(b"caf\xE9").uncertain);
+            let rich = b"Voil\xE0 une longue phrase fran\xE7aise avec beaucoup d'accents \xE9\xE8\xEA\xEB \xE0\xE2 \xF4\xFB \xE7 et encore \xE9t\xE9, \xE0 l'\xE9cole d'\xE9t\xE9 pr\xE8s de l'\xEEle.";
+            assert!(!info(rich).uncertain);
+        }
+
+        #[test]
+        fn invalid_utf8_never_errors_and_is_never_utf8_source() {
+            let b = [b'a', 0xFF, 0xFE, 0xFD, b'b', 0x80, 0x81, b'\n'];
+            let p = parse_with_encoding(&b, "t", &ParseLimits::default(), EncodingChoice::Auto)
+                .expect("must not fail");
+            assert_ne!(p.encoding.source, EncodingSource::Utf8);
+        }
+
+        #[test]
+        fn override_names_an_encoding_and_wins_over_detection() {
+            // KOI8-R bytes for "Привет" ; forcing windows-1251 yields different text.
+            let koi8: &[u8] = &[0xF0, 0xD2, 0xC9, 0xD7, 0xC5, 0xD4];
+            let p = parse_with_encoding(
+                koi8,
+                "t",
+                &ParseLimits::default(),
+                EncodingChoice::Named("koi8-r"),
+            )
+            .unwrap();
+            assert_eq!(p.encoding.name, "KOI8-R");
+            assert_eq!(p.encoding.source, EncodingSource::Override);
+            assert!(!p.encoding.uncertain);
+            assert_eq!(p.document.sections[0].blocks[0].plain_text(), "Привет");
+        }
+
+        #[test]
+        fn override_strips_matching_bom_but_ignores_it_for_choice() {
+            let b = utf16("Hi", true, true);
+            let p = parse_with_encoding(
+                &b,
+                "t",
+                &ParseLimits::default(),
+                EncodingChoice::Named("utf-16le"),
+            )
+            .unwrap();
+            assert_eq!(p.document.sections[0].blocks[0].plain_text(), "Hi");
+        }
+
+        #[test]
+        fn override_on_malformed_bytes_is_lossy_not_an_error() {
+            let p = parse_with_encoding(
+                &[b'a', 0xFF, b'b'],
+                "t",
+                &ParseLimits::default(),
+                EncodingChoice::Named("utf-8"),
+            )
+            .unwrap();
+            assert!(p.encoding.lossy);
+            assert_eq!(p.document.sections[0].blocks[0].plain_text(), "a\u{FFFD}b");
+        }
+
+        #[test]
+        fn unknown_or_hostile_labels_are_rejected() {
+            let l = ParseLimits::default();
+            for label in ["", "nope", "replacement", &"x".repeat(10_000)] {
+                assert!(matches!(
+                    parse_with_encoding(b"abc", "t", &l, EncodingChoice::Named(label)),
+                    Err(ParseError::UnknownEncoding)
+                ));
+            }
+        }
+
+        #[test]
+        fn mixed_valid_utf8_then_legacy_bytes_does_not_panic() {
+            let mut b = "Grüße ".as_bytes().to_vec();
+            b.extend([0xE9, 0xE8, 0xE0, 0x20]);
+            let p = parse_with_encoding(&b, "t", &ParseLimits::default(), EncodingChoice::Auto)
+                .expect("lossy or guessed, but never an error");
+            assert!(!p.document.sections.is_empty());
+        }
+
+        #[test]
+        fn max_bytes_is_enforced_before_decoding() {
+            let limits = ParseLimits {
+                max_bytes: 10,
+                ..ParseLimits::default()
+            };
+            let err = parse(&[b'a'; 11], "t", &limits).unwrap_err();
+            assert!(matches!(
+                err,
+                ParseError::ResourceLimitExceeded {
+                    kind: gist_model::LimitKind::TooLarge,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn expansion_budget_is_enforced_before_decoding_legacy_text() {
+            let limits = ParseLimits {
+                max_expanded_bytes: 100,
+                ..ParseLimits::default()
+            };
+            // 50 windows-1252 bytes could expand to 150 UTF-8 bytes in the worst case.
+            let r = parse_with_encoding(
+                &[b'a'; 50],
+                "t",
+                &limits,
+                EncodingChoice::Named("windows-1252"),
+            );
+            assert!(matches!(
+                r,
+                Err(ParseError::ResourceLimitExceeded {
+                    kind: gist_model::LimitKind::ExpandedTooLarge,
+                    ..
                 })
-                .collect();
+            ));
+            // Valid UTF-8 never expands, so the same budget does not reject it.
+            assert!(parse(&[b'a'; 50], "t", &limits).is_ok());
+        }
+
+        #[test]
+        fn single_bom_only_files_are_empty_documents() {
+            assert_eq!(paragraphs_of(&[0xEF, 0xBB, 0xBF]), vec![""]);
+            assert_eq!(paragraphs_of(&[0xFF, 0xFE]), vec![""]);
+        }
+
+        #[test]
+        fn odd_length_utf16_tail_does_not_panic() {
+            let mut b = utf16("Hello world", true, true);
+            b.push(0x41);
             assert!(parse(&b, "t", &ParseLimits::default()).is_ok());
+        }
+
+        #[test]
+        fn arbitrary_binary_never_panics() {
+            let mut x: u32 = 12345;
+            for len in [1usize, 2, 3, 7, 64, 1000] {
+                let b: Vec<u8> = (0..len)
+                    .map(|_| {
+                        x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                        (x >> 24) as u8
+                    })
+                    .collect();
+                assert!(parse(&b, "t", &ParseLimits::default()).is_ok());
+            }
         }
     }
 }

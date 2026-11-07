@@ -1,3 +1,4 @@
+#![cfg(feature = "encoding-detection")]
 //! SC-01: encoding detection against the synthetic fixtures in
 //! `fixtures/txt/encodings/`.
 
