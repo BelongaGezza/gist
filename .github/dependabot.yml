@@ -40,6 +40,11 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    groups:
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   # Windows app (docs/windows-development-plan.md 4.2). Versions are pinned centrally in
   # apps/windows/Directory.Packages.props with committed packages.lock.json files; Dependabot
