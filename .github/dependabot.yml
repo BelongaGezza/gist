@@ -3,7 +3,7 @@ updates:
   # Compensating control for cargo-deny's advisories check, which currently
   # can't run in this dev environment (see CLAUDE.md's Security policies
   # section — cargo-deny 0.18.3's bundled RustSec DB parser can't read a
-  # CVSS 4.0 entry; the fix needs cargo-deny 0.20+/rustc 1.88+). Weekly
+  # CVSS 4.0 entry; the fix needs cargo-deny 0.20+/rustc 1.88+). Monthly
   # version-bump PRs surface most new advisories via updated dependency
   # versions independent of that local tooling gap. This file also needs
   # "Dependabot alerts" and "Dependabot security updates" enabled in the
@@ -19,8 +19,10 @@ updates:
       - "/"
       - "/fuzz"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
     labels:
       - "dependencies"
       - "rust"
@@ -36,7 +38,10 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "ci"
@@ -52,7 +57,9 @@ updates:
   - package-ecosystem: "nuget"
     directory: "/apps/windows"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
