@@ -10,7 +10,7 @@ GIST has not reached a 1.0 release. There is only one actively maintained line: 
 
 Please **do not** open a public GitHub issue for a suspected security vulnerability.
 
-Instead, email **gerrygillies@gmail.com** with:
+Instead, report it privately using GitHub's **Report a vulnerability** button on the [Security tab](https://github.com/BelongaGezza/gist/security/advisories/new), and include:
 
 - A description of the issue and its potential impact.
 - Steps to reproduce, or a proof-of-concept if you have one.

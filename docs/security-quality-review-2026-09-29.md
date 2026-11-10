@@ -1,6 +1,6 @@
 # GIST — Security & Quality Review (2026-09-29)
 
-**Prepared for:** Gerry Gillies
+**Prepared for:** BelongaGezza
 **Codebase state:** `integration/m4-2026-09-28` @ `c8e48dc` (PR #75, open against `main` @ `9a1b9c9`)
 **Method:** independent re-verification against the actual working tree and the live GitHub repository (Actions runs, Dependabot alerts, branch protection API) — not a transcription of `CLAUDE.md`'s change log. Every "confirmed" claim below was checked by reading current source, grepping for the pattern directly, or re-running the actual command in this session. Where a prior review's finding is referenced, its resolution was re-derived from source, not taken on trust.
 **Supersedes:** nothing — this is additive to `docs/security-review-v1.md` (2026-09-08, fully superseded by v2) and `docs/security-review-v2.md` (2026-09-18, still the source of truth for `F14`–`F25`/`A6`–`A7`/`N1`–`N5` methodology and closure evidence). This document's job is to (a) confirm those closures still hold after three more milestones landed, (b) audit everything shipped *since* v2 that has never had a dedicated security pass, and (c) give a combined security+quality status read of the whole app, not just the Rust core.

@@ -51,7 +51,7 @@ representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the maintainer at **gerrygillies@gmail.com**. All complaints will
+reported privately to the maintainer ([@BelongaGezza](https://github.com/BelongaGezza)) through GitHub's **Report a vulnerability** form on the [Security tab](https://github.com/BelongaGezza/gist/security/advisories/new); start the report title with "Conduct:". All complaints will
 be reviewed and investigated promptly and fairly.
 
 All maintainers are obligated to respect the privacy and security of the
